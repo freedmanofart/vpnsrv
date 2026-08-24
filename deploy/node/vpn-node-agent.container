@@ -8,6 +8,7 @@ ContainerName=vpn-node-agent
 Image=localhost/vpn-node-agent:latest
 Network=host
 EnvironmentFile=/etc/vpn-node/node-agent.env
+Volume=/var/log/vpn-xray:/var/log/xray:ro,z
 Exec=python -m app.node_agent
 
 [Service]

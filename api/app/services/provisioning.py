@@ -14,6 +14,7 @@ from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.services.xray import XrayClient, XrayError, XrayUserNotFound
+from app.core.config import settings
 
 
 class ProvisioningError(Exception):
@@ -40,10 +41,12 @@ class ProvisioningXrayError(ProvisioningError):
 class ProvisioningResult:
     subscription: Subscription
     client: VPNClient
-    xray: XrayClient
+    xray: XrayClient | None
     inbound_tag: str
 
     async def compensate(self) -> None:
+        if self.xray is None:
+            return
         try:
             await self.xray.remove_vless_user(
                 inbound_tag=self.inbound_tag,
@@ -153,17 +156,19 @@ async def provision_subscription(
         ) from exc
 
     inbound_tag = node_config.config.get("inbound_tag", "vless-reality")
-    xray = xray_factory(address=api_address)
-    try:
-        await xray.add_vless_user(
-            inbound_tag=inbound_tag,
-            client_uuid=client.client_uuid,
-            email=f"vpn-{client.id}",
-            flow=client.flow,
-        )
-    except XrayError as exc:
-        await db.rollback()
-        raise ProvisioningXrayError(f"Failed to add VPN client to Xray: {exc}") from exc
+    xray = None
+    if settings.xray_management_mode == "direct":
+        xray = xray_factory(address=api_address)
+        try:
+            await xray.add_vless_user(
+                inbound_tag=inbound_tag,
+                client_uuid=client.client_uuid,
+                email=f"vpn-{client.id}",
+                flow=client.flow,
+            )
+        except XrayError as exc:
+            await db.rollback()
+            raise ProvisioningXrayError(f"Failed to add VPN client to Xray: {exc}") from exc
 
     return ProvisioningResult(
         subscription=subscription,

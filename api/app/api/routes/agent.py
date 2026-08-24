@@ -167,6 +167,25 @@ async def report_status(
     node.active_connections = data.active_connections
     node.last_seen_at = now
     credential.last_seen_at = now
+    if data.activities:
+        client_ids = {item.client_id for item in data.activities}
+        result = await db.execute(
+            select(VPNClient).where(
+                VPNClient.node_id == principal.node_id,
+                VPNClient.id.in_(client_ids),
+            )
+        )
+        clients = {client.id: client for client in result.scalars()}
+        for item in data.activities:
+            client = clients.get(item.client_id)
+            if client is None:
+                continue
+            previous = client.last_connected_at
+            if previous is not None and previous.tzinfo is None:
+                previous = previous.replace(tzinfo=timezone.utc)
+            if previous is None or item.connected_at > previous:
+                client.last_connected_at = item.connected_at
+                client.last_ip = item.ip_address
     await db.commit()
     await write_audit(
         db,

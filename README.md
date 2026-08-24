@@ -2,7 +2,7 @@
 
 MVP сервиса выдачи VPN-доступа через Telegram. Управляющий API хранит пользователей и подписки в PostgreSQL, динамически добавляет VLESS-клиентов в Xray через gRPC и отзывает их после окончания срока действия.
 
-> Статус на 24 августа 2026 года: реализованы Telegram purchase-flow, web admin, авторизация API, payment state machine, `grpc.aio` Xray, отдельный lifecycle worker, reconciliation, outbound node-agent, device activation/profile API, PostgreSQL audit и локальные Grafana/Loki/Alloy. Реальный платёжный провайдер и production-ноды ещё не подключены.
+> Статус на 25 августа 2026 года: реализованы Telegram purchase-flow, web admin, авторизация API, payment state machine, `grpc.aio` Xray, отдельный lifecycle worker, reconciliation, outbound node-agent, device activation/profile API, PostgreSQL audit и локальные Grafana/Loki/Alloy. Подключена первая VPN-нода DigitalOcean; реальный платёжный провайдер ещё не подключён.
 
 ## Архитектура
 
@@ -171,8 +171,16 @@ ssh -N -L 3000:127.0.0.1:3000 \
 - отзывать device token и VPN-клиентов;
 - запускать reconciliation;
 - открывать и закрывать ограниченные sensitive-debug сессии.
+- для каждого пользователя вручную назначать или менять тариф, VPN-ноду, срок и состояние доступа;
+- просматривать и редактировать выданную VPN-ссылку; пустое поле возвращает автоматическую генерацию URI;
+- видеть последнее подключение и исходный IP, зафиксированные Xray на выбранной ноде;
+- одной командой «Сбросить план и ссылку» завершать подписку, отзывать клиент и очищать ручную ссылку.
 
 Административная страница использует существующие защищённые REST-методы и агрегирующий read-only endpoint `GET /admin/overview`. Перед запуском обязательно заменить пароль `change_me`.
+
+Ручное управление доступом выполняют `PUT /admin/users/{user_id}/access` и `DELETE /admin/users/{user_id}/access`. Отключение сохраняет данные подписки и историю последнего подключения, но удаляет клиента из desired state Xray. Сброс переводит подписки в истёкшие, отзывает клиенты и очищает ручной URI; время и IP последнего подключения сохраняются для диагностики. Node-agent читает локальный Xray access log и передаёт только последнюю активность каждого клиента. Это не список текущих сессий: «активен» в таблице означает действующий выданный доступ.
+
+Полный VPN URI является секретом. Он показывается только после HTTP Basic-аутентификации администратора и не выводится целиком в общей таблице.
 
 Sensitive-debug включается только из админки с причиной и сроком. Полный снимок Telegram token, паролей, Authorization headers, Reality private key и активных клиентских URI создаётся явной командой:
 
@@ -198,7 +206,7 @@ sudo /home/freedman/vpn-service/scripts/capture_sensitive_debug.py DEBUG_SESSION
 - `client_devices` и `activation_codes` — привязанные установки будущего клиента.
 - `access_grants` — одноразовые trial/promo выдачи; служебные планы имеют `is_public=false` и не показываются в продаже.
 
-Цепочка миграций: `45a8774c25bc` → `9d1db660812a` → `b6c1e7a4d920` → `c3f8a91e74bd` → `d8e26f19a4c1` → `e4c729a6b132`.
+Цепочка миграций: `45a8774c25bc` → `9d1db660812a` → `b6c1e7a4d920` → `c3f8a91e74bd` → `d8e26f19a4c1` → `e4c729a6b132` → `f7a2c21e9b44`.
 
 ## Конфигурация и локальный запуск
 

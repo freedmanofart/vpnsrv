@@ -77,6 +77,18 @@ else
     -e "s|www.cloudflare.com|$REALITY_SNI|g" \
     "$PROJECT_ROOT/deploy/node/xray-config.example.json" > "$TMP_DIR/xray-config.json"
 fi
+python3 - "$TMP_DIR/xray-config.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as source:
+    config = json.load(source)
+config.setdefault("log", {})["access"] = "/var/log/xray/access.log"
+with open(path, "w", encoding="utf-8") as destination:
+    json.dump(config, destination, indent=2)
+    destination.write("\n")
+PY
 REALITY_PUBLIC_KEY=$(printf '%s\n' "$KEY_OUTPUT" | sed -n 's/^Password (PublicKey): //p')
 test -n "$REALITY_PRIVATE_KEY"
 test -n "$REALITY_PUBLIC_KEY"
@@ -150,11 +162,12 @@ CONTROL_PLANE_URL=$CONTROL_PLANE_URL
 NODE_AGENT_TOKEN=$NODE_TOKEN
 NODE_XRAY_API_ADDRESS=127.0.0.1:10085
 NODE_AGENT_INTERVAL_SECONDS=30
+NODE_XRAY_ACCESS_LOG=/var/log/xray/access.log
 LOG_LEVEL=INFO
 EOF
 
 echo "[5/7] Uploading configuration and building the agent image"
-remote "install -d -m 700 /etc/vpn-node /opt/vpn-node/build /etc/containers/systemd"
+remote "install -d -m 700 /etc/vpn-node /opt/vpn-node/build /etc/containers/systemd; install -d -m 750 -o 65532 -g 65532 /var/log/vpn-xray"
 scp "${SSH_ARGS[@]}" "$TMP_DIR/xray-config.json" "$NODE_SSH:/etc/vpn-node/xray-config.json"
 scp "${SSH_ARGS[@]}" "$TMP_DIR/node-agent.env" "$NODE_SSH:/etc/vpn-node/node-agent.env"
 scp "${SSH_ARGS[@]}" "$PROJECT_ROOT/deploy/node/NodeAgent.Dockerfile" "$NODE_SSH:/opt/vpn-node/build/NodeAgent.Dockerfile"
@@ -167,7 +180,7 @@ remote "chown 65532:65532 /etc/vpn-node/xray-config.json && chmod 600 /etc/vpn-n
 
 echo "[6/7] Validating Xray and enabling services"
 remote "podman run --rm -v /etc/vpn-node/xray-config.json:/config.json:ro,Z '$XRAY_IMAGE' run -test -config /config.json"
-remote "systemctl daemon-reload && systemctl start vpn-xray.service vpn-node-agent.service"
+remote "systemctl daemon-reload && systemctl restart vpn-xray.service vpn-node-agent.service"
 
 echo "[7/7] Verifying listeners and service health"
 remote "systemctl --no-pager --full status vpn-xray.service vpn-node-agent.service | sed -n '1,80p'; ss -lnt | grep -E '(:443|:10085)'"

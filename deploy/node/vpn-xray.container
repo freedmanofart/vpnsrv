@@ -9,6 +9,7 @@ Image=ghcr.io/xtls/xray-core@sha256:4198aa816f04eeacde6470f4f07947eb4f701a1bba36
 Network=host
 AddCapability=NET_BIND_SERVICE
 Volume=/etc/vpn-node/xray-config.json:/usr/local/etc/xray/config.json:ro,Z
+Volume=/var/log/vpn-xray:/var/log/xray:z
 Exec=run -config /usr/local/etc/xray/config.json
 
 [Service]

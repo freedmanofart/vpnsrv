@@ -748,7 +748,7 @@ async def get_vpn_client_config(
 
     query = urlencode(params)
 
-    vless_url = (
+    vless_url = client.config_override or (
         f"vless://{client.client_uuid}"
         f"@{host}:{port}"
         f"?{query}"
