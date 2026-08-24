@@ -24,6 +24,12 @@ class NodeDesiredStateResponse(BaseModel):
     clients: list[DesiredClient]
 
 
+class ClientActivity(BaseModel):
+    client_id: int = Field(gt=0)
+    connected_at: datetime
+    ip_address: str = Field(min_length=1, max_length=64)
+
+
 class NodeStatusReport(BaseModel):
     status: str
     latency_ms: float | None = Field(default=None, ge=0)
@@ -32,3 +38,4 @@ class NodeStatusReport(BaseModel):
     restored: int = Field(default=0, ge=0)
     removed: int = Field(default=0, ge=0)
     errors: list[str] = Field(default_factory=list, max_length=50)
+    activities: list[ClientActivity] = Field(default_factory=list, max_length=1000)

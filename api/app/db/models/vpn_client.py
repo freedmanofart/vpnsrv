@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, func, text
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -87,3 +87,11 @@ class VPNClient(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+
+    config_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    last_connected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
+    last_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
