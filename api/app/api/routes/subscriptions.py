@@ -19,6 +19,14 @@ from app.services.xray import (
     XrayError,
     XrayUserNotFound,
 )
+from app.services.provisioning import (
+    ProvisioningConflict,
+    ProvisioningInvalid,
+    ProvisioningNotFound,
+    ProvisioningXrayError,
+    commit_provisioning,
+    provision_subscription,
+)
 
 from app.schemas.subscription import (
     SubscriptionCreate,
@@ -26,11 +34,13 @@ from app.schemas.subscription import (
     VPNClientRotate,
 )
 from app.schemas.vpn import VPNClientResponse
+from app.core.security import require_api_access
 
 
 router = APIRouter(
     prefix="/subscriptions",
     tags=["Subscriptions"],
+    dependencies=[Depends(require_api_access)],
 )
 
 
@@ -121,6 +131,11 @@ async def get_node_for_client(
             status_code=404,
             detail="VPN node configuration not found",
         )
+    if not node_config.config.get("api_address"):
+        raise HTTPException(
+            status_code=503,
+            detail="VPN node has no Xray management address",
+        )
 
     return node, node_config
 
@@ -158,6 +173,11 @@ async def get_active_node_and_config(
         raise HTTPException(
             status_code=503,
             detail="VPN node configuration not found",
+        )
+    if not node_config.config.get("api_address"):
+        raise HTTPException(
+            status_code=503,
+            detail="VPN node has no Xray management address",
         )
 
     return node, node_config
@@ -240,153 +260,36 @@ async def create_subscription(
     data: SubscriptionCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Создаёт новую подписку и VPN-клиента.
-
-    Последовательность:
-
-        1. Проверяем user.
-        2. Проверяем plan.
-        3. Проверяем отсутствие активной подписки.
-        4. Находим активную VPN-ноду.
-        5. Создаём subscription.
-        6. Создаём VPN client.
-        7. Добавляем client в Xray.
-        8. Commit.
-
-    Если Xray недоступен:
-        subscription/client в БД не сохраняются.
-    """
-
-    # -----------------------------------------------------
-    # User
-    # -----------------------------------------------------
-
-    user = await get_user(
-        db=db,
-        user_id=data.user_id,
-    )
-
-    # -----------------------------------------------------
-    # Plan
-    # -----------------------------------------------------
-
-    plan = await get_plan(
-        db=db,
-        plan_id=data.plan_id,
-    )
-
-    # -----------------------------------------------------
-    # Existing active subscription
-    # -----------------------------------------------------
-
-    now = datetime.now(timezone.utc)
-
-    result = await db.execute(
-        select(Subscription).where(
-            Subscription.user_id == data.user_id,
-            Subscription.status == "active",
-            Subscription.expires_at > now,
-        )
-    )
-
-    existing = result.scalar_one_or_none()
-
-    if existing:
-        raise HTTPException(
-            status_code=409,
-            detail="Active subscription already exists",
-        )
-
-    # -----------------------------------------------------
-    # VPN node
-    # -----------------------------------------------------
-
+    """Create a subscription and Xray user with compensating rollback."""
     if data.node_id is not None:
-        node, node_config = await get_node_for_client(
-            db=db, node_id=data.node_id, protocol="vless"
-        )
+        node_id = data.node_id
     else:
-        node, node_config = await get_active_node_and_config(
+        node, _node_config = await get_active_node_and_config(
             db=db, protocol="vless"
         )
-
-    if data.client_type not in {"amnezia", "universal"}:
-        raise HTTPException(status_code=400, detail="Unsupported client type")
-    if data.flow not in {"", "xtls-rprx-vision"}:
-        raise HTTPException(status_code=400, detail="Unsupported VLESS flow")
-    if data.fingerprint not in {"chrome", "firefox", "safari", "randomized"}:
-        raise HTTPException(status_code=400, detail="Unsupported fingerprint")
-
-    # -----------------------------------------------------
-    # Subscription
-    # -----------------------------------------------------
-
-    expires_at = (
-        now
-        + timedelta(days=plan.duration_days)
-    )
-
-    subscription = Subscription(
-        user_id=user.id,
-        plan_id=plan.id,
-        status="active",
-        starts_at=now,
-        expires_at=expires_at,
-    )
-
-    db.add(subscription)
-
-    await db.flush()
-
-    # -----------------------------------------------------
-    # VPN client
-    # -----------------------------------------------------
-
-    client_uuid = str(uuid4())
-
-    client = VPNClient(
-        user_id=user.id,
-        subscription_id=subscription.id,
-        node_id=node.id,
-        protocol="vless",
-        client_type=data.client_type,
-        flow=data.flow,
-        fingerprint=data.fingerprint,
-        client_uuid=client_uuid,
-        status="active",
-        expires_at=expires_at,
-    )
-
-    db.add(client)
-
-    await db.flush()
-
-    # -----------------------------------------------------
-    # Xray
-    # -----------------------------------------------------
-
-    xray = XrayClient(address=node_config.config.get("api_address"))
-
+        node_id = node.id
     try:
-        await add_vless_client_to_xray(
-            xray=xray,
-            node_config=node_config,
-            client=client,
+        result = await provision_subscription(
+            db,
+            user_id=data.user_id,
+            plan_id=data.plan_id,
+            node_id=node_id,
+            client_type=data.client_type,
+            flow=data.flow,
+            fingerprint=data.fingerprint,
         )
+    except ProvisioningNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProvisioningConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProvisioningInvalid as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ProvisioningXrayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    except HTTPException:
-        await db.rollback()
-        raise
-
-    # -----------------------------------------------------
-    # Commit
-    # -----------------------------------------------------
-
-    await db.commit()
-    await db.refresh(subscription)
-
-    return subscription
+    await commit_provisioning(db, result)
+    await db.refresh(result.subscription)
+    return result.subscription
 
 
 # =========================================================
@@ -443,7 +346,7 @@ async def renew_subscription(
     result = await db.execute(
         select(Subscription).where(
             Subscription.id == subscription_id
-        )
+        ).with_for_update()
     )
 
     subscription = result.scalar_one_or_none()
@@ -484,6 +387,7 @@ async def renew_subscription(
         .order_by(
             VPNClient.id.desc()
         )
+        .with_for_update()
     )
 
     previous_client = result.scalars().first()
@@ -548,7 +452,7 @@ async def renew_subscription(
         flow=(previous_client.flow if previous_client else ""),
         fingerprint=(previous_client.fingerprint if previous_client else "chrome"),
         client_uuid=new_uuid,
-        status="active",
+        status="provisioning",
         expires_at=new_expires_at,
     )
 
@@ -677,7 +581,12 @@ async def rotate_subscription_client(
 ):
     """Reissues a key, optionally moving it to another node, without extending time."""
     now = datetime.now(timezone.utc)
-    subscription = await db.get(Subscription, subscription_id)
+    result = await db.execute(
+        select(Subscription)
+        .where(Subscription.id == subscription_id)
+        .with_for_update()
+    )
+    subscription = result.scalar_one_or_none()
     if not subscription:
         raise HTTPException(status_code=404, detail="Subscription not found")
     if subscription.status != "active" or subscription.expires_at <= now:
@@ -695,6 +604,7 @@ async def rotate_subscription_client(
         select(VPNClient)
         .where(VPNClient.subscription_id == subscription.id, VPNClient.status == "active")
         .order_by(VPNClient.id.desc())
+        .with_for_update()
     )
     previous = result.scalars().first()
 
@@ -707,7 +617,7 @@ async def rotate_subscription_client(
         flow=data.flow,
         fingerprint=data.fingerprint,
         client_uuid=str(uuid4()),
-        status="active",
+        status="provisioning",
         expires_at=subscription.expires_at,
     )
     db.add(new_client)
@@ -754,6 +664,7 @@ async def rotate_subscription_client(
         previous.status = "revoked"
         previous.revoked_at = now
 
+    new_client.status = "active"
     await db.commit()
     await db.refresh(new_client)
     return new_client

@@ -12,6 +12,7 @@ from app.api.routes.user_status import router as user_status_router
 from app.api.routes.vpn import router as vpn_router
 from app.api.routes.subscriptions import router as subscriptions_router
 from app.api.routes.admin import router as admin_router
+from app.api.routes.payments import router as payments_router
 
 from app.db.session import get_db, AsyncSessionLocal
 
@@ -19,6 +20,8 @@ from app.services.vpn_expiration import (
     expire_subscriptions,
     expire_vpn_clients,
 )
+from app.services.reconciliation import reconcile_all_nodes
+from app.core.security import require_api_access
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +43,7 @@ async def vpn_expiration_loop():
             async with AsyncSessionLocal() as db:
                 subscription_count = await expire_subscriptions(db)
                 client_count = await expire_vpn_clients(db)
+                reconciliation = await reconcile_all_nodes(db)
 
             if subscription_count:
                 logger.info(
@@ -51,6 +55,17 @@ async def vpn_expiration_loop():
                 logger.info(
                     "VPN expiration: revoked %s client(s)",
                     client_count,
+                )
+
+            reconciliation_errors = sum(item.errors for item in reconciliation)
+            reconciliation_restored = sum(item.restored for item in reconciliation)
+            reconciliation_removed = sum(item.removed for item in reconciliation)
+            if reconciliation_errors or reconciliation_restored or reconciliation_removed:
+                logger.info(
+                    "Xray reconciliation: restored=%s removed=%s errors=%s",
+                    reconciliation_restored,
+                    reconciliation_removed,
+                    reconciliation_errors,
                 )
 
             print(
@@ -117,6 +132,7 @@ app.include_router(plans_router)
 app.include_router(subscriptions_router)
 app.include_router(vpn_router)
 app.include_router(admin_router)
+app.include_router(payments_router)
 
 
 @app.get("/health")
@@ -129,6 +145,7 @@ async def health():
 @app.get("/db-health")
 async def db_health(
     db: AsyncSession = Depends(get_db),
+    _principal=Depends(require_api_access),
 ):
     result = await db.execute(
         text("SELECT 1")

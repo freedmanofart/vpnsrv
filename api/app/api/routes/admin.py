@@ -1,9 +1,5 @@
-import os
-import secrets
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,27 +9,13 @@ from app.db.models.user import User
 from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
 from app.db.session import get_db
+from app.core.security import APIPrincipal, require_admin
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
-security = HTTPBasic()
-
-
-def require_admin(credentials: HTTPBasicCredentials = Depends(security)) -> str:
-    expected_user = os.getenv("ADMIN_USERNAME", "admin")
-    expected_password = os.getenv("ADMIN_PASSWORD", "change_me")
-    valid = secrets.compare_digest(credentials.username.encode(), expected_user.encode())
-    valid &= secrets.compare_digest(credentials.password.encode(), expected_password.encode())
-    if not valid:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid admin credentials",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
 
 
 @router.get("", response_class=HTMLResponse, include_in_schema=False)
-async def admin_page(_: str = Depends(require_admin)):
+async def admin_page(_: APIPrincipal = Depends(require_admin)):
     return HTMLResponse(ADMIN_HTML)
 
 

@@ -1,9 +1,12 @@
 import sys
 import os
+from pathlib import Path
 
 import grpc
 
-sys.path.insert(0, "/app/app/xray")
+XRAY_PROTO_PATH = str(Path(__file__).resolve().parents[1] / "xray")
+if XRAY_PROTO_PATH not in sys.path:
+    sys.path.insert(0, XRAY_PROTO_PATH)
 
 from app.proxyman.command import command_pb2
 from app.proxyman.command import command_pb2_grpc
@@ -20,6 +23,10 @@ class XrayUserNotFound(XrayError):
     pass
 
 
+class XrayUserAlreadyExists(XrayError):
+    pass
+
+
 class XrayClient:
     def __init__(
         self,
@@ -30,7 +37,7 @@ class XrayClient:
         self.timeout = timeout
 
     def _stub(self):
-        channel = grpc.insecure_channel(self.address)
+        channel = grpc.aio.insecure_channel(self.address)
         return channel, command_pb2_grpc.HandlerServiceStub(channel)
 
     async def add_vless_user(
@@ -75,18 +82,23 @@ class XrayClient:
         channel, stub = self._stub()
 
         try:
-            stub.AlterInbound(
+            await stub.AlterInbound(
                 request,
                 timeout=self.timeout,
             )
 
-        except grpc.RpcError as exc:
+        except grpc.aio.AioRpcError as exc:
+            details = exc.details() or ""
+            if "already exists" in details.lower():
+                raise XrayUserAlreadyExists(
+                    f"Xray user {email} already exists"
+                ) from exc
             raise XrayError(
                 f"Failed to add VLESS user to Xray: {exc}"
             ) from exc
 
         finally:
-            channel.close()
+            await channel.close()
 
     async def remove_vless_user(
         self,
@@ -110,18 +122,19 @@ class XrayClient:
         channel, stub = self._stub()
 
         try:
-            stub.AlterInbound(
+            await stub.AlterInbound(
                 request,
                 timeout=self.timeout,
             )
 
-        except grpc.RpcError as exc:
+        except grpc.aio.AioRpcError as exc:
             details = exc.details() or ""
+            lowered = details.lower()
 
             if (
                 exc.code() == grpc.StatusCode.UNKNOWN
-                and "User" in details
-                and "not found" in details
+                and "user" in lowered
+                and "not found" in lowered
             ):
                 raise XrayUserNotFound(
                     f"Xray user {email} is already absent"
@@ -132,7 +145,7 @@ class XrayClient:
             ) from exc
 
         finally:
-            channel.close()
+            await channel.close()
 
     async def get_users(
         self,
@@ -141,7 +154,7 @@ class XrayClient:
         channel, stub = self._stub()
 
         try:
-            response = stub.GetInboundUsers(
+            response = await stub.GetInboundUsers(
                 command_pb2.GetInboundUserRequest(
                     tag=inbound_tag,
                 ),
@@ -150,10 +163,10 @@ class XrayClient:
 
             return list(response.users)
 
-        except grpc.RpcError as exc:
+        except grpc.aio.AioRpcError as exc:
             raise XrayError(
                 f"Failed to get Xray users: {exc}"
             ) from exc
 
         finally:
-            channel.close()
+            await channel.close()

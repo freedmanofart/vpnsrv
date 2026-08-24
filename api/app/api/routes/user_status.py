@@ -8,11 +8,13 @@ from app.db.models.user import User
 from app.db.models.subscription import Subscription
 from app.db.models.vpn_client import VPNClient
 from app.db.session import get_db
+from app.core.security import require_api_access
 
 
 router = APIRouter(
     prefix="/users",
     tags=["Users"],
+    dependencies=[Depends(require_api_access)],
 )
 
 

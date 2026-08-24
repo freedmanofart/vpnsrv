@@ -5,11 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.plan import Plan
 from app.db.session import get_db
 from app.schemas.plan import PlanCreate, PlanResponse, PlanUpdate
+from app.core.security import require_api_access
 
 
 router = APIRouter(
     prefix="/plans",
     tags=["Plans"],
+    dependencies=[Depends(require_api_access)],
 )
 
 

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,8 @@ async def revoke_vpn_client(
     db: AsyncSession,
     client: VPNClient,
     now: datetime,
+    *,
+    xray_factory: Callable[..., XrayClient] = XrayClient,
 ) -> bool:
     """
     Отзывает VPN-клиента.
@@ -51,8 +54,16 @@ async def revoke_vpn_client(
         )
         return False
 
+    api_address = node_config.config.get("api_address")
+    if not api_address:
+        print(
+            f"Xray management address not found for client vpn-{client.id}",
+            flush=True,
+        )
+        return False
+
     if client.protocol == "vless":
-        xray = XrayClient(address=node_config.config.get("api_address"))
+        xray = xray_factory(address=api_address)
 
         try:
             await xray.remove_vless_user(
@@ -99,6 +110,8 @@ async def revoke_vpn_client(
 
 async def expire_subscriptions(
     db: AsyncSession,
+    *,
+    xray_factory: Callable[..., XrayClient] = XrayClient,
 ) -> int:
     """
     Обрабатывает истёкшие подписки.
@@ -145,6 +158,7 @@ async def expire_subscriptions(
                 db=db,
                 client=client,
                 now=now,
+                xray_factory=xray_factory,
             )
 
             if not revoked:
@@ -170,6 +184,8 @@ async def expire_subscriptions(
 
 async def expire_vpn_clients(
     db: AsyncSession,
+    *,
+    xray_factory: Callable[..., XrayClient] = XrayClient,
 ) -> int:
     """
     Дополнительная страховка.
@@ -201,6 +217,7 @@ async def expire_vpn_clients(
             db=db,
             client=client,
             now=now,
+            xray_factory=xray_factory,
         )
 
         if revoked:

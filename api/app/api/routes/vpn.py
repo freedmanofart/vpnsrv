@@ -1,5 +1,3 @@
-import os
-
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -15,7 +13,8 @@ from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.session import get_db
 
-from app.services.xray import XrayClient, XrayError
+from app.services.xray import XrayClient, XrayError, XrayUserNotFound
+from app.core.security import require_api_access
 
 from app.schemas.vpn import (
     VPNClientConfigResponse,
@@ -27,17 +26,14 @@ from app.schemas.vpn import (
     VPNNodeUpdate,
     VPNNodeResponse,
     VPNNodeHealthResponse,
+    VPNNodeReconciliationResponse,
 )
+from app.services.reconciliation import reconcile_node
 
 router = APIRouter(
     prefix="/vpn",
     tags=["VPN"],
-)
-xray_client = XrayClient(
-    address=os.getenv(
-        "XRAY_API_ADDRESS",
-        "172.18.0.1:10085",
-    ),
+    dependencies=[Depends(require_api_access)],
 )
 
 
@@ -121,11 +117,28 @@ async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
     config = result.scalar_one_or_none()
     if not config:
         return VPNNodeHealthResponse(node_id=node_id, status="offline", error="VLESS configuration not found")
+    api_address = config.config.get("api_address")
+    if not api_address:
+        return VPNNodeHealthResponse(node_id=node_id, status="offline", error="Xray management address not configured")
     try:
-        users = await XrayClient(address=config.config.get("api_address")).get_users(config.config.get("inbound_tag", "vless-reality"))
+        users = await XrayClient(address=api_address).get_users(config.config.get("inbound_tag", "vless-reality"))
         return VPNNodeHealthResponse(node_id=node_id, status="online", xray_users=len(users))
     except XrayError as exc:
         return VPNNodeHealthResponse(node_id=node_id, status="offline", error=str(exc))
+
+
+@router.post(
+    "/nodes/{node_id}/reconcile",
+    response_model=VPNNodeReconciliationResponse,
+)
+async def reconcile_vpn_node(node_id: int, db: AsyncSession = Depends(get_db)):
+    try:
+        report = await reconcile_node(db, node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except XrayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return VPNNodeReconciliationResponse(**report.__dict__)
 
 
 # =========================================================
@@ -172,6 +185,7 @@ async def create_node_config(
 
         if security == "reality":
             required_fields = [
+                "api_address",
                 "host",
                 "port",
                 "type",
@@ -382,6 +396,11 @@ async def create_vpn_client(
             status_code=404,
             detail="VPN node configuration not found",
         )
+    if not node_config.config.get("api_address"):
+        raise HTTPException(
+            status_code=503,
+            detail="VPN node has no Xray management address",
+        )
 
     # -----------------------------------------------------
     # Existing client
@@ -534,6 +553,11 @@ async def revoke_vpn_client(
             status_code=404,
             detail="VPN node configuration not found",
         )
+    if not node_config.config.get("api_address"):
+        raise HTTPException(
+            status_code=503,
+            detail="VPN node has no Xray management address",
+        )
 
     # -----------------------------------------------------
     # Remove client from Xray
@@ -550,6 +574,8 @@ async def revoke_vpn_client(
                 ),
                 email=f"vpn-{client.id}",
             )
+        except XrayUserNotFound:
+            pass
         except XrayError:
             raise HTTPException(
                 status_code=502,

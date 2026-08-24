@@ -95,3 +95,12 @@ class VPNNodeHealthResponse(BaseModel):
     status: str
     xray_users: int | None = None
     error: str | None = None
+
+
+class VPNNodeReconciliationResponse(BaseModel):
+    node_id: int
+    expected: int
+    present: int
+    restored: int
+    removed: int
+    errors: int

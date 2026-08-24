@@ -26,6 +26,15 @@ logging.basicConfig(
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_URL = os.getenv("API_URL", "http://api:8000")
+SERVICE_API_TOKEN = os.environ["SERVICE_API_TOKEN"]
+
+
+def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        base_url=base_url,
+        timeout=timeout,
+        headers={"Authorization": f"Bearer {SERVICE_API_TOKEN}"},
+    )
 
 router = Router()
 
@@ -135,7 +144,7 @@ async def get_or_create_user(message: Message) -> dict:
 
     telegram_id = telegram_user.id
 
-    async with httpx.AsyncClient(
+    async with api_client(
         base_url=API_URL,
         timeout=10.0,
     ) as client:
@@ -171,7 +180,7 @@ async def get_or_create_user(message: Message) -> dict:
 
 
 async def get_vpn_status(telegram_id: int) -> dict:
-    async with httpx.AsyncClient(
+    async with api_client(
         base_url=API_URL,
         timeout=10.0,
     ) as client:
@@ -186,7 +195,7 @@ async def get_vpn_status(telegram_id: int) -> dict:
 
 
 async def get_plans() -> list[dict]:
-    async with httpx.AsyncClient(
+    async with api_client(
         base_url=API_URL,
         timeout=10.0,
     ) as client:
@@ -199,7 +208,7 @@ async def get_plans() -> list[dict]:
 
 
 async def get_nodes() -> list[dict]:
-    async with httpx.AsyncClient(
+    async with api_client(
         base_url=API_URL,
         timeout=10.0,
     ) as client:
@@ -212,7 +221,7 @@ async def get_nodes() -> list[dict]:
 
 
 async def get_node_configs(node_id: int) -> list[dict]:
-    async with httpx.AsyncClient(
+    async with api_client(
         base_url=API_URL,
         timeout=10.0,
     ) as client:
@@ -226,12 +235,13 @@ async def get_node_configs(node_id: int) -> list[dict]:
         return response.json()
 
 
-async def create_subscription(
+async def create_payment(
     user_id: int,
     plan_id: int,
     node_id: int,
     client_type: str,
     flow: str,
+    idempotency_key: str,
 ) -> dict:
     profile = "vision" if flow == "xtls-rprx-vision" else "standard"
     payload = subscription_payload(
@@ -241,13 +251,14 @@ async def create_subscription(
         client_type=client_type,
         profile=profile,
     )
-    async with httpx.AsyncClient(
+    payload["idempotency_key"] = idempotency_key
+    async with api_client(
         base_url=API_URL,
         timeout=10.0,
     ) as client:
 
         response = await client.post(
-            "/subscriptions",
+            "/payments",
             json=payload,
         )
 
@@ -257,7 +268,7 @@ async def create_subscription(
 
 
 async def get_vpn_client_config(client_id: int) -> dict:
-    async with httpx.AsyncClient(base_url=API_URL, timeout=10.0) as client:
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
         response = await client.get(f"/vpn/clients/{client_id}/config")
         response.raise_for_status()
         return response.json()
@@ -265,7 +276,7 @@ async def get_vpn_client_config(client_id: int) -> dict:
 
 async def rotate_vpn_client(subscription_id: int, node_id: int, client_type: str, flow: str) -> dict:
     profile = "vision" if flow == "xtls-rprx-vision" else "standard"
-    async with httpx.AsyncClient(base_url=API_URL, timeout=15.0) as client:
+    async with api_client(base_url=API_URL, timeout=15.0) as client:
         response = await client.post(
             f"/subscriptions/{subscription_id}/rotate",
             json=rotation_payload(node_id, client_type, profile),
@@ -302,7 +313,7 @@ async def create_vpn_client(
     subscription_id: int,
     node_id: int,
 ) -> dict:
-    async with httpx.AsyncClient(
+    async with api_client(
         base_url=API_URL,
         timeout=15.0,
     ) as client:
@@ -628,7 +639,7 @@ async def buy_plan_handler(callback: CallbackQuery):
         # User
         # -------------------------------------------------
 
-        async with httpx.AsyncClient(
+        async with api_client(
             base_url=API_URL,
             timeout=10.0,
         ) as client:
@@ -803,7 +814,7 @@ async def confirm_buy_handler(
         # User
         # -------------------------------------------------
 
-        async with httpx.AsyncClient(
+        async with api_client(
             base_url=API_URL,
             timeout=10.0,
         ) as client:
@@ -871,13 +882,27 @@ async def confirm_buy_handler(
         except TelegramBadRequest:
             pass
 
-        subscription = await create_subscription(
+        payment = await create_payment(
             user_id=user_id,
             plan_id=plan_id,
             node_id=node_id,
             client_type=client_type,
             flow=profile_flow(profile),
+            idempotency_key=f"telegram:{callback.id}",
         )
+
+        if payment["status"] != "paid" or not payment.get("subscription_id"):
+            await callback.message.edit_text(
+                "⏳ Платёж создан и ожидает подтверждения провайдера.",
+                reply_markup=main_menu(),
+            )
+            await callback.answer("Ожидаем подтверждение платежа")
+            return
+
+        status_after_payment = await get_vpn_status(telegram_id)
+        subscription = status_after_payment.get("subscription")
+        if not subscription:
+            raise RuntimeError("Paid payment did not create a subscription")
 
         logging.info(
             "Subscription created: user_id=%s subscription_id=%s",

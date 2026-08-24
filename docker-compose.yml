@@ -79,6 +79,10 @@ services:
       XRAY_INBOUND_TAG: ${XRAY_INBOUND_TAG}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change_me}
+      SERVICE_API_TOKEN: ${SERVICE_API_TOKEN}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET}
+      PAYMENT_AUTO_CONFIRM: ${PAYMENT_AUTO_CONFIRM:-false}
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -89,7 +93,7 @@ services:
       - ./alembic.ini:/app/alembic.ini
 
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
     depends_on:
       postgres:
@@ -115,6 +119,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL}
       VPN_PLAN_ID: ${VPN_PLAN_ID}
       VPN_NODE_ID: ${VPN_NODE_ID}
+      SERVICE_API_TOKEN: ${SERVICE_API_TOKEN}
 
     volumes:
       - ./bot/app:/app/app
