@@ -58,6 +58,8 @@ Redis входит в Compose, но прикладной код его пока 
 - Reality: без `flow`, максимальная совместимость;
 - Reality + XTLS Vision: `flow=xtls-rprx-vision` сохраняется в БД, передаётся в аккаунт Xray и добавляется в URI.
 
+Главное меню бота содержит «Мой VPN», покупку, одноразовый тест на 3 дня, ввод промокода, инструкцию, поддержку и канал. Покупка после выбора страны/клиента/профиля переходит на отдельный экран способов оплаты; сейчас там одна кнопка «Оплатить по QR», использующая mock adapter. Ссылки задаются через `TELEGRAM_CHANNEL_URL` и `SUPPORT_URL`. Промокоды задаются без изменения кода, например `PROMO_CODES=WELCOME7:7,SUMMER30:30`.
+
 Для активной подписки раздел «Мой VPN» дополнительно позволяет:
 
 - повторно получить действующий ключ и QR-код;
@@ -144,6 +146,16 @@ ssh -N -L 8000:127.0.0.1:8000 \
 
 После этого admin доступен на `http://localhost:8000/admin`, Swagger — на `http://localhost:8000/docs`. Host firewall для этого изменения не включался и не изменялся.
 
+Grafana также доступна только через SSH tunnel:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 \
+  -i /Users/freedman/.ssh/vpnsrv_codex \
+  codex@192.168.10.60
+```
+
+Открыть `http://localhost:3000`; логин берётся из `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`. Alerting отключён. Dashboard `VPN / VPN logs` показывает ошибки, lifecycle/reconciliation и общий поток API/bot/worker/node-agent.
+
 Первый вариант интерфейса позволяет:
 
 - просматривать пользователей, тарифы, ноды, подписки и VPN-клиентов;
@@ -162,6 +174,15 @@ ssh -N -L 8000:127.0.0.1:8000 \
 
 Административная страница использует существующие защищённые REST-методы и агрегирующий read-only endpoint `GET /admin/overview`. Перед запуском обязательно заменить пароль `change_me`.
 
+Sensitive-debug включается только из админки с причиной и сроком. Полный снимок Telegram token, паролей, Authorization headers, Reality private key и активных клиентских URI создаётся явной командой:
+
+```bash
+sudo /home/freedman/vpn-service/scripts/capture_sensitive_debug.py DEBUG_SESSION_ID \
+  --project /home/freedman/vpn-service
+```
+
+Снимок попадает в PostgreSQL audit и Loki как `event_type=sensitive_debug_snapshot`; команда выводит только количества, не значения. После диагностики сессию нужно закрыть в админке. Это намеренно небезопасный режим: любой оператор с доступом к Grafana/audit увидит секреты, поэтому затронутые значения при необходимости ротируются.
+
 ## Модель данных
 
 - `users` — Telegram-пользователи;
@@ -175,22 +196,34 @@ ssh -N -L 8000:127.0.0.1:8000 \
 - `audit_logs` и `debug_sessions` — действия оператора, запросы и диагностические сессии;
 - `node_agent_credentials` — хешированные scoped tokens нод;
 - `client_devices` и `activation_codes` — привязанные установки будущего клиента.
+- `access_grants` — одноразовые trial/promo выдачи; служебные планы имеют `is_public=false` и не показываются в продаже.
 
-Цепочка миграций: `45a8774c25bc` → `9d1db660812a` → `b6c1e7a4d920` → `c3f8a91e74bd` → `d8e26f19a4c1`.
+Цепочка миграций: `45a8774c25bc` → `9d1db660812a` → `b6c1e7a4d920` → `c3f8a91e74bd` → `d8e26f19a4c1` → `e4c729a6b132`.
 
 ## Конфигурация и локальный запуск
 
 ```bash
 cp .env.example .env
 # Заполнить BOT_TOKEN, ADMIN_PASSWORD, SERVICE_API_TOKEN,
-# PAYMENT_WEBHOOK_SECRET и параметры Xray.
+# PAYMENT_WEBHOOK_SECRET, ссылки Telegram и параметры Xray.
+
+python3 scripts/configctl.py validate
+python3 scripts/configctl.py list
+python3 scripts/configctl.py set PROMO_CODES 'WELCOME7:7,SUMMER30:30'
+python3 scripts/configctl.py generate GRAFANA_ADMIN_PASSWORD
 
 docker compose up -d postgres redis
 docker compose run --rm api alembic upgrade head
 docker compose up -d
 ```
 
-Обязательные переменные находятся в `.env.example`. Секреты нельзя коммитить в Git. `PAYMENT_PROVIDER=mock` и `PAYMENT_AUTO_CONFIRM=true` предназначены только для тестового полного цикла; перед подключением реальной оплаты автоподтверждение нужно выключить. Каждая VLESS-нода обязана иметь собственный `config.api_address`, указывающий на её локальный Xray management API.
+`configctl` атомарно сохраняет `.env` с правами `0600`, маскирует секреты в обычном выводе и умеет валидировать, менять, генерировать и применять конфигурацию. После изменения рабочих параметров: `python3 scripts/configctl.py apply`; для Grafana или node-agent эти сервисы нужно явно передать через `--services`. Обязательные переменные находятся в `.env.example`. Секреты нельзя коммитить в Git. `PAYMENT_PROVIDER=mock` и `PAYMENT_AUTO_CONFIRM=true` предназначены только для тестового полного цикла; перед подключением реальной оплаты автоподтверждение нужно выключить.
+
+Операционные режимы Xray:
+
+- `XRAY_MANAGEMENT_MODE=direct` — домашний стенд, worker обращается к локальному Xray;
+- `XRAY_MANAGEMENT_MODE=agent` — production control plane, БД хранит desired state, ноды применяют его сами;
+- node token ротируется `POST /agent/v1/credentials/{node_id}/rotate`, хранится только как hash, открытое значение возвращается один раз.
 
 Uvicorn запускается без `--reload`. Для production ещё нужно закрепить версию образа Xray и добавить healthcheck для API, бота и Xray.
 
@@ -199,12 +232,12 @@ Uvicorn запускается без `--reload`. Для production ещё ну�
 ```bash
 python3.13 -m venv .venv
 .venv/bin/pip install -r api/requirements-dev.txt
-PYTHONPATH=. .venv/bin/pytest -q
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
 ## Домашний тестовый сервер
 
-Аудит выполнен 24 августа 2026 года в режиме read-only.
+Первичный аудит выполнен 24 августа 2026 года; перечисленные ниже прикладные и сетевые изменения затем применены на стенде.
 
 ### Система
 
@@ -334,11 +367,37 @@ Xray предупреждает, что Reality inbound фактически с�
 - файлы: `/root/vpn-service-backup-reliability-20260824-172919`;
 - PostgreSQL custom dump: `/root/vpn-db-before-reliability-20260824.dump`.
 
+### Результат operations/bot-спринта
+
+24 августа 2026 года на домашнем стенде:
+
+- применены миграции `d8e26f19a4c1` и `e4c729a6b132`;
+- lifecycle вынесен в `vpn-worker`; одновременный one-shot подтвердил `lifecycle_lock_busy`, после освобождения lock цикл выполнился;
+- outbound `vpn-node-agent` получил scoped token, загрузил desired state, сверил 3 Xray-пользователя и отправил `online`/latency;
+- API, bot и worker пишут JSON; Alloy собирает Docker logs, Loki хранит 14 дней, Grafana доступна только на `127.0.0.1:3000`, alerting отключён;
+- admin показывает payments, devices, node health/latency, audit и sensitive-debug; revoke устройства и ротация device token проверены;
+- device activation/profile E2E вернул VLESS manifest, старый token после refresh получил `401`, новый — `200`;
+- sensitive snapshot подтвердил запись Telegram token, 8 секретных переменных, Authorization headers, одного Reality private key и двух активных клиентских ключей в audit/Loki; значения в консоль не выводились, сессия закрыта;
+- Telegram → mock QR payment → Xray → AmneziaVPN URI с Reality/Vision прошёл; replay не создал второй Xray user;
+- refund webhook переводит состояния в `refunded / cancelled / revoked`, неверная подпись получает `401`;
+- trial E2E дал 3 дня и один Xray user, повтор вернул `409`; `WELCOME7` добавил 7 дней, повтор вернул `409`; служебный тариф скрыт из списка продажи;
+- локально проходят 20 прикладных тестов;
+- временные E2E-пользователи и ключи удалены.
+
+Автоматический backup установлен как `vpn-backup.timer`: PostgreSQL custom dump и конфигурационный архив создаются ежедневно, сохраняются 14 дней. Реальное восстановление последнего dump проверено во временную БД: `restore_ok`, после проверки временная БД удалена. Ручные команды:
+
+```bash
+sudo /home/freedman/vpn-service/scripts/backup.sh
+sudo /home/freedman/vpn-service/scripts/verify_backup.sh /var/backups/vpn-service/vpn-db-TIMESTAMP.dump
+```
+
+Перед operations-развёртыванием создана копия `/var/backups/vpn-service/pre-operations-20260824-175608`; перед bot/trial миграцией — `vpn-db-20260824T161454Z.dump` и соответствующий config archive.
+
 ### Системные предупреждения
 
 В журнале загрузки присутствуют ошибки ACPI BIOS и отключение IRQ 16. Во время аудита явного влияния на VPN-сервисы не обнаружено, но стабильность сети и оборудования нужно наблюдать. Также Fedora сообщает об отключённом SELinux.
 
-SSH разрешает вход `root` по паролю (`PermitRootLogin yes`, `PasswordAuthentication yes`). Это допустимо только для изолированного тестового стенда; предпочтительны ключи, запрет password login и ограничение SSH доверенными управляющими адресами.
+SSH переведён на ключи: `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin prohibit-password`. После reload повторно проверены вход `codex` ключом и `sudo -n`. Firewall не включался.
 
 ### Граница сети и мониторинга
 
@@ -348,6 +407,7 @@ SSH разрешает вход `root` по паролю (`PermitRootLogin yes`,
 - `8000/tcp` — слушает только `127.0.0.1`, с LAN недоступен;
 - `9090/tcp` — закрыт после удаления Cockpit;
 - `5432/tcp`, `6379/tcp`, `8443/tcp` и `10085/tcp` с LAN недоступны;
+- `3000/tcp`, `3100/tcp` и `12345/tcp` (Grafana/Loki/Alloy) слушают только `127.0.0.1`;
 - Docker API `2375/tcp` и `2376/tcp` закрыт;
 - через tailnet из проверенных портов доступен только `443/tcp`, используемый Funnel/Xray; SSH, API и Cockpit фильтруются.
 
@@ -362,19 +422,20 @@ SSH разрешает вход `root` по паролю (`PermitRootLogin yes`,
 7. После настройки SSH-ключей запретить `root` login и password authentication.
 8. Host firewall не включать и не изменять; ограничение локальных служебных портов выполнять привязкой Docker-портов к loopback.
 
-Точный список удаляемых RPM-пакетов требуется сформировать после повторного SSH-аудита. Первые кандидаты — пакеты Cockpit; `firewalld`, NetworkManager, Tailscale, Docker, chrony, OpenSSH и системный журнал удалять не следует. Wi-Fi и второй default route нужно отключить или перевести в режим резервного маршрута, если они не используются как осознанный failover.
+Cockpit ранее удалён. Дополнительно удалены только два явно неиспользуемых сетевых пакета `passim` и `avahi` с `--noautoremove`; порты `27500`, `5353` и `5355` закрыты, LLMNR/mDNS отключены. По решению владельца дальнейшая работа с пакетами и зависимостями пропущена. `firewalld`, NetworkManager, Tailscale, Docker, chrony, OpenSSH и системный журнал не менялись и не удалялись.
 
-Для текущего этапа вместо полноценного мониторинга используется централизованная система логов:
+Для текущего этапа вместо полноценного мониторинга используется локальная централизованная система логов:
 
-- Grafana и Loki размещаются на отдельном облачном узле, предпочтительно Hetzner;
-- Grafana Alloy на домашнем backend, Hetzner и DigitalOcean собирает Docker logs, journald, Xray access/error logs и отправляет их в Loki по исходящему HTTPS с сервисной авторизацией или mTLS;
+- Grafana, Loki и Alloy сейчас размещены на домашнем backend и доступны только через loopback/SSH tunnel;
+- Alloy собирает Docker logs API, bot, worker, node-agent, Xray, PostgreSQL и остальных контейнеров;
+- после появления Hetzner/DigitalOcean Alloy на каждой ноде будет отправлять logs в production Loki исходящим HTTPS;
 - Prometheus, node exporter, cAdvisor, отдельное хранилище метрик и alerting на этом этапе не разворачиваются;
 - API и бот пишут структурированные JSON-логи с `request_id`, сервисом, нодой, регионом, операцией, результатом и длительностью;
 - выдача, отзыв, ротация и reconciliation ключей фиксируются отдельными событиями;
-- VPN-ноды пишут события подключений, отключений, трафика и latency-проверок, по которым Grafana может строить панели через LogQL;
+- node-agent пишет health, Xray user count, reconciliation и latency; точные подключения/трафик появятся после включения Xray stats на реальных нодах;
 - обычный поток логов маскирует токены, пароли, Authorization headers, Reality private key, полный VPN URI и содержимое клиентского ключа;
 - для воспроизведения сложных ошибок предусмотрен отдельный `sensitive-debug` режим, в котором эти значения записываются полностью;
-- sensitive-debug включается на ограниченную диагностическую сессию с указанием оператора, причины и срока окончания, хранится отдельным Loki-потоком не более 24 часов и не резервируется;
+- sensitive-debug включается на ограниченную диагностическую сессию с указанием оператора, причины и срока окончания; текущая Loki retention — 14 дней, а PostgreSQL audit входит в обычный backup;
 - секретные значения записываются только в тело события, но никогда не используются как Loki labels;
 - после диагностической сессии Telegram-токен, пароли, Reality private key и затронутые клиентские ключи считаются раскрытыми и подлежат ротации;
 - детали клиента (`last_seen`, traffic, online IP) хранятся в Redis/PostgreSQL и показываются в защищённой админке;
@@ -398,17 +459,16 @@ SSH разрешает вход `root` по паролю (`PermitRootLogin yes`,
 ### Критические для бизнес-потока
 
 1. **Реальный платёжный провайдер не подключён.** State machine и HMAC webhook реализованы, но тестовый стенд использует `mock` с автоматическим подтверждением.
-2. **Нет пользовательской модели авторизации.** API закрыт admin Basic/service token, однако сервисный Telegram-токен технически имеет доступ ко всем клиентам; перед публичным client API нужны отдельные scoped credentials и проверка владельца.
-3. **Новый Telegram-flow ещё не проверен с тремя реальными нодами.** Автоматизированный цикл на домашнем Xray не заменяет импорт ключа в AmneziaVPN на целевых ОС и тесты реальных США/Нидерланды/Германия.
+2. **Нет production control plane и реальных нод.** Outbound agent и scoped device/node tokens готовы, но HTTPS/mTLS, DNS и инстансы Hetzner/DigitalOcean ещё не созданы.
+3. **Telegram-flow ещё не проверен с тремя реальными нодами.** Автоматизированный цикл на домашнем Xray не заменяет импорт ключа в графический AmneziaVPN на целевых ОС.
+4. **Ссылки канала и поддержки не заполнены.** До задания `TELEGRAM_CHANNEL_URL` / `SUPPORT_URL` бот показывает информирующее окно вместо перехода.
 
 ### Технический долг
 
 - Redis пока не используется;
 - автоматический запуск миграций и seed отсутствуют;
-- выбор ноды берёт первую активную и не учитывает `capacity`, загрузку и здоровье;
 - используется `xray-core:latest`;
-- фоновый expiration loop находится внутри API-процесса и при нескольких API-инстансах будет запускаться несколько раз;
-- логирование смешивает `print` и `logging`;
+- прямые legacy-ветки частично продолжают использовать `print`; основной API/bot/worker/agent уже пишет JSON;
 - `VPN_PLAN_ID`, `VPN_NODE_ID`, `XRAY_INBOUND_TAG` и часть Redis-конфигурации не задействованы последовательно;
 - в проекте есть, вероятно, устаревший `api/app/router/vpn.py`, не подключённый к FastAPI.
 
@@ -456,19 +516,19 @@ Telegram bot / VPN client / web admin
 }
 ```
 
-В production `api_address` используется только локальным node-agent. Control plane не соединяется с Xray gRPC напрямую. Текущий прямой `XrayClient` сохраняется только для домашнего теста до внедрения node-agent.
+В production `api_address` используется только локальным node-agent. Control plane не соединяется с Xray gRPC напрямую. Текущий прямой `XrayClient` сохраняется для домашнего теста; production переключается на `XRAY_MANAGEMENT_MODE=agent`.
 
-Перед добавлением второй ноды необходимо:
+Готовность перед добавлением второй ноды:
 
-1. Добавить node-agent и desired-state API с сервисной авторизацией.
-2. Применять Xray-конфигурацию локально на каждой ноде.
-3. Добавить healthcheck нод и статусы `active`, `offline`, `maintenance`.
-4. Исключать перегруженные и недоступные ноды из клиентского manifest по `capacity` и здоровью.
-5. Добавить reconciliation: БД является источником истины и периодически сверяется с пользователями Xray.
-6. Вынести expiration в отдельный worker либо использовать Redis/PostgreSQL advisory lock.
-7. Защитить node-agent и logging-запросы HTTPS service token или mTLS.
-8. Писать события активных клиентов, ошибок Xray, трафика и latency в Loki.
-9. Настроить резервное копирование PostgreSQL и проверяемое восстановление.
+1. [x] Node-agent и scoped desired-state API.
+2. [x] Локальное применение Xray-конфигурации агентом.
+3. [x] Health/status/latency нод.
+4. [x] Исключение `offline` и перегруженных нод из bot/profile.
+5. [x] Reconciliation с БД как source of truth.
+6. [x] Отдельный worker и PostgreSQL advisory lock.
+7. [ ] Обычный публичный HTTPS и при необходимости mTLS на production control plane.
+8. [x] Docker/Xray/backend logs в Loki; точные traffic/active-connection метрики добавятся на реальных нодах.
+9. [x] Ежедневный backup и проверяемое восстановление PostgreSQL.
 
 ## Multi-server клиент и автовыбор
 
@@ -505,13 +565,13 @@ Client-side выбор учитывает реальную задержку и �
 
 ## Приоритет работ
 
-1. Вынести конфигурацию и секреты в единый управляемый слой с `configctl`.
-2. Добавить PostgreSQL audit log и централизованные Grafana/Loki/Alloy логи без alerting.
-3. Расширить web admin управлением клиентами, платежами, reconciliation и sensitive-debug сессиями.
-4. Подключить реального платёжного провайдера к готовому state machine и выключить mock auto-confirm.
-5. Реализовать node-agent и исходящий desired-state протокол без Tailscale.
-6. Вынести expiration/reconciliation в отдельный worker с distributed/advisory lock.
-7. Выполнить ручной end-to-end импорт Telegram → Xray → AmneziaVPN на целевых ОС.
-8. Развернуть production control plane и реальные VPN-ноды для США, Нидерландов и Германии.
-9. Добавить пользовательские scoped credentials, device activation и subscription API.
-10. Последним этапом реализовать собственный multi-server клиент: per-node credentials, sing-box remote profile, `urltest`, автоматический выбор, failover и клиентскую диагностику.
+1. [x] Единая `.env` и `configctl`.
+2. [x] PostgreSQL audit и Grafana/Loki/Alloy без alerting.
+3. [x] Web admin: клиенты, платежи, reconciliation, устройства и sensitive-debug.
+4. [x] Node-agent, desired-state, отдельный worker и advisory lock.
+5. [x] Scoped device activation/profile API — foundation этапа 9.
+6. [x] Bot UI: QR payment choice, инструкция, trial и promo; ссылки канала/поддержки требуют значений.
+7. [ ] Выбрать и подключить реального платёжного провайдера, выключить mock auto-confirm.
+8. [ ] Развернуть production control plane и реальные ноды США/Нидерланды/Германия; проверить HTTPS agent traffic.
+9. [ ] Выполнить ручной импорт Telegram → Xray → AmneziaVPN на целевых ОС и реальные latency/connection проверки.
+10. [ ] Последним этапом: per-node credentials, sing-box remote profile, `urltest`, авто-выбор, failover и клиентская диагностика.
