@@ -12,6 +12,8 @@ from app.logging_config import configure_logging
 from aiogram.exceptions import TelegramBadRequest
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -26,6 +28,12 @@ configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_URL = os.getenv("API_URL", "http://api:8000")
 SERVICE_API_TOKEN = os.environ["SERVICE_API_TOKEN"]
+TELEGRAM_CHANNEL_URL = os.getenv("TELEGRAM_CHANNEL_URL", "").strip()
+SUPPORT_URL = os.getenv("SUPPORT_URL", "").strip()
+
+
+class PromoFlow(StatesGroup):
+    waiting_code = State()
 
 
 def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.AsyncClient:
@@ -43,6 +51,16 @@ router = Router()
 # =========================================================
 
 def main_menu() -> InlineKeyboardMarkup:
+    channel_button = (
+        InlineKeyboardButton(text="📣 Наш канал", url=TELEGRAM_CHANNEL_URL)
+        if TELEGRAM_CHANNEL_URL
+        else InlineKeyboardButton(text="📣 Наш канал", callback_data="channel_info")
+    )
+    support_button = (
+        InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)
+        if SUPPORT_URL
+        else InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -57,6 +75,15 @@ def main_menu() -> InlineKeyboardMarkup:
                     callback_data="buy_vpn",
                 ),
             ],
+            [
+                InlineKeyboardButton(text="🎁 Тест на 3 дня", callback_data="trial_start"),
+                InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"),
+            ],
+            [
+                InlineKeyboardButton(text="📖 Инструкция", callback_data="instructions"),
+                support_button,
+            ],
+            [channel_button],
         ]
     )
 
@@ -284,6 +311,42 @@ async def rotate_vpn_client(subscription_id: int, node_id: int, client_type: str
         return response.json()
 
 
+async def create_access_grant(
+    telegram_id: int,
+    kind: str,
+    node_id: int,
+    client_type: str,
+    flow: str,
+    code: str | None = None,
+) -> dict:
+    async with api_client(base_url=API_URL, timeout=15.0) as client:
+        response = await client.post(
+            "/subscriptions/access-grants",
+            json={
+                "telegram_id": telegram_id,
+                "kind": kind,
+                "code": code,
+                "node_id": node_id,
+                "client_type": client_type,
+                "flow": flow,
+                "fingerprint": "chrome",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def available_nodes() -> list[dict]:
+    return [
+        node
+        for node in await get_nodes()
+        if node.get("status") == "active"
+        and node.get("health_status") != "offline"
+        and node.get("active_connections", 0) < node.get("capacity", 0)
+        and country_label(node.get("region"))
+    ]
+
+
 def qr_file(value: str) -> BufferedInputFile:
     image = qrcode.make(value)
     output = BytesIO()
@@ -381,10 +444,13 @@ async def start_handler(message: Message):
         )
 
         await message.answer(
-            "👋 Добро пожаловать!\n\n"
-            "Это VPN-сервис.\n"
-            "Здесь ты можешь управлять своей VPN-подпиской.",
+            "👋 <b>Добро пожаловать в VPN-сервис!</b>\n\n"
+            "• VLESS Reality и XTLS Vision\n"
+            "• серверы в США, Нидерландах и Германии\n"
+            "• ключ для AmneziaVPN или универсального VLESS\n\n"
+            "Можно начать с бесплатного теста на 3 дня.",
             reply_markup=main_menu(),
+            parse_mode="HTML",
         )
 
     except httpx.HTTPError:
@@ -406,6 +472,214 @@ async def start_handler(message: Message):
             "❌ Произошла ошибка.\n"
             "Попробуй ещё раз."
         )
+
+
+@router.callback_query(F.data == "instructions")
+async def instructions_handler(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "📖 <b>Как подключиться</b>\n\n"
+        "1. Купите тариф или включите тест на 3 дня.\n"
+        "2. Выберите страну, AmneziaVPN и профиль Reality.\n"
+        "3. Нажмите «Показать ключ и QR».\n"
+        "4. В AmneziaVPN: <b>Добавить → Вставить ключ из буфера</b>.\n\n"
+        "Если подключение не заработало, пришлите поддержке страну, модель устройства и время ошибки — сам ключ отправляйте только в активной debug-сессии.",
+        parse_mode="HTML",
+        reply_markup=back_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "channel_info")
+async def channel_info_handler(callback: CallbackQuery):
+    await callback.answer("Ссылка на канал пока настраивается", show_alert=True)
+
+
+@router.callback_query(F.data == "support_info")
+async def support_info_handler(callback: CallbackQuery):
+    await callback.answer("Контакт поддержки пока настраивается", show_alert=True)
+
+
+def access_node_keyboard(nodes: list[dict], prefix: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=country_label(node["region"]),
+                    callback_data=f"{prefix}:{node['id']}",
+                )
+            ]
+            for node in nodes
+        ]
+        + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")]]
+    )
+
+
+async def finish_access_grant(
+    callback: CallbackQuery,
+    *,
+    kind: str,
+    node_id: int,
+    client_type: str,
+    profile: str,
+    code: str | None = None,
+) -> None:
+    subscription = await create_access_grant(
+        callback.from_user.id,
+        kind,
+        node_id,
+        client_type,
+        profile_flow(profile),
+        code,
+    )
+    status = await get_vpn_status(callback.from_user.id)
+    client = status.get("vpn_client")
+    expires_at = subscription["expires_at"].replace("T", " ").replace("+00:00", "")
+    label = "Тестовый доступ" if kind == "trial" else "Промокод применён"
+    await callback.message.edit_text(
+        f"✅ <b>{label}</b>\n\nДоступ действует до <b>{expires_at} UTC</b>.",
+        parse_mode="HTML",
+        reply_markup=vpn_ready_keyboard(),
+    )
+    if client:
+        await send_key_message(callback.message, client["id"], client.get("client_type", client_type))
+    await callback.answer("VPN активирован")
+
+
+@router.callback_query(F.data == "trial_start")
+async def trial_start_handler(callback: CallbackQuery):
+    nodes = await available_nodes()
+    if not nodes:
+        await callback.answer("Сейчас нет доступных серверов", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🎁 <b>Бесплатный тест на 3 дня</b>\n\nДоступ выдаётся один раз. Выберите страну:",
+        parse_mode="HTML",
+        reply_markup=access_node_keyboard(nodes, "trial_country"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("trial_country:"))
+async def trial_country_handler(callback: CallbackQuery):
+    node_id = int(callback.data.split(":")[1])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 AmneziaVPN", callback_data=f"trial_client:{node_id}:amnezia")],
+        [InlineKeyboardButton(text="🔗 Универсальный VLESS", callback_data=f"trial_client:{node_id}:universal")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="trial_start")],
+    ])
+    await callback.message.edit_text("📱 <b>Выберите VPN-клиент</b>", parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("trial_client:"))
+async def trial_client_handler(callback: CallbackQuery):
+    _, node_id, client_type = callback.data.split(":")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛡 Reality", callback_data=f"trial_confirm:{node_id}:{client_type}:standard")],
+        [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"trial_confirm:{node_id}:{client_type}:vision")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"trial_country:{node_id}")],
+    ])
+    await callback.message.edit_text("🔐 <b>Выберите профиль VLESS</b>", parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("trial_confirm:"))
+async def trial_confirm_handler(callback: CallbackQuery):
+    try:
+        _, node_id, client_type, profile = callback.data.split(":")
+        await finish_access_grant(
+            callback,
+            kind="trial",
+            node_id=int(node_id),
+            client_type=client_type,
+            profile=profile,
+        )
+    except httpx.HTTPStatusError as exc:
+        message = "Тест уже использован или у вас была подписка" if exc.response.status_code == 409 else "Не удалось выдать тестовый доступ"
+        await callback.answer(message, show_alert=True)
+    except Exception:
+        logging.exception("Trial activation failed")
+        await callback.answer("Не удалось выдать тестовый доступ", show_alert=True)
+
+
+@router.callback_query(F.data == "promo_start")
+async def promo_start_handler(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(PromoFlow.waiting_code)
+    await callback.message.edit_text(
+        "🏷 <b>Введите промокод одним сообщением</b>",
+        parse_mode="HTML",
+        reply_markup=back_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(PromoFlow.waiting_code)
+async def promo_code_handler(message: Message, state: FSMContext):
+    code = (message.text or "").strip().upper()
+    if not code or len(code) > 64:
+        await message.answer("Введите корректный промокод.")
+        return
+    await state.update_data(code=code)
+    nodes = await available_nodes()
+    if not nodes:
+        await message.answer("Сейчас нет доступных серверов.", reply_markup=main_menu())
+        await state.clear()
+        return
+    await message.answer(
+        "🌍 <b>Промокод принят для проверки.</b> Выберите страну:",
+        parse_mode="HTML",
+        reply_markup=access_node_keyboard(nodes, "promo_country"),
+    )
+
+
+@router.callback_query(F.data.startswith("promo_country:"))
+async def promo_country_handler(callback: CallbackQuery):
+    node_id = int(callback.data.split(":")[1])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 AmneziaVPN", callback_data=f"promo_client:{node_id}:amnezia")],
+        [InlineKeyboardButton(text="🔗 Универсальный VLESS", callback_data=f"promo_client:{node_id}:universal")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="promo_start")],
+    ])
+    await callback.message.edit_text("📱 <b>Выберите VPN-клиент</b>", parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("promo_client:"))
+async def promo_client_handler(callback: CallbackQuery):
+    _, node_id, client_type = callback.data.split(":")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛡 Reality", callback_data=f"promo_confirm:{node_id}:{client_type}:standard")],
+        [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"promo_confirm:{node_id}:{client_type}:vision")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"promo_country:{node_id}")],
+    ])
+    await callback.message.edit_text("🔐 <b>Выберите профиль VLESS</b>", parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("promo_confirm:"))
+async def promo_confirm_handler(callback: CallbackQuery, state: FSMContext):
+    try:
+        data = await state.get_data()
+        code = data.get("code")
+        if not code:
+            await callback.answer("Сначала введите промокод", show_alert=True)
+            return
+        _, node_id, client_type, profile = callback.data.split(":")
+        await finish_access_grant(
+            callback,
+            kind="promo",
+            node_id=int(node_id),
+            client_type=client_type,
+            profile=profile,
+            code=code,
+        )
+        await state.clear()
+    except httpx.HTTPStatusError as exc:
+        message = "Промокод неверный или уже использован" if exc.response.status_code in {404, 409} else "Не удалось применить промокод"
+        await callback.answer(message, show_alert=True)
+    except Exception:
+        logging.exception("Promo activation failed")
+        await callback.answer("Не удалось применить промокод", show_alert=True)
 
 
 # =========================================================
@@ -812,7 +1086,28 @@ async def profile_handler(callback: CallbackQuery):
 # =========================================================
 
 @router.callback_query(F.data.startswith("confirm_buy:"))
-async def confirm_buy_handler(
+async def confirm_buy_handler(callback: CallbackQuery):
+    _, plan_id, node_id, client_type, profile = callback.data.split(":")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="📱 Оплатить по QR",
+                callback_data=f"pay_qr:{plan_id}:{node_id}:{client_type}:{profile}",
+            )
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"profile:{plan_id}:{node_id}:{client_type}:{profile}")],
+    ])
+    await callback.message.edit_text(
+        "💳 <b>Выберите способ оплаты</b>\n\n"
+        "Сейчас доступна оплата по QR. После подключения реального провайдера здесь появятся дополнительные варианты.",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pay_qr:"))
+async def pay_qr_handler(
     callback: CallbackQuery,
 ):
     try:
@@ -887,8 +1182,8 @@ async def confirm_buy_handler(
 
         try:
             await callback.message.edit_text(
-                "⏳ <b>Активируем VPN...</b>\n\n"
-                "Создаём подписку.",
+                "⏳ <b>Создаём QR-платёж...</b>\n\n"
+                "После подтверждения VPN активируется автоматически.",
                 parse_mode="HTML",
             )
         except TelegramBadRequest:
@@ -1034,11 +1329,13 @@ async def confirm_buy_handler(
 @router.callback_query(F.data == "main_menu")
 async def main_menu_handler(
     callback: CallbackQuery,
+    state: FSMContext,
 ):
+    await state.clear()
     try:
         await callback.message.edit_text(
             "👋 <b>VPN-сервис</b>\n\n"
-            "Выберите действие:",
+            "VLESS Reality для AmneziaVPN. Выберите действие:",
             reply_markup=main_menu(),
             parse_mode="HTML",
         )

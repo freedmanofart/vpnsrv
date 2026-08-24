@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -23,6 +24,13 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 class DebugSessionCreate(BaseModel):
     reason: str = Field(min_length=3, max_length=1000)
     duration_minutes: int = Field(default=30, ge=1, le=1440)
+
+
+class DebugSnapshotCreate(BaseModel):
+    secrets: dict
+
+
+logger = logging.getLogger(__name__)
 
 
 @router.get("", response_class=HTMLResponse, include_in_schema=False)
@@ -112,6 +120,54 @@ async def close_debug_session(
     return {"id": session.id, "status": session.status}
 
 
+@router.post(
+    "/debug-sessions/{session_id}/snapshot",
+    dependencies=[Depends(require_admin)],
+)
+async def capture_debug_snapshot(
+    session_id: int,
+    data: DebugSnapshotCreate,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    session = await db.get(DebugSession, session_id)
+    now = datetime.now(timezone.utc)
+    if (
+        session is None
+        or session.status != "active"
+        or (
+            session.expires_at
+            if session.expires_at.tzinfo is not None
+            else session.expires_at.replace(tzinfo=timezone.utc)
+        )
+        <= now
+    ):
+        raise HTTPException(status_code=409, detail="Debug session is not active")
+    entry = await write_audit(
+        db,
+        action="debug_session.sensitive_snapshot",
+        result="success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="debug_session",
+        resource_id=session.id,
+        sensitive_details={"snapshot": data.secrets},
+    )
+    logger.warning(
+        "sensitive_debug_snapshot",
+        extra={
+            "allow_sensitive": True,
+            "event": {
+                "event_type": "sensitive_debug_snapshot",
+                "debug_session_id": session.id,
+                "audit_log_id": entry.id,
+                "snapshot": data.secrets,
+            },
+        },
+    )
+    return {"audit_log_id": entry.id, "sensitive": entry.sensitive}
+
+
 @router.delete("/devices/{device_id}", dependencies=[Depends(require_admin)])
 async def revoke_device(
     device_id: int,
@@ -154,7 +210,7 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="audit" class="hidden"><h2>Audit log</h2><div class="table"></div></section>
 </main><script>
 let state={};const sections=['plans','nodes','users','subscriptions','clients','payments','devices','debug','audit'];
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id))}
 function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}

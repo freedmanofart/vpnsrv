@@ -150,6 +150,45 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             self.assertEqual("online", node.health_status)
             self.assertEqual(12.5, node.latency_ms)
 
+    async def test_promo_extends_subscription_once(self) -> None:
+        async with self.session_factory() as db:
+            subscription = (
+                await db.execute(
+                    select(Subscription).where(Subscription.user_id == self.user_id)
+                )
+            ).scalar_one()
+            before = subscription.expires_at
+        response = await self.client.post(
+            "/subscriptions/access-grants",
+            headers=self.service_headers,
+            json={
+                "telegram_id": self.telegram_id,
+                "kind": "promo",
+                "code": "WELCOME7",
+                "node_id": self.node_id,
+                "client_type": "amnezia",
+                "flow": "xtls-rprx-vision",
+            },
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        extended = datetime.fromisoformat(response.json()["expires_at"])
+        if before.tzinfo is None:
+            before = before.replace(tzinfo=timezone.utc)
+        if extended.tzinfo is None:
+            extended = extended.replace(tzinfo=timezone.utc)
+        self.assertEqual(timedelta(days=7), extended - before)
+        repeated = await self.client.post(
+            "/subscriptions/access-grants",
+            headers=self.service_headers,
+            json={
+                "telegram_id": self.telegram_id,
+                "kind": "promo",
+                "code": "WELCOME7",
+                "node_id": self.node_id,
+            },
+        )
+        self.assertEqual(409, repeated.status_code)
+
     async def test_device_activation_profile_refresh_and_sensitive_debug(self) -> None:
         code_response = await self.client.post(
             "/v1/client/activation-codes",
@@ -178,6 +217,13 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             json={"reason": "control plane test", "duration_minutes": 5},
         )
         self.assertEqual(200, debug.status_code, debug.text)
+        snapshot = await self.client.post(
+            f"/admin/debug-sessions/{debug.json()['id']}/snapshot",
+            auth=self.admin_auth,
+            json={"secrets": {"bot_token": "fake-debug-token"}},
+        )
+        self.assertEqual(200, snapshot.status_code, snapshot.text)
+        self.assertTrue(snapshot.json()["sensitive"])
         profile = await self.client.get("/v1/client/profile", headers=device_headers)
         self.assertEqual(200, profile.status_code, profile.text)
         async with self.session_factory() as db:

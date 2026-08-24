@@ -10,6 +10,7 @@ class PlanCreate(BaseModel):
     duration_days: int
     price: Decimal
     currency: str = "RUB"
+    is_public: bool = True
 
 
 class PlanUpdate(BaseModel):
@@ -18,6 +19,7 @@ class PlanUpdate(BaseModel):
     price: Decimal | None = None
     currency: str | None = None
     is_active: bool | None = None
+    is_public: bool | None = None
 
 
 class PlanResponse(BaseModel):
@@ -30,4 +32,5 @@ class PlanResponse(BaseModel):
     price: Decimal
     currency: str
     is_active: bool
+    is_public: bool
     created_at: datetime

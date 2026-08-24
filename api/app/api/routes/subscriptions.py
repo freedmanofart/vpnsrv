@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.user import User
@@ -11,6 +13,7 @@ from app.db.models.subscription import Subscription
 from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
+from app.db.models.audit import AccessGrant
 
 from app.db.session import get_db
 
@@ -31,10 +34,13 @@ from app.services.provisioning import (
 from app.schemas.subscription import (
     SubscriptionCreate,
     SubscriptionResponse,
+    AccessGrantCreate,
     VPNClientRotate,
 )
 from app.schemas.vpn import VPNClientResponse
 from app.core.security import require_api_access
+from app.core.config import settings
+from app.services.audit import write_audit
 
 
 router = APIRouter(
@@ -42,6 +48,158 @@ router = APIRouter(
     tags=["Subscriptions"],
     dependencies=[Depends(require_api_access)],
 )
+
+
+def promo_catalog() -> dict[str, int]:
+    result: dict[str, int] = {}
+    for item in settings.promo_codes.split(","):
+        code, separator, raw_days = item.strip().partition(":")
+        if not separator:
+            continue
+        try:
+            days = int(raw_days)
+        except ValueError:
+            continue
+        if code and 1 <= days <= 365:
+            result[code.upper()] = days
+    return result
+
+
+async def system_access_plan(db: AsyncSession, days: int) -> Plan:
+    code = f"system-access-{days}d"
+    result = await db.execute(select(Plan).where(Plan.code == code))
+    plan = result.scalar_one_or_none()
+    if plan is not None:
+        return plan
+    try:
+        async with db.begin_nested():
+            plan = Plan(
+                code=code,
+                name=f"Служебный доступ на {days} дн.",
+                duration_days=days,
+                price=Decimal("0"),
+                currency="RUB",
+                is_active=True,
+                is_public=False,
+            )
+            db.add(plan)
+            await db.flush()
+            return plan
+    except IntegrityError:
+        result = await db.execute(select(Plan).where(Plan.code == code))
+        return result.scalar_one()
+
+
+def aware(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+@router.post("/access-grants", response_model=SubscriptionResponse)
+async def grant_trial_or_promo(
+    data: AccessGrantCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    user_result = await db.execute(
+        select(User).where(User.telegram_id == data.telegram_id).with_for_update()
+    )
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    kind = data.kind.lower()
+    if kind == "trial":
+        code = "TRIAL"
+        days = 3
+        previous = await db.execute(
+            select(Subscription.id).where(Subscription.user_id == user.id).limit(1)
+        )
+        if previous.scalar_one_or_none() is not None:
+            raise HTTPException(status_code=409, detail="Trial is available only once before purchase")
+    elif kind == "promo":
+        code = (data.code or "").strip().upper()
+        days = promo_catalog().get(code, 0)
+        if not days:
+            raise HTTPException(status_code=404, detail="Promo code is invalid")
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported access grant")
+
+    used_result = await db.execute(
+        select(AccessGrant.id).where(
+            AccessGrant.user_id == user.id,
+            AccessGrant.kind == kind,
+            AccessGrant.code == code,
+        )
+    )
+    if used_result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="Access grant was already used")
+
+    now = datetime.now(timezone.utc)
+    active_result = await db.execute(
+        select(Subscription).where(
+            Subscription.user_id == user.id,
+            Subscription.status == "active",
+            Subscription.expires_at > now,
+        )
+    )
+    active = active_result.scalar_one_or_none()
+    grant = AccessGrant(
+        user_id=user.id,
+        kind=kind,
+        code=code,
+        duration_days=days,
+    )
+    db.add(grant)
+
+    if active is not None:
+        if kind == "trial":
+            raise HTTPException(status_code=409, detail="Active subscription already exists")
+        active.expires_at = max(aware(active.expires_at), now) + timedelta(days=days)
+        client_result = await db.execute(
+            select(VPNClient).where(
+                VPNClient.subscription_id == active.id,
+                VPNClient.status == "active",
+            )
+        )
+        for client in client_result.scalars():
+            client.expires_at = active.expires_at
+        grant.subscription_id = active.id
+        await db.commit()
+        subscription = active
+    else:
+        plan = await system_access_plan(db, days)
+        try:
+            result = await provision_subscription(
+                db,
+                user_id=user.id,
+                plan_id=plan.id,
+                node_id=data.node_id,
+                client_type=data.client_type,
+                flow=data.flow,
+                fingerprint=data.fingerprint,
+            )
+        except ProvisioningNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ProvisioningConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ProvisioningInvalid as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ProvisioningXrayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        grant.subscription_id = result.subscription.id
+        await commit_provisioning(db, result)
+        subscription = result.subscription
+
+    await db.refresh(subscription)
+    await write_audit(
+        db,
+        action=f"access_grant.{kind}",
+        result="success",
+        actor_type="service",
+        resource_type="subscription",
+        resource_id=subscription.id,
+        details={"days": days, "code": code},
+    )
+    return subscription
 
 
 # =========================================================

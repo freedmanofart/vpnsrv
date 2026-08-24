@@ -2,20 +2,20 @@
 
 MVP сервиса выдачи VPN-доступа через Telegram. Управляющий API хранит пользователей и подписки в PostgreSQL, динамически добавляет VLESS-клиентов в Xray через gRPC и отзывает их после окончания срока действия.
 
-> Статус на 24 августа 2026 года: реализованы Telegram purchase-flow, web admin, сервисная авторизация API, mock payment state machine, асинхронное управление Xray и автоматическая reconciliation. Реальный платёжный провайдер и три production-ноды ещё не подключены.
+> Статус на 24 августа 2026 года: реализованы Telegram purchase-flow, web admin, авторизация API, payment state machine, `grpc.aio` Xray, отдельный lifecycle worker, reconciliation, outbound node-agent, device activation/profile API, PostgreSQL audit и локальные Grafana/Loki/Alloy. Реальный платёжный провайдер и production-ноды ещё не подключены.
 
 ## Архитектура
 
 ```text
-Telegram user
-      |
-      v
-aiogram bot ---> FastAPI ---> PostgreSQL
-                    |
-                    +-------> Xray HandlerService (gRPC)
-                                  |
-                                  v
-                           VLESS Reality inbound
+Telegram user ---> aiogram bot ---> FastAPI ---> PostgreSQL
+                                      ^   |
+                                      |   +-- lifecycle worker + advisory lock
+                                      |
+future VPN node-agent ----------------+-- desired state/status over HTTPS
+         |
+         +-- local Xray gRPC --> public VLESS Reality :443
+
+Docker logs ---> Grafana Alloy ---> Loki ---> Grafana (SSH tunnel)
 
 Redis входит в Compose, но прикладной код его пока не использует.
 ```
@@ -29,6 +29,9 @@ Redis входит в Compose, но прикладной код его пока 
 | `postgres` | Пользователи, тарифы, подписки, платежи, VPN-ноды и клиенты |
 | `redis` | Резерв под кэш, блокировки или фоновые задания; пока не используется |
 | `xray` | VLESS Reality и локальный gRPC API управления пользователями |
+| `worker` | Истечение подписок и reconciliation; один активный цикл через PostgreSQL advisory lock |
+| `node-agent` | Исходящее получение desired state и локальное применение его к Xray |
+| `alloy` / `loki` / `grafana` | Сбор, хранение и просмотр подробных логов без alerting |
 | `alembic` | Миграции PostgreSQL |
 
 ## Основной поток
@@ -40,8 +43,10 @@ Redis входит в Compose, но прикладной код его пока 
 5. Подтверждённый платёж атомарно создаёт подписку и `VPNClient`; при ошибке БД добавленный Xray-пользователь компенсирующе удаляется.
 6. API добавляет UUID и выбранный `flow` в Xray через асинхронный `grpc.aio` `HandlerService.AlterInbound`.
 7. Пользователю выдаётся URI `vless://...` и инструкция для выбранного клиента.
-8. Фоновый цикл API раз в 60 секунд проверяет сроки подписок и клиентов, а затем сверяет desired state PostgreSQL с Xray.
+8. Отдельный worker раз в 60 секунд под PostgreSQL advisory lock проверяет сроки и сверяет desired state PostgreSQL с Xray.
 9. Истёкший клиент удаляется из Xray и переводится в `revoked`; отсутствующие после рестарта Xray активные пользователи восстанавливаются.
+
+`XRAY_MANAGEMENT_MODE=direct` используется только домашним стендом. В production задаётся `agent`: worker меняет desired state в БД, а каждая нода сама забирает его исходящим HTTPS-запросом. Tailscale в production-схему не входит.
 
 Поддерживаемые варианты клиента:
 
@@ -94,6 +99,14 @@ Redis входит в Compose, но прикладной код его пока 
 | `POST` | `/payments` | Идемпотентно создать платёж |
 | `GET` | `/payments/{id}` | Получить состояние платежа |
 | `POST` | `/payments/webhooks/{provider}` | Принять подписанное идемпотентное событие провайдера |
+| `POST` | `/agent/v1/credentials/{node_id}/rotate` | Выпустить scoped token ноды; значение показывается один раз |
+| `GET` | `/agent/v1/state` | Desired state только для ноды из Bearer token |
+| `POST` | `/agent/v1/status` | Статус, latency и результат reconciliation от node-agent |
+| `POST` | `/v1/client/activation-codes` | Создать одноразовый код привязки устройства |
+| `POST` | `/v1/client/activate` | Обменять код на хешируемый device token |
+| `GET` | `/v1/client/profile` | Получить доступные конфигурации активной подписки |
+| `POST` | `/v1/client/refresh` | Ротировать device token и немедленно отозвать старый |
+| `POST`, `DELETE` | `/admin/debug-sessions` | Открыть или закрыть ограниченный sensitive-debug |
 
 Все прикладные маршруты, кроме `/health`, `/`, документации и платёжного webhook, требуют одну из двух схем:
 
@@ -102,7 +115,7 @@ Redis входит в Compose, но прикладной код его пока 
 
 `/db-health` также защищён. Swagger сохранён, но вызовы из него требуют авторизации. Webhook проверяет HMAC-SHA256 сырого тела с `PAYMENT_WEBHOOK_SECRET` в заголовке `X-Payment-Signature`; уникальный ID события передаётся в `X-Payment-Event-Id`.
 
-Состояния платежа: `pending → processing → paid|failed|cancelled|expired`; из `paid` разрешён только `refunded`. Повтор одного `idempotency_key` или `(provider, event_id)` возвращает уже созданный результат и не выдаёт второй VPN-клиент.
+Состояния платежа: `pending → processing → paid|failed|cancelled|expired`; из `paid` разрешён только `refunded`. Refund отзывает активные Xray-клиенты и переводит подписку в `cancelled`. Повтор одного `idempotency_key` или `(provider, event_id)` возвращает уже созданный результат и не выдаёт второй VPN-клиент.
 
 `POST /subscriptions` обратно совместим со старым телом из `user_id` и `plan_id`, но также принимает:
 
@@ -142,6 +155,10 @@ ssh -N -L 8000:127.0.0.1:8000 \
 - редактировать тарифы и включать/выключать их;
 - менять регион, ёмкость и состояние VPN-ноды;
 - проверять доступность Xray и число пользователей.
+- просматривать платежи, устройства, node health/latency и audit log;
+- отзывать device token и VPN-клиентов;
+- запускать reconciliation;
+- открывать и закрывать ограниченные sensitive-debug сессии.
 
 Административная страница использует существующие защищённые REST-методы и агрегирующий read-only endpoint `GET /admin/overview`. Перед запуском обязательно заменить пароль `change_me`.
 
@@ -155,8 +172,11 @@ ssh -N -L 8000:127.0.0.1:8000 \
 - `vpn_nodes` — сведения о VPN-серверах;
 - `vpn_node_configs` — JSON-конфигурация VLESS/Reality;
 - `vpn_clients` — UUID, нода, срок и состояние подключения.
+- `audit_logs` и `debug_sessions` — действия оператора, запросы и диагностические сессии;
+- `node_agent_credentials` — хешированные scoped tokens нод;
+- `client_devices` и `activation_codes` — привязанные установки будущего клиента.
 
-Цепочка миграций: `45a8774c25bc` → `9d1db660812a` → `b6c1e7a4d920` → `c3f8a91e74bd`.
+Цепочка миграций: `45a8774c25bc` → `9d1db660812a` → `b6c1e7a4d920` → `c3f8a91e74bd` → `d8e26f19a4c1`.
 
 ## Конфигурация и локальный запуск
 

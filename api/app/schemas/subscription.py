@@ -19,6 +19,16 @@ class VPNClientRotate(BaseModel):
     fingerprint: str = "chrome"
 
 
+class AccessGrantCreate(BaseModel):
+    telegram_id: int
+    kind: str
+    code: str | None = None
+    node_id: int
+    client_type: str = "amnezia"
+    flow: str = "xtls-rprx-vision"
+    fingerprint: str = "chrome"
+
+
 class SubscriptionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

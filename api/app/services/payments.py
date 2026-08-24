@@ -5,10 +5,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models.payment import Payment, PaymentEvent
 from app.db.models.plan import Plan
+from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.vpn_node import VPNNode
+from app.db.models.vpn_client import VPNClient
 from app.schemas.payment import PaymentCreate
 from app.services.provisioning import (
     ProvisioningConflict,
@@ -22,6 +25,7 @@ from app.services.provisioning import (
 )
 from app.services.xray import XrayClient
 from app.services.payment_providers import get_payment_provider
+from app.services.vpn_expiration import revoke_vpn_client
 
 
 class PaymentError(Exception):
@@ -234,6 +238,35 @@ async def process_payment_event(
             await db.rollback()
             raise PaymentProvisioningError(str(exc)) from exc
         payment.subscription_id = provisioning.subscription.id
+
+    if target_status == "refunded" and payment.subscription_id is not None:
+        subscription = await db.get(Subscription, payment.subscription_id)
+        if subscription is not None and subscription.status == "active":
+            client_result = await db.execute(
+                select(VPNClient).where(
+                    VPNClient.subscription_id == subscription.id,
+                    VPNClient.status == "active",
+                )
+            )
+            clients = client_result.scalars().all()
+            if settings.xray_management_mode == "agent":
+                for client in clients:
+                    client.status = "revoked"
+                    client.revoked_at = now
+            else:
+                for client in clients:
+                    revoked = await revoke_vpn_client(
+                        db,
+                        client,
+                        now,
+                        xray_factory=xray_factory,
+                    )
+                    if not revoked:
+                        await db.rollback()
+                        raise PaymentProvisioningError(
+                            f"Could not revoke VPN client {client.id} for refund"
+                        )
+            subscription.status = "cancelled"
 
     payment.status = target_status
     payment.details = {**(payment.details or {}), **payload.get("details", {})}

@@ -24,7 +24,7 @@ from app.services.lifecycle import run_lifecycle_once
 from app.core.security import require_api_access
 from app.core.config import settings
 from app.core.logging import configure_logging, request_id_context
-from app.services.audit import write_audit
+from app.services.audit import sensitive_debug_active, write_audit
 
 
 logger = logging.getLogger(__name__)
@@ -157,10 +157,13 @@ async def request_context_and_audit(request: Request, call_next):
                 }
             },
         )
-        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-            principal = getattr(request.state, "principal", None)
-            try:
-                async with AsyncSessionLocal() as audit_db:
+        principal = getattr(request.state, "principal", None)
+        try:
+            async with AsyncSessionLocal() as audit_db:
+                should_audit = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+                if not should_audit and request.headers.get("authorization"):
+                    should_audit = await sensitive_debug_active(audit_db)
+                if should_audit:
                     await write_audit(
                         audit_db,
                         action=f"http.{request.method.lower()}",
@@ -171,9 +174,12 @@ async def request_context_and_audit(request: Request, call_next):
                         resource_id=request.url.path,
                         ip_address=request.client.host if request.client else None,
                         details={"status_code": status_code, "duration_ms": duration_ms},
+                        sensitive_details={
+                            "authorization": request.headers.get("authorization")
+                        },
                     )
-            except Exception:
-                logger.exception("request audit failed")
+        except Exception:
+            logger.exception("request audit failed")
         request_id_context.reset(context_token)
 
 

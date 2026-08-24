@@ -276,6 +276,47 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 await db.scalar(select(func.count()).select_from(PaymentEvent)),
             )
 
+    async def test_refund_revokes_subscription_and_xray_access(self) -> None:
+        async with self.session_factory() as db:
+            payment = await create_payment(
+                db,
+                self.payment_data("telegram:refund"),
+                provider="mock",
+            )
+            paid = await process_payment_event(
+                db,
+                provider="mock",
+                event_id="refund-paid",
+                provider_payment_id=payment.provider_payment_id,
+                target_status="paid",
+                payload={},
+                xray_factory=FakeXray,
+            )
+            refunded = await process_payment_event(
+                db,
+                provider="mock",
+                event_id="refund-completed",
+                provider_payment_id=payment.provider_payment_id,
+                target_status="refunded",
+                payload={},
+                xray_factory=FakeXray,
+            )
+
+            subscription = await db.get(Subscription, paid.subscription_id)
+            client = (
+                await db.execute(
+                    select(VPNClient).where(
+                        VPNClient.subscription_id == paid.subscription_id
+                    )
+                )
+            ).scalar_one()
+            self.assertEqual("refunded", refunded.status)
+            self.assertEqual("cancelled", subscription.status)
+            self.assertEqual("revoked", client.status)
+            self.assertNotIn(
+                f"vpn-{client.id}", FakeXray.users["node-grpc:10085"]
+            )
+
     async def test_xray_add_failure_rolls_back_paid_provisioning(self) -> None:
         async with self.session_factory() as db:
             payment = await create_payment(

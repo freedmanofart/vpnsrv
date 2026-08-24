@@ -44,7 +44,9 @@ class JSONFormatter(logging.Formatter):
             payload["request_id"] = request_id
         event = getattr(record, "event", None)
         if isinstance(event, dict):
-            payload.update(redact(event))
+            payload.update(
+                event if getattr(record, "allow_sensitive", False) else redact(event)
+            )
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, default=str)

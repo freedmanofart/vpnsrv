@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -93,6 +93,25 @@ class ActivationCode(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     device_id: Mapped[int | None] = mapped_column(ForeignKey("client_devices.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AccessGrant(Base):
+    __tablename__ = "access_grants"
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", "code", name="uq_access_grant_user_kind_code"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    subscription_id: Mapped[int | None] = mapped_column(ForeignKey("subscriptions.id"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

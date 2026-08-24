@@ -24,7 +24,7 @@ async def get_plans(
 ):
     result = await db.execute(
         select(Plan)
-        .where(Plan.is_active.is_(True))
+        .where(Plan.is_active.is_(True), Plan.is_public.is_(True))
         .order_by(Plan.duration_days)
     )
 
@@ -57,6 +57,7 @@ async def create_plan(
         duration_days=data.duration_days,
         price=data.price,
         currency=data.currency,
+        is_public=data.is_public,
     )
 
     db.add(plan)
