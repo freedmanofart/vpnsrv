@@ -1,0 +1,166 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models.user import User
+from app.db.session import get_db
+from app.schemas.user import UserCreate, UserResponse
+from app.db.models.subscription import Subscription
+from app.db.models.vpn_client import VPNClient
+
+router = APIRouter(
+    prefix="/users",
+    tags=["Users"],
+)
+
+
+@router.post(
+    "",
+    response_model=UserResponse,
+)
+async def create_user(
+    data: UserCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(User).where(
+            User.telegram_id == data.telegram_id
+        )
+    )
+
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="User already exists",
+        )
+
+    user = User(
+        telegram_id=data.telegram_id,
+        username=data.username,
+        first_name=data.first_name,
+        last_name=data.last_name,
+    )
+
+    db.add(user)
+
+    await db.commit()
+    await db.refresh(user)
+
+    return user
+
+
+@router.get(
+    "/{telegram_id}",
+    response_model=UserResponse,
+)
+async def get_user(
+    telegram_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(User).where(
+            User.telegram_id == telegram_id
+        )
+    )
+
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    return user
+@router.get(
+    "/{telegram_id}/vpn-status",
+)
+async def get_user_vpn_status(
+    telegram_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    # -----------------------------------------------------
+    # User
+    # -----------------------------------------------------
+
+    result = await db.execute(
+        select(User).where(
+            User.telegram_id == telegram_id
+        )
+    )
+
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found",
+        )
+
+    # -----------------------------------------------------
+    # Last subscription
+    # -----------------------------------------------------
+
+    result = await db.execute(
+        select(Subscription)
+        .where(
+            Subscription.user_id == user.id
+        )
+        .order_by(
+            Subscription.id.desc()
+        )
+    )
+
+    subscription = result.scalars().first()
+
+    # -----------------------------------------------------
+    # Last VPN client
+    # -----------------------------------------------------
+
+    client = None
+
+    if subscription:
+        result = await db.execute(
+            select(VPNClient)
+            .where(
+                VPNClient.subscription_id == subscription.id
+            )
+            .order_by(
+                VPNClient.id.desc()
+            )
+        )
+
+        client = result.scalars().first()
+
+    return {
+        "user": {
+            "id": user.id,
+            "telegram_id": user.telegram_id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "status": user.status,
+        },
+        "subscription": (
+            {
+                "id": subscription.id,
+                "status": subscription.status,
+                "starts_at": subscription.starts_at,
+                "expires_at": subscription.expires_at,
+            }
+            if subscription
+            else None
+        ),
+        "vpn_client": (
+            {
+                "id": client.id,
+                "status": client.status,
+                "client_uuid": client.client_uuid,
+                "expires_at": client.expires_at,
+            }
+            if client
+            else None
+        ),
+    }

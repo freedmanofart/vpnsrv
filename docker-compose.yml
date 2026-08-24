@@ -1,0 +1,158 @@
+services:
+
+  postgres:
+    image: postgres:17
+    container_name: vpn-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+    networks:
+      - vpn-backend
+
+
+  redis:
+    image: redis:8-alpine
+    container_name: vpn-redis
+    restart: unless-stopped
+
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+
+    volumes:
+      - redis_data:/data
+
+    ports:
+      - "127.0.0.1:6379:6379"
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "ping"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+    networks:
+      - vpn-backend
+
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+
+    container_name: vpn-api
+    restart: unless-stopped
+
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      LOG_LEVEL: ${LOG_LEVEL}
+
+      XRAY_API_ADDRESS: ${XRAY_API_ADDRESS}
+      XRAY_INBOUND_TAG: ${XRAY_INBOUND_TAG}
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      - ./api/app:/app/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+
+    ports:
+      - "8000:8000"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    networks:
+      - vpn-backend
+
+
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+
+    container_name: vpn-bot
+    restart: unless-stopped
+
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      API_URL: ${API_URL}
+      LOG_LEVEL: ${LOG_LEVEL}
+      VPN_PLAN_ID: ${VPN_PLAN_ID}
+      VPN_NODE_ID: ${VPN_NODE_ID}
+
+    volumes:
+      - ./bot/app:/app/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+
+    depends_on:
+      api:
+        condition: service_started
+
+    networks:
+      - vpn-backend
+
+  xray:
+    image: ghcr.io/xtls/xray-core:latest
+    container_name: vpn-xray
+    restart: unless-stopped
+
+    volumes:
+      - ./xray/config.json:/usr/local/etc/xray/config.json:ro
+
+    network_mode: host
+
+    cap_add:
+      - NET_BIND_SERVICE
+
+    command:
+      - run
+      - -config
+      - /usr/local/etc/xray/config.json
+
+volumes:
+  postgres_data:
+    name: vpn-postgres-data
+
+  redis_data:
+    name: vpn-redis-data
+
+
+networks:
+  vpn-backend:
+    name: vpn-backend
+    driver: bridge
