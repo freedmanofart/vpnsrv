@@ -6,6 +6,10 @@ from pydantic import BaseModel, ConfigDict
 class SubscriptionCreate(BaseModel):
     user_id: int
     plan_id: int
+    node_id: int | None = None
+    client_type: str = "universal"
+    flow: str = ""
+    fingerprint: str = "chrome"
 
 
 class SubscriptionResponse(BaseModel):

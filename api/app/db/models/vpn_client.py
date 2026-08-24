@@ -36,6 +36,18 @@ class VPNClient(Base):
         nullable=False,
     )
 
+    client_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="universal"
+    )
+
+    flow: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )
+
+    fingerprint: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="chrome"
+    )
+
     client_uuid: Mapped[str] = mapped_column(
         String(36),
         unique=True,

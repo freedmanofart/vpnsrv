@@ -378,6 +378,9 @@ async def create_vpn_client(
         subscription_id=data.subscription_id,
         node_id=data.node_id,
         protocol=protocol,
+        client_type="universal",
+        flow="",
+        fingerprint="chrome",
         client_uuid=str(uuid4()),
         status="active",
         expires_at=subscription.expires_at,
@@ -392,7 +395,7 @@ async def create_vpn_client(
     # -----------------------------------------------------
 
     if protocol == "vless":
-        xray = XrayClient()
+        xray = XrayClient(address=node_config.config.get("api_address"))
 
         try:
             await xray.add_vless_user(
@@ -402,6 +405,7 @@ async def create_vpn_client(
                 ),
                 client_uuid=client.client_uuid,
                 email=f"vpn-{client.id}",
+                flow=client.flow,
             )
         except XrayError:
             await db.rollback()
@@ -503,7 +507,7 @@ async def revoke_vpn_client(
     # -----------------------------------------------------
 
     if client.protocol == "vless":
-        xray = XrayClient()
+        xray = XrayClient(address=node_config.config.get("api_address"))
 
         try:
             await xray.remove_vless_user(
@@ -629,14 +633,13 @@ async def get_vpn_client_config(
     params = {
         "type": config.get("type", "tcp"),
         "security": config.get("security", "none"),
+        "encryption": "none",
     }
 
     for key in (
         "sni",
-        "fp",
         "pbk",
         "sid",
-        "flow",
         "alpn",
         "path",
         "serviceName",
@@ -645,6 +648,10 @@ async def get_vpn_client_config(
 
         if value is not None:
             params[key] = value
+
+    params["fp"] = client.fingerprint or config.get("fp", "chrome")
+    if client.flow:
+        params["flow"] = client.flow
 
     # HTTP Host для транспорта, если он отдельно задан
     if config.get("host_header"):
@@ -665,4 +672,3 @@ async def get_vpn_client_config(
         config=vless_url,
         expires_at=client.expires_at,
     )
-

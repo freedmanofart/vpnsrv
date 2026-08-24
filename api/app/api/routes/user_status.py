@@ -100,6 +100,9 @@ async def get_vpn_status(
             {
                 "id": client.id,
                 "protocol": client.protocol,
+                "client_type": client.client_type,
+                "flow": client.flow,
+                "fingerprint": client.fingerprint,
                 "status": client.status,
                 "expires_at": client.expires_at,
             }

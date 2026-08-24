@@ -11,6 +11,7 @@ from app.api.routes.users import router as users_router
 from app.api.routes.user_status import router as user_status_router
 from app.api.routes.vpn import router as vpn_router
 from app.api.routes.subscriptions import router as subscriptions_router
+from app.api.routes.admin import router as admin_router
 
 from app.db.session import get_db, AsyncSessionLocal
 
@@ -115,6 +116,7 @@ app.include_router(user_status_router)
 app.include_router(plans_router)
 app.include_router(subscriptions_router)
 app.include_router(vpn_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

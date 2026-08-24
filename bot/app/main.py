@@ -4,6 +4,7 @@ import os
 from urllib.parse import urlencode
 
 import httpx
+from app.domain import country_label, profile_flow, subscription_payload
 from aiogram.exceptions import TelegramBadRequest
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
@@ -216,7 +217,18 @@ async def get_node_configs(node_id: int) -> list[dict]:
 async def create_subscription(
     user_id: int,
     plan_id: int,
+    node_id: int,
+    client_type: str,
+    flow: str,
 ) -> dict:
+    profile = "vision" if flow == "xtls-rprx-vision" else "standard"
+    payload = subscription_payload(
+        user_id=user_id,
+        plan_id=plan_id,
+        node_id=node_id,
+        client_type=client_type,
+        profile=profile,
+    )
     async with httpx.AsyncClient(
         base_url=API_URL,
         timeout=10.0,
@@ -224,14 +236,18 @@ async def create_subscription(
 
         response = await client.post(
             "/subscriptions",
-            json={
-                "user_id": user_id,
-                "plan_id": plan_id,
-            },
+            json=payload,
         )
 
         response.raise_for_status()
 
+        return response.json()
+
+
+async def get_vpn_client_config(client_id: int) -> dict:
+    async with httpx.AsyncClient(base_url=API_URL, timeout=10.0) as client:
+        response = await client.get(f"/vpn/clients/{client_id}/config")
+        response.raise_for_status()
         return response.json()
 
 
@@ -551,38 +567,15 @@ async def buy_plan_handler(callback: CallbackQuery):
                 )
                 return
 
-        # -------------------------------------------------
-        # Confirmation
-        # -------------------------------------------------
-
-        text = (
-            "💳 <b>Подтверждение покупки</b>\n\n"
-            f"Тариф: <b>{plan['name']}</b>\n"
-            f"Стоимость: <b>{plan['price']} "
-            f"{plan['currency']}</b>\n"
-            f"Срок: <b>{plan['duration_days']} дней</b>\n\n"
-            "После подтверждения VPN будет "
-            "активирован автоматически."
-        )
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="✅ Купить",
-                        callback_data=(
-                            f"confirm_buy:{plan_id}"
-                        ),
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="⬅️ Назад",
-                        callback_data="buy_vpn",
-                    ),
-                ],
-            ]
-        )
+        nodes = [node for node in await get_nodes() if node.get("status") == "active"]
+        buttons = []
+        for node in nodes:
+            label = country_label(node.get("region"))
+            if label:
+                buttons.append([InlineKeyboardButton(text=label, callback_data=f"country:{plan_id}:{node['id']}")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="buy_vpn")])
+        text = "🌍 <b>Выберите страну подключения</b>"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
         try:
             await callback.message.edit_text(
@@ -623,6 +616,60 @@ async def buy_plan_handler(callback: CallbackQuery):
         )
 
 
+@router.callback_query(F.data.startswith("country:"))
+async def country_handler(callback: CallbackQuery):
+    _, plan_id, node_id = callback.data.split(":")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 AmneziaVPN", callback_data=f"client:{plan_id}:{node_id}:amnezia")],
+        [InlineKeyboardButton(text="🔗 Универсальный VLESS", callback_data=f"client:{plan_id}:{node_id}:universal")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"buy_plan:{plan_id}")],
+    ])
+    await callback.message.edit_text("📱 <b>Выберите VPN-клиент</b>", reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client:"))
+async def client_handler(callback: CallbackQuery):
+    _, plan_id, node_id, client_type = callback.data.split(":")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛡 Reality (совместимый)", callback_data=f"profile:{plan_id}:{node_id}:{client_type}:standard")],
+        [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"profile:{plan_id}:{node_id}:{client_type}:vision")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"country:{plan_id}:{node_id}")],
+    ])
+    await callback.message.edit_text(
+        "🔐 <b>Выберите профиль VLESS</b>\n\n"
+        "Совместимый профиль подходит большинству клиентов. Vision обычно быстрее, но требует поддержки XTLS.",
+        reply_markup=keyboard, parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("profile:"))
+async def profile_handler(callback: CallbackQuery):
+    _, plan_id, node_id, client_type, profile = callback.data.split(":")
+    plans = await get_plans()
+    nodes = await get_nodes()
+    plan = next((p for p in plans if p["id"] == int(plan_id)), None)
+    node = next((n for n in nodes if n["id"] == int(node_id)), None)
+    if not plan or not node:
+        await callback.answer("Тариф или сервер недоступен", show_alert=True)
+        return
+    profile_name = "Reality + XTLS Vision" if profile == "vision" else "Reality"
+    client_name = "AmneziaVPN" if client_type == "amnezia" else "универсальный VLESS"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Активировать", callback_data=f"confirm_buy:{plan_id}:{node_id}:{client_type}:{profile}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"client:{plan_id}:{node_id}:{client_type}")],
+    ])
+    await callback.message.edit_text(
+        "💳 <b>Подтверждение</b>\n\n"
+        f"Тариф: <b>{plan['name']}</b>\nСтрана: <b>{node.get('region') or node['name']}</b>\n"
+        f"Клиент: <b>{client_name}</b>\nПрофиль: <b>{profile_name}</b>\n"
+        f"Стоимость: <b>{plan['price']} {plan['currency']}</b>",
+        reply_markup=keyboard, parse_mode="HTML",
+    )
+    await callback.answer()
+
+
 # =========================================================
 # CONFIRM BUY
 # =========================================================
@@ -634,9 +681,9 @@ async def confirm_buy_handler(
     try:
         telegram_id = callback.from_user.id
 
-        plan_id = int(
-            callback.data.split(":", 1)[1]
-        )
+        _, raw_plan_id, raw_node_id, client_type, profile = callback.data.split(":")
+        plan_id = int(raw_plan_id)
+        node_id = int(raw_node_id)
 
         # -------------------------------------------------
         # User
@@ -713,6 +760,9 @@ async def confirm_buy_handler(
         subscription = await create_subscription(
             user_id=user_id,
             plan_id=plan_id,
+            node_id=node_id,
+            client_type=client_type,
+            flow=profile_flow(profile),
         )
 
         logging.info(
@@ -722,69 +772,14 @@ async def confirm_buy_handler(
         )
 
         # -------------------------------------------------
-        # Select active node
+        # Get the client atomically created with subscription
         # -------------------------------------------------
-
-        nodes = await get_nodes()
-
-        active_nodes = [
-            node
-            for node in nodes
-            if node.get("status") == "active"
-        ]
-
-        if not active_nodes:
-            raise RuntimeError(
-                "No active VPN nodes available"
-            )
-
-        node = active_nodes[0]
-
-        # -------------------------------------------------
-        # Create VPN client
-        # -------------------------------------------------
-
-        client_data = await create_vpn_client(
-            user_id=user_id,
-            subscription_id=subscription["id"],
-            node_id=node["id"],
-        )
-
-        logging.info(
-            "VPN client created: user_id=%s client_id=%s",
-            user_id,
-            client_data["id"],
-        )
-
-        # -------------------------------------------------
-        # Get VLESS config
-        # -------------------------------------------------
-
-        configs = await get_node_configs(
-            node["id"]
-        )
-
-        vless_config = next(
-            (
-                config
-                for config in configs
-                if config["protocol"] == "vless"
-            ),
-            None,
-        )
-
-        if not vless_config:
-            raise RuntimeError(
-                "VLESS configuration not found"
-            )
-
-        config = vless_config["config"]
-
-        vless_url = build_vless_url(
-            client_uuid=client_data["client_uuid"],
-            node=node,
-            config=config,
-        )
+        status = await get_vpn_status(telegram_id)
+        client_data = status.get("vpn_client")
+        if not client_data:
+            raise RuntimeError("VPN client was not created")
+        config_data = await get_vpn_client_config(client_data["id"])
+        vless_url = config_data["config"]
 
         # -------------------------------------------------
         # Success
@@ -813,6 +808,8 @@ async def confirm_buy_handler(
         text += (
             f"\n\n<code>{vless_url}</code>"
         )
+        if client_type == "amnezia":
+            text += "\n\nОткройте AmneziaVPN → Добавить → Вставить ключ из буфера."
 
         try:
             await callback.message.edit_text(

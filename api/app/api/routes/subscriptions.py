@@ -176,6 +176,7 @@ async def add_vless_client_to_xray(
             inbound_tag=inbound_tag,
             client_uuid=client.client_uuid,
             email=f"vpn-{client.id}",
+            flow=client.flow,
         )
 
     except XrayError as exc:
@@ -299,10 +300,21 @@ async def create_subscription(
     # VPN node
     # -----------------------------------------------------
 
-    node, node_config = await get_active_node_and_config(
-        db=db,
-        protocol="vless",
-    )
+    if data.node_id is not None:
+        node, node_config = await get_node_for_client(
+            db=db, node_id=data.node_id, protocol="vless"
+        )
+    else:
+        node, node_config = await get_active_node_and_config(
+            db=db, protocol="vless"
+        )
+
+    if data.client_type not in {"amnezia", "universal"}:
+        raise HTTPException(status_code=400, detail="Unsupported client type")
+    if data.flow not in {"", "xtls-rprx-vision"}:
+        raise HTTPException(status_code=400, detail="Unsupported VLESS flow")
+    if data.fingerprint not in {"chrome", "firefox", "safari", "randomized"}:
+        raise HTTPException(status_code=400, detail="Unsupported fingerprint")
 
     # -----------------------------------------------------
     # Subscription
@@ -336,6 +348,9 @@ async def create_subscription(
         subscription_id=subscription.id,
         node_id=node.id,
         protocol="vless",
+        client_type=data.client_type,
+        flow=data.flow,
+        fingerprint=data.fingerprint,
         client_uuid=client_uuid,
         status="active",
         expires_at=expires_at,
@@ -349,7 +364,7 @@ async def create_subscription(
     # Xray
     # -----------------------------------------------------
 
-    xray = XrayClient()
+    xray = XrayClient(address=node_config.config.get("api_address"))
 
     try:
         await add_vless_client_to_xray(
@@ -527,6 +542,9 @@ async def renew_subscription(
         subscription_id=subscription.id,
         node_id=node.id,
         protocol=protocol,
+        client_type=(previous_client.client_type if previous_client else "universal"),
+        flow=(previous_client.flow if previous_client else ""),
+        fingerprint=(previous_client.fingerprint if previous_client else "chrome"),
         client_uuid=new_uuid,
         status="active",
         expires_at=new_expires_at,
@@ -540,7 +558,7 @@ async def renew_subscription(
     # Xray
     # =====================================================
 
-    xray = XrayClient()
+    xray = XrayClient(address=node_config.config.get("api_address"))
 
     inbound_tag = node_config.config.get(
         "inbound_tag",
@@ -556,6 +574,7 @@ async def renew_subscription(
             inbound_tag=inbound_tag,
             client_uuid=new_client.client_uuid,
             email=f"vpn-{new_client.id}",
+            flow=new_client.flow,
         )
 
     except XrayError as exc:

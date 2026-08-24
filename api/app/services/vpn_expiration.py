@@ -52,7 +52,7 @@ async def revoke_vpn_client(
         return False
 
     if client.protocol == "vless":
-        xray = XrayClient()
+        xray = XrayClient(address=node_config.config.get("api_address"))
 
         try:
             await xray.remove_vless_user(

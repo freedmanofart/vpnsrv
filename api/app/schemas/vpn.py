@@ -63,6 +63,9 @@ class VPNClientResponse(BaseModel):
     subscription_id: int
     node_id: int
     protocol: str
+    client_type: str
+    flow: str
+    fingerprint: str
     client_uuid: str
     status: str
     created_at: datetime

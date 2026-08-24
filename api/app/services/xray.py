@@ -1,4 +1,5 @@
 import sys
+import os
 
 import grpc
 
@@ -22,10 +23,10 @@ class XrayUserNotFound(XrayError):
 class XrayClient:
     def __init__(
         self,
-        address: str = "172.18.0.1:10085",
+        address: str | None = None,
         timeout: float = 3.0,
     ):
-        self.address = address
+        self.address = address or os.getenv("XRAY_API_ADDRESS") or "172.18.0.1:10085"
         self.timeout = timeout
 
     def _stub(self):
@@ -38,9 +39,12 @@ class XrayClient:
         client_uuid: str,
         email: str,
         level: int = 0,
+        flow: str = "",
     ) -> None:
         account = account_pb2.Account(
             id=client_uuid,
+            flow=flow,
+            encryption="none",
         )
 
         account_message = typed_message_pb2.TypedMessage(

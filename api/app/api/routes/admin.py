@@ -1,0 +1,86 @@
+import os
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models.plan import Plan
+from app.db.models.subscription import Subscription
+from app.db.models.user import User
+from app.db.models.vpn_client import VPNClient
+from app.db.models.vpn_node import VPNNode
+from app.db.session import get_db
+
+router = APIRouter(prefix="/admin", tags=["Admin"])
+security = HTTPBasic()
+
+
+def require_admin(credentials: HTTPBasicCredentials = Depends(security)) -> str:
+    expected_user = os.getenv("ADMIN_USERNAME", "admin")
+    expected_password = os.getenv("ADMIN_PASSWORD", "change_me")
+    valid = secrets.compare_digest(credentials.username.encode(), expected_user.encode())
+    valid &= secrets.compare_digest(credentials.password.encode(), expected_password.encode())
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+
+@router.get("", response_class=HTMLResponse, include_in_schema=False)
+async def admin_page(_: str = Depends(require_admin)):
+    return HTMLResponse(ADMIN_HTML)
+
+
+@router.get("/overview", dependencies=[Depends(require_admin)])
+async def overview(db: AsyncSession = Depends(get_db)):
+    async def rows(model):
+        result = await db.execute(select(model).order_by(model.id.desc()).limit(200))
+        return result.scalars().all()
+
+    users = await rows(User)
+    plans = await rows(Plan)
+    nodes = await rows(VPNNode)
+    subscriptions = await rows(Subscription)
+    clients = await rows(VPNClient)
+    return {
+        "users": [{"id": x.id, "telegram_id": x.telegram_id, "username": x.username, "status": x.status} for x in users],
+        "plans": [{"id": x.id, "code": x.code, "name": x.name, "days": x.duration_days, "price": str(x.price), "currency": x.currency, "active": x.is_active} for x in plans],
+        "nodes": [{"id": x.id, "name": x.name, "provider": x.provider, "region": x.region, "ip": x.ip_address, "status": x.status, "capacity": x.capacity} for x in nodes],
+        "subscriptions": [{"id": x.id, "user_id": x.user_id, "plan_id": x.plan_id, "status": x.status, "expires_at": x.expires_at} for x in subscriptions],
+        "clients": [{"id": x.id, "user_id": x.user_id, "subscription_id": x.subscription_id, "node_id": x.node_id, "client_type": x.client_type, "flow": x.flow, "status": x.status, "expires_at": x.expires_at} for x in clients],
+    }
+
+
+ADMIN_HTML = r"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VPN Admin</title><style>
+:root{color-scheme:dark;--bg:#0b1020;--card:#141b2d;--line:#29334d;--accent:#61dafb;--bad:#ff6b6b;--ok:#55d187}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#edf2ff;font:14px system-ui,sans-serif}header{padding:22px 4vw;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}main{padding:24px 4vw;display:grid;gap:22px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}.card,section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}.metric{font-size:28px;font-weight:700;color:var(--accent)}nav{display:flex;gap:8px;flex-wrap:wrap}button{background:#263454;color:white;border:1px solid #3c4c73;border-radius:8px;padding:9px 13px;cursor:pointer}button:hover{border-color:var(--accent)}button.danger{color:#ffb1b1}input,select,textarea{width:100%;background:#0d1425;color:white;border:1px solid var(--line);border-radius:8px;padding:9px}form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}form button{align-self:end}.table{overflow:auto}table{border-collapse:collapse;width:100%;min-width:680px}th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line)}th{color:#9fb0d0}.hidden{display:none}.ok{color:var(--ok)}.bad{color:var(--bad)}code{color:#b9e9ff}#notice{min-height:20px}</style></head>
+<body><header><div><h1>VPN Admin</h1><div id="notice">Загрузка…</div></div><button onclick="load()">Обновить</button></header><main>
+<div class="cards" id="metrics"></div>
+<nav id="nav"></nav>
+<section id="plans"><h2>Тарифы</h2><form onsubmit="createPlan(event)"><input name="code" placeholder="Код" required><input name="name" placeholder="Название" required><input name="duration_days" type="number" placeholder="Дней" required><input name="price" type="number" step="0.01" placeholder="Цена" required><input name="currency" value="RUB" required><button>Создать тариф</button></form><div class="table"></div></section>
+<section id="nodes" class="hidden"><h2>VPN-ноды</h2><form onsubmit="createNode(event)"><input name="name" placeholder="Имя" required><input name="provider" placeholder="Провайдер" required><select name="region"><option value="us">🇺🇸 США</option><option value="nl">🇳🇱 Нидерланды</option><option value="de">🇩🇪 Германия</option></select><input name="ip_address" placeholder="IP" required><input name="hostname" placeholder="Hostname"><input name="capacity" type="number" value="100"><button>Создать ноду</button></form><details><summary>Добавить VLESS Reality конфигурацию</summary><form onsubmit="createConfig(event)"><input name="node_id" type="number" placeholder="Node ID" required><input name="api_address" placeholder="Tailscale gRPC host:port" required><input name="host" placeholder="Публичный host" required><input name="port" type="number" value="443" required><input name="sni" placeholder="SNI" required><input name="pbk" placeholder="Public key" required><input name="sid" placeholder="Short ID" required><input name="inbound_tag" value="vless-reality"><button>Добавить</button></form></details><div class="table"></div></section>
+<section id="users" class="hidden"><h2>Пользователи</h2><div class="table"></div></section>
+<section id="subscriptions" class="hidden"><h2>Подписки</h2><div class="table"></div></section>
+<section id="clients" class="hidden"><h2>VPN-клиенты</h2><div class="table"></div></section>
+</main><script>
+let state={};const sections=['plans','nodes','users','subscriptions','clients'];
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id))}
+function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
+async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';document.getElementById('metrics').innerHTML=sections.map(x=>`<div class="card"><div>${x}</div><div class="metric">${state[x].length}</div></div>`).join('');table('plans',state.plans);table('nodes',state.nodes);table('users',state.users);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+document.getElementById('nav').innerHTML=sections.map(x=>`<button onclick="show('${x}')">${x}</button>`).join('');
+async function sendForm(e,url,map){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));for(let k of ['duration_days','price','capacity','node_id','port'])if(k in f)f[k]=Number(f[k]);if(map)f=map(f);try{await request(url(f),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await load()}catch(err){alert(err.message)}}
+function createPlan(e){return sendForm(e,()=>'/plans')}
+function createNode(e){return sendForm(e,()=>'/vpn/nodes')}
+async function createConfig(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let id=Number(f.node_id);delete f.node_id;f.port=Number(f.port);let body={protocol:'vless',config:{...f,type:'tcp',security:'reality',fp:'chrome'}};try{await request('/vpn/nodes/'+id+'/configs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load()}catch(err){alert(err.message)}}
+async function renew(id){if(confirm('Продлить подписку #'+id+'?')){await request('/subscriptions/'+id+'/renew',{method:'POST'});await load()}}
+async function revoke(id){if(confirm('Отозвать клиент #'+id+'?')){await request('/vpn/clients/'+id,{method:'DELETE'});await load()}}
+load();</script></body></html>"""
