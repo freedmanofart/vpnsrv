@@ -23,7 +23,9 @@ from app.services.xray import (
 from app.schemas.subscription import (
     SubscriptionCreate,
     SubscriptionResponse,
+    VPNClientRotate,
 )
+from app.schemas.vpn import VPNClientResponse
 
 
 router = APIRouter(
@@ -665,3 +667,93 @@ async def renew_subscription(
     await db.refresh(subscription)
 
     return subscription
+
+
+@router.post("/{subscription_id}/rotate", response_model=VPNClientResponse)
+async def rotate_subscription_client(
+    subscription_id: int,
+    data: VPNClientRotate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Reissues a key, optionally moving it to another node, without extending time."""
+    now = datetime.now(timezone.utc)
+    subscription = await db.get(Subscription, subscription_id)
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    if subscription.status != "active" or subscription.expires_at <= now:
+        raise HTTPException(status_code=400, detail="Subscription is not active")
+    if data.client_type not in {"amnezia", "universal"}:
+        raise HTTPException(status_code=400, detail="Unsupported client type")
+    if data.flow not in {"", "xtls-rprx-vision"}:
+        raise HTTPException(status_code=400, detail="Unsupported VLESS flow")
+    if data.fingerprint not in {"chrome", "firefox", "safari", "randomized"}:
+        raise HTTPException(status_code=400, detail="Unsupported fingerprint")
+
+    user = await get_user(db, subscription.user_id)
+    target_node, target_config = await get_node_for_client(db, data.node_id, "vless")
+    result = await db.execute(
+        select(VPNClient)
+        .where(VPNClient.subscription_id == subscription.id, VPNClient.status == "active")
+        .order_by(VPNClient.id.desc())
+    )
+    previous = result.scalars().first()
+
+    new_client = VPNClient(
+        user_id=user.id,
+        subscription_id=subscription.id,
+        node_id=target_node.id,
+        protocol="vless",
+        client_type=data.client_type,
+        flow=data.flow,
+        fingerprint=data.fingerprint,
+        client_uuid=str(uuid4()),
+        status="active",
+        expires_at=subscription.expires_at,
+    )
+    db.add(new_client)
+    await db.flush()
+
+    target_xray = XrayClient(address=target_config.config.get("api_address"))
+    target_tag = target_config.config.get("inbound_tag", "vless-reality")
+    try:
+        await target_xray.add_vless_user(
+            inbound_tag=target_tag,
+            client_uuid=new_client.client_uuid,
+            email=f"vpn-{new_client.id}",
+            flow=new_client.flow,
+        )
+    except XrayError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"Failed to add replacement client: {exc}")
+
+    if previous:
+        old_result = await db.execute(
+            select(VPNNodeConfig).where(
+                VPNNodeConfig.node_id == previous.node_id,
+                VPNNodeConfig.protocol == previous.protocol,
+            )
+        )
+        old_config = old_result.scalar_one_or_none()
+        try:
+            if not old_config:
+                raise XrayError("Previous node configuration not found")
+            old_xray = XrayClient(address=old_config.config.get("api_address"))
+            await old_xray.remove_vless_user(
+                inbound_tag=old_config.config.get("inbound_tag", "vless-reality"),
+                email=f"vpn-{previous.id}",
+            )
+        except XrayUserNotFound:
+            pass
+        except XrayError as exc:
+            try:
+                await target_xray.remove_vless_user(target_tag, f"vpn-{new_client.id}")
+            except (XrayError, XrayUserNotFound):
+                pass
+            await db.rollback()
+            raise HTTPException(status_code=502, detail=f"Failed to revoke previous client: {exc}")
+        previous.status = "revoked"
+        previous.revoked_at = now
+
+    await db.commit()
+    await db.refresh(new_client)
+    return new_client

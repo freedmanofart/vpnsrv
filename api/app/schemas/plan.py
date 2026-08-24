@@ -12,6 +12,14 @@ class PlanCreate(BaseModel):
     currency: str = "RUB"
 
 
+class PlanUpdate(BaseModel):
+    name: str | None = None
+    duration_days: int | None = None
+    price: Decimal | None = None
+    currency: str | None = None
+    is_active: bool | None = None
+
+
 class PlanResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

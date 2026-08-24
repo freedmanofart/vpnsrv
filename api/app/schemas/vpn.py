@@ -13,6 +13,16 @@ class VPNNodeCreate(BaseModel):
     capacity: int = 100
 
 
+class VPNNodeUpdate(BaseModel):
+    name: str | None = None
+    provider: str | None = None
+    region: str | None = None
+    hostname: str | None = None
+    ip_address: str | None = None
+    status: str | None = None
+    capacity: int | None = None
+
+
 class VPNNodeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -78,3 +88,10 @@ class VPNClientConfigResponse(BaseModel):
     protocol: str
     config: str
     expires_at: datetime
+
+
+class VPNNodeHealthResponse(BaseModel):
+    node_id: int
+    status: str
+    xray_users: int | None = None
+    error: str | None = None

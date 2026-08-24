@@ -12,6 +12,13 @@ class SubscriptionCreate(BaseModel):
     fingerprint: str = "chrome"
 
 
+class VPNClientRotate(BaseModel):
+    node_id: int
+    client_type: str = "universal"
+    flow: str = ""
+    fingerprint: str = "chrome"
+
+
 class SubscriptionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

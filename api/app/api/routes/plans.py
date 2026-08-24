@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.plan import Plan
 from app.db.session import get_db
-from app.schemas.plan import PlanCreate, PlanResponse
+from app.schemas.plan import PlanCreate, PlanResponse, PlanUpdate
 
 
 router = APIRouter(
@@ -62,4 +62,17 @@ async def create_plan(
     await db.commit()
     await db.refresh(plan)
 
+    return plan
+
+
+@router.patch("/{plan_id}", response_model=PlanResponse)
+async def update_plan(plan_id: int, data: PlanUpdate, db: AsyncSession = Depends(get_db)):
+    plan = await db.get(Plan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    values = data.model_dump(exclude_unset=True)
+    for key, value in values.items():
+        setattr(plan, key, value)
+    await db.commit()
+    await db.refresh(plan)
     return plan

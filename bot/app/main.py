@@ -1,10 +1,13 @@
 import asyncio
+import html
+from io import BytesIO
 import logging
 import os
 from urllib.parse import urlencode
 
 import httpx
-from app.domain import country_label, profile_flow, subscription_payload
+import qrcode
+from app.domain import country_label, profile_flow, rotation_payload, subscription_payload
 from aiogram.exceptions import TelegramBadRequest
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
@@ -13,6 +16,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    BufferedInputFile,
 )
 
 
@@ -109,6 +113,14 @@ def vpn_ready_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def active_vpn_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 Показать ключ и QR", callback_data="vpn_key")],
+        [InlineKeyboardButton(text="🔄 Перевыпустить / сменить страну", callback_data="vpn_reissue")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+    ])
 
 
 # =========================================================
@@ -249,6 +261,40 @@ async def get_vpn_client_config(client_id: int) -> dict:
         response = await client.get(f"/vpn/clients/{client_id}/config")
         response.raise_for_status()
         return response.json()
+
+
+async def rotate_vpn_client(subscription_id: int, node_id: int, client_type: str, flow: str) -> dict:
+    profile = "vision" if flow == "xtls-rprx-vision" else "standard"
+    async with httpx.AsyncClient(base_url=API_URL, timeout=15.0) as client:
+        response = await client.post(
+            f"/subscriptions/{subscription_id}/rotate",
+            json=rotation_payload(node_id, client_type, profile),
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def qr_file(value: str) -> BufferedInputFile:
+    image = qrcode.make(value)
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return BufferedInputFile(output.getvalue(), filename="vpn-key.png")
+
+
+async def send_key_message(message: Message, client_id: int, client_type: str = "universal") -> None:
+    data = await get_vpn_client_config(client_id)
+    value = data["config"]
+    instruction = (
+        "AmneziaVPN → Добавить → Вставить ключ из буфера."
+        if client_type == "amnezia"
+        else "Импортируйте ссылку или QR-код в совместимое VLESS-приложение."
+    )
+    await message.answer_photo(
+        photo=qr_file(value),
+        caption=f"🔑 <b>Ваш VPN-ключ</b>\n\n<code>{html.escape(value)}</code>\n\n{instruction}",
+        parse_mode="HTML",
+        reply_markup=active_vpn_keyboard(),
+    )
 
 
 async def create_vpn_client(
@@ -412,7 +458,7 @@ async def vpn_status_handler(callback: CallbackQuery):
         try:
             await callback.message.edit_text(
                 text,
-                reply_markup=main_menu(),
+                reply_markup=(active_vpn_keyboard() if vpn_client else main_menu()),
                 parse_mode="HTML",
             )
 
@@ -441,6 +487,74 @@ async def vpn_status_handler(callback: CallbackQuery):
             "❌ Произошла ошибка",
             show_alert=True,
         )
+
+
+@router.callback_query(F.data == "vpn_key")
+async def vpn_key_handler(callback: CallbackQuery):
+    try:
+        status_data = await get_vpn_status(callback.from_user.id)
+        client = status_data.get("vpn_client")
+        if not client:
+            await callback.answer("Активный ключ не найден", show_alert=True)
+            return
+        await send_key_message(callback.message, client["id"], client.get("client_type", "universal"))
+        await callback.answer()
+    except Exception:
+        logging.exception("Failed to show VPN key")
+        await callback.answer("Не удалось получить ключ", show_alert=True)
+
+
+@router.callback_query(F.data == "vpn_reissue")
+async def vpn_reissue_handler(callback: CallbackQuery):
+    status_data = await get_vpn_status(callback.from_user.id)
+    subscription = status_data.get("subscription")
+    if not subscription or subscription.get("status") != "active":
+        await callback.answer("Активная подписка не найдена", show_alert=True)
+        return
+    nodes = [n for n in await get_nodes() if n.get("status") == "active" and country_label(n.get("region"))]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=country_label(n["region"]), callback_data=f"rotate_country:{subscription['id']}:{n['id']}")]
+        for n in nodes
+    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="vpn_status")]])
+    await callback.message.edit_text("🌍 <b>Куда перенести подключение?</b>", reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rotate_country:"))
+async def rotate_country_handler(callback: CallbackQuery):
+    _, subscription_id, node_id = callback.data.split(":")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 AmneziaVPN", callback_data=f"rotate_client:{subscription_id}:{node_id}:amnezia")],
+        [InlineKeyboardButton(text="🔗 Универсальный VLESS", callback_data=f"rotate_client:{subscription_id}:{node_id}:universal")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="vpn_reissue")],
+    ])
+    await callback.message.edit_text("📱 <b>Выберите приложение</b>", reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rotate_client:"))
+async def rotate_client_handler(callback: CallbackQuery):
+    _, subscription_id, node_id, client_type = callback.data.split(":")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛡 Reality", callback_data=f"rotate_confirm:{subscription_id}:{node_id}:{client_type}:standard")],
+        [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"rotate_confirm:{subscription_id}:{node_id}:{client_type}:vision")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rotate_country:{subscription_id}:{node_id}")],
+    ])
+    await callback.message.edit_text("🔐 <b>Выберите профиль</b>\n\nСтарый ключ будет отозван.", reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rotate_confirm:"))
+async def rotate_confirm_handler(callback: CallbackQuery):
+    try:
+        _, subscription_id, node_id, client_type, profile = callback.data.split(":")
+        client = await rotate_vpn_client(int(subscription_id), int(node_id), client_type, profile_flow(profile))
+        await callback.message.edit_text("✅ Ключ перевыпущен. Старый ключ отозван.")
+        await send_key_message(callback.message, client["id"], client_type)
+        await callback.answer("Ключ обновлён")
+    except Exception:
+        logging.exception("Failed to rotate VPN key")
+        await callback.answer("Не удалось перевыпустить ключ", show_alert=True)
 
 
 # =========================================================
@@ -806,7 +920,7 @@ async def confirm_buy_handler(
         )
 
         text += (
-            f"\n\n<code>{vless_url}</code>"
+            f"\n\n<code>{html.escape(vless_url)}</code>"
         )
         if client_type == "amnezia":
             text += "\n\nОткройте AmneziaVPN → Добавить → Вставить ключ из буфера."
@@ -824,6 +938,7 @@ async def confirm_buy_handler(
         await callback.answer(
             "✅ VPN активирован!"
         )
+        await send_key_message(callback.message, client_data["id"], client_type)
 
     except httpx.HTTPStatusError as exc:
         logging.exception(

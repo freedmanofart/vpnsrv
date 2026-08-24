@@ -1,6 +1,6 @@
 import unittest
 
-from bot.app.domain import country_label, profile_flow, subscription_payload
+from bot.app.domain import country_label, profile_flow, rotation_payload, subscription_payload
 
 
 class CountryTests(unittest.TestCase):
@@ -36,6 +36,17 @@ class ProfileTests(unittest.TestCase):
             profile_flow("tls")
         with self.assertRaises(ValueError):
             subscription_payload(1, 2, 3, "unknown", "standard")
+
+    def test_rotation_payload_preserves_selected_profile(self):
+        self.assertEqual(
+            rotation_payload(7, "amnezia", "vision"),
+            {
+                "node_id": 7,
+                "client_type": "amnezia",
+                "flow": "xtls-rprx-vision",
+                "fingerprint": "chrome",
+            },
+        )
 
 
 if __name__ == "__main__":

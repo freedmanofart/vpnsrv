@@ -44,3 +44,14 @@ def subscription_payload(
         "flow": profile_flow(profile),
         "fingerprint": "chrome",
     }
+
+
+def rotation_payload(node_id: int, client_type: str, profile: str) -> dict:
+    if client_type not in {"amnezia", "universal"}:
+        raise ValueError("Unsupported client type")
+    return {
+        "node_id": node_id,
+        "client_type": client_type,
+        "flow": profile_flow(profile),
+        "fingerprint": "chrome",
+    }

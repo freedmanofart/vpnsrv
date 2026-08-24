@@ -24,7 +24,9 @@ from app.schemas.vpn import (
     VPNNodeConfigCreate,
     VPNNodeConfigResponse,
     VPNNodeCreate,
+    VPNNodeUpdate,
     VPNNodeResponse,
+    VPNNodeHealthResponse,
 )
 
 router = APIRouter(
@@ -93,6 +95,37 @@ async def create_node(
     await db.refresh(node)
 
     return node
+
+
+@router.patch("/nodes/{node_id}", response_model=VPNNodeResponse)
+async def update_node(node_id: int, data: VPNNodeUpdate, db: AsyncSession = Depends(get_db)):
+    node = await db.get(VPNNode, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="VPN node not found")
+    values = data.model_dump(exclude_unset=True)
+    if "status" in values and values["status"] not in {"active", "offline", "maintenance", "draining", "disabled"}:
+        raise HTTPException(status_code=400, detail="Unsupported node status")
+    for key, value in values.items():
+        setattr(node, key, value)
+    await db.commit()
+    await db.refresh(node)
+    return node
+
+
+@router.get("/nodes/{node_id}/health", response_model=VPNNodeHealthResponse)
+async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
+    node = await db.get(VPNNode, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="VPN node not found")
+    result = await db.execute(select(VPNNodeConfig).where(VPNNodeConfig.node_id == node_id, VPNNodeConfig.protocol == "vless"))
+    config = result.scalar_one_or_none()
+    if not config:
+        return VPNNodeHealthResponse(node_id=node_id, status="offline", error="VLESS configuration not found")
+    try:
+        users = await XrayClient(address=config.config.get("api_address")).get_users(config.config.get("inbound_tag", "vless-reality"))
+        return VPNNodeHealthResponse(node_id=node_id, status="online", xray_users=len(users))
+    except XrayError as exc:
+        return VPNNodeHealthResponse(node_id=node_id, status="offline", error=str(exc))
 
 
 # =========================================================
