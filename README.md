@@ -259,7 +259,60 @@ Xray предупреждает, что Reality inbound фактически с�
 
 В журнале загрузки присутствуют ошибки ACPI BIOS и отключение IRQ 16. Во время аудита явного влияния на VPN-сервисы не обнаружено, но стабильность сети и оборудования нужно наблюдать. Также Fedora сообщает об отключённом SELinux.
 
-SSH разрешает вход `root` по паролю (`PermitRootLogin yes`, `PasswordAuthentication yes`). Это допустимо только для изолированного тестового стенда; предпочтительны ключи, запрет password login и ограничение SSH интерфейсом Tailscale/LAN.
+SSH разрешает вход `root` по паролю (`PermitRootLogin yes`, `PasswordAuthentication yes`). Это допустимо только для изолированного тестового стенда; предпочтительны ключи, запрет password login и ограничение SSH доверенными управляющими адресами.
+
+### Граница сети и мониторинга
+
+Повторная проверка с LAN 24 августа 2026 года подтвердила следующую поверхность домашнего сервера:
+
+- `22/tcp` — SSH доступен из локальной сети;
+- `8000/tcp` — FastAPI, Swagger и web admin доступны из локальной сети;
+- `9090/tcp` — Cockpit доступен из локальной сети;
+- `5432/tcp`, `6379/tcp`, `8443/tcp` и `10085/tcp` с LAN недоступны;
+- Docker API `2375/tcp` и `2376/tcp` закрыт;
+- через tailnet из проверенных портов доступен только `443/tcp`, используемый Funnel/Xray; SSH, API и Cockpit фильтруются.
+
+Целевое состояние домашнего сервера:
+
+1. Использовать Funnel/Xray `443/tcp` только для текущего временного теста; Tailscale не входит в production-архитектуру.
+2. Перевязать Docker-публикацию API с `0.0.0.0:8000` на `127.0.0.1:8000`.
+3. На домашнем стенде предоставлять web admin через SSH port forwarding; production admin публиковать через обычный HTTPS с прикладной авторизацией.
+4. На текущем тестовом этапе оставить Swagger, ReDoc и OpenAPI доступными; перед production закрыть их административной авторизацией либо отключить.
+5. Удалить Cockpit и закрыть `9090/tcp`, если он не используется для эксплуатации.
+6. Оставить PostgreSQL, Redis и Xray API только на loopback или внутренней Docker-сети.
+7. После настройки SSH-ключей запретить `root` login и password authentication.
+8. Host firewall не включать и не изменять; ограничение локальных служебных портов выполнять привязкой Docker-портов к loopback.
+
+Точный список удаляемых RPM-пакетов требуется сформировать после повторного SSH-аудита. Первые кандидаты — пакеты Cockpit; `firewalld`, NetworkManager, Tailscale, Docker, chrony, OpenSSH и системный журнал удалять не следует. Wi-Fi и второй default route нужно отключить или перевести в режим резервного маршрута, если они не используются как осознанный failover.
+
+Для текущего этапа вместо полноценного мониторинга используется централизованная система логов:
+
+- Grafana и Loki размещаются на отдельном облачном узле, предпочтительно Hetzner;
+- Grafana Alloy на домашнем backend, Hetzner и DigitalOcean собирает Docker logs, journald, Xray access/error logs и отправляет их в Loki по исходящему HTTPS с сервисной авторизацией или mTLS;
+- Prometheus, node exporter, cAdvisor, отдельное хранилище метрик и alerting на этом этапе не разворачиваются;
+- API и бот пишут структурированные JSON-логи с `request_id`, сервисом, нодой, регионом, операцией, результатом и длительностью;
+- выдача, отзыв, ротация и reconciliation ключей фиксируются отдельными событиями;
+- VPN-ноды пишут события подключений, отключений, трафика и latency-проверок, по которым Grafana может строить панели через LogQL;
+- обычный поток логов маскирует токены, пароли, Authorization headers, Reality private key, полный VPN URI и содержимое клиентского ключа;
+- для воспроизведения сложных ошибок предусмотрен отдельный `sensitive-debug` режим, в котором эти значения записываются полностью;
+- sensitive-debug включается на ограниченную диагностическую сессию с указанием оператора, причины и срока окончания, хранится отдельным Loki-потоком не более 24 часов и не резервируется;
+- секретные значения записываются только в тело события, но никогда не используются как Loki labels;
+- после диагностической сессии Telegram-токен, пароли, Reality private key и затронутые клиентские ключи считаются раскрытыми и подлежат ротации;
+- детали клиента (`last_seen`, traffic, online IP) хранятся в Redis/PostgreSQL и показываются в защищённой админке;
+- срок хранения подробных логов ограничивается 7–14 днями, а audit log в PostgreSQL хранится дольше.
+
+24 августа 2026 года Cockpit удалён с домашнего сервера:
+
+- удалены 9 пакетов `cockpit*` с `--no-autoremove`;
+- связанные автоматически осиротевшие зависимости не удалялись;
+- `cockpit.socket` отсутствует и неактивен;
+- `9090/tcp` закрыт и возвращает `connection refused`;
+- API `/health` после удаления отвечает `200`;
+- контейнеры API, бота, Xray, PostgreSQL и Redis продолжают работать;
+- `firewalld` по решению владельца не включается, не изменяется и исключён из текущего плана.
+- Swagger `/docs` по решению владельца остаётся доступным на текущем тестовом этапе.
+
+Для технического доступа создан пользователь `codex` с SSH key authentication и passwordless sudo. Приватный ключ хранится только на управляющем Mac в `/Users/freedman/.ssh/vpnsrv_codex`; публичный ключ установлен в `/home/codex/.ssh/authorized_keys`. Проверены вход без пароля и выполнение `sudo -n` от `root`.
 
 ## Известные проблемы
 
@@ -287,27 +340,36 @@ SSH разрешает вход `root` по паролю (`PermitRootLogin yes`,
 
 ## План масштабирования
 
-Предполагаемая целевая схема:
+Tailscale используется только временным домашним тестом и не является частью production. Целевая схема:
 
 ```text
-Home control plane
-  - Telegram bot
-  - authenticated API
-  - PostgreSQL
-  - scheduler/worker
-        |
-        +--- Tailscale ---> Hetzner Xray node
-        |
-        +--- Tailscale ---> DigitalOcean Xray node
+Telegram bot / VPN client / web admin
+                  |
+                  v
+       HTTPS production control plane
+       API + PostgreSQL + worker
+              (Hetzner)
+                  ^
+                  | outbound HTTPS desired-state/status
+          +-------+--------+
+          |                |
+ Hetzner node-agent   DigitalOcean node-agent
+          |                |
+  local Xray gRPC     local Xray gRPC
+  public VPN :443     public VPN :443
 ```
 
-На каждой внешней ноде публично открывается только VLESS/Reality endpoint. SSH и Xray gRPC должны быть доступны только через Tailscale. Для каждой ноды нужны собственные Reality private/public key, short ID, публичный hostname, gRPC address и inbound tag.
+Публичные клиенты не должны зависеть от домашнего сервера за NAT. Домашний backend остаётся development/staging-стендом либо выполняет необязательные фоновые задачи через исходящее HTTPS-соединение. Production API, subscription endpoint и Telegram webhook/polling размещаются на доступном облачном control plane.
+
+На каждой VPN-ноде публично открывается только VLESS/Reality endpoint `443/tcp`. Xray gRPC слушает только loopback. Локальный node-agent исходящими HTTPS-запросами получает desired state, применяет пользователей через Xray API и отправляет статус и логи. Входящий управляющий Xray-порт между серверами не требуется.
+
+Для каждой ноды нужны собственные Reality private/public key, short ID, публичный hostname, inbound tag, страна, город, capacity и service credential node-agent. Три реальные production-страны — США, Нидерланды и Германия — требуют минимум три физически размещённые ноды; один Hetzner и один DigitalOcean дают только две реальные локации.
 
 В `VPNNodeConfig.config` управляющий адрес задаётся полем `api_address`, например:
 
 ```json
 {
-  "api_address": "100.64.0.12:10085",
+  "api_address": "127.0.0.1:10085",
   "inbound_tag": "vless-reality",
   "host": "nl.example.com",
   "port": 443,
@@ -320,27 +382,62 @@ Home control plane
 }
 ```
 
-Если `api_address` отсутствует, используется `XRAY_API_ADDRESS`, затем локальный fallback `172.18.0.1:10085`. Это сохраняет совместимость с домашней нодой.
+В production `api_address` используется только локальным node-agent. Control plane не соединяется с Xray gRPC напрямую. Текущий прямой `XrayClient` сохраняется только для домашнего теста до внедрения node-agent.
 
 Перед добавлением второй ноды необходимо:
 
-1. Хранить управляющий `api_address` отдельно для каждой `VPNNode`.
-2. Создавать `XrayClient` по `node_id`, а не использовать глобальный `172.18.0.1:10085`.
+1. Добавить node-agent и desired-state API с сервисной авторизацией.
+2. Применять Xray-конфигурацию локально на каждой ноде.
 3. Добавить healthcheck нод и статусы `active`, `offline`, `maintenance`.
-4. Выбирать ноду по доступности, загрузке и `capacity`.
+4. Исключать перегруженные и недоступные ноды из клиентского manifest по `capacity` и здоровью.
 5. Добавить reconciliation: БД является источником истины и периодически сверяется с пользователями Xray.
 6. Вынести expiration в отдельный worker либо использовать Redis/PostgreSQL advisory lock.
-7. Защитить управляющие запросы mTLS, WireGuard/Tailscale ACL и прикладной авторизацией.
-8. Добавить метрики активных клиентов, ошибок gRPC, трафика и срока действия подписок.
+7. Защитить node-agent и logging-запросы HTTPS service token или mTLS.
+8. Писать события активных клиентов, ошибок Xray, трафика и latency в Loki.
 9. Настроить резервное копирование PostgreSQL и проверяемое восстановление.
+
+## Multi-server клиент и автовыбор
+
+Этот блок относится к последнему этапу разработки. До стабилизации backend, Telegram-бота, админки и production-нод система продолжает выдавать отдельные VLESS/AmneziaVPN-конфигурации. Финальная целевая единица выдачи — не одиночный VLESS URI, а subscription profile с несколькими VPN-нодами. Telegram-бот выдаёт одну subscription-ссылку и QR; после добавления новой ноды клиент получает её при следующем обновлении профиля без ручного перевыпуска ссылки.
+
+Новые сущности control plane:
+
+- `client_devices` — установка приложения и её состояние;
+- `subscription_tokens` — отзываемый, хранимый в виде hash токен загрузки профиля;
+- `vpn_client_credentials` — credential клиента для каждой разрешённой ноды;
+- `client_profile_versions` — версия manifest, ETag и время обновления;
+- расширенный `vpn_nodes` — country, city, priority, capacity, maintenance и public endpoint.
+
+API клиента:
+
+- `POST /v1/client/activate` — привязка устройства по коду из Telegram;
+- `GET /v1/client/profile` — подписанный JSON manifest всех доступных нод;
+- `GET /v1/subscriptions/{token}/sing-box.json` — remote sing-box profile;
+- `POST /v1/client/refresh` — обновление короткоживущего access token;
+- `POST /v1/client/diagnostics` — добровольная отправка клиентского debug bundle.
+
+Клиент строится вокруг готового sing-box core, а не собственного VPN-движка. Для каждой ноды manifest содержит отдельный VLESS Reality outbound. Группа `urltest` проверяет их через реальный proxy-запрос, выбирает лучший и использует hysteresis/tolerance, чтобы не переключаться из-за небольших колебаний.
+
+Режимы выбора:
+
+- `Auto` — лучший доступный сервер всех стран;
+- `Auto: страна` — лучший сервер выбранной страны;
+- `Manual` — закреплённая нода;
+- автоматический failover при недоступности текущей ноды.
+
+Client-side выбор учитывает реальную задержку и успешность подключения. Backend отвечает за допуск нод: не включает в manifest `offline`, `maintenance` и перегруженные серверы. Активное соединение не переключается только из-за небольшой разницы latency; немедленный failover выполняется при ошибке туннеля.
+
+Первый клиентский MVP: Android, затем iOS/macOS и desktop. До выпуска брендированного приложения тот же remote profile можно проверять в совместимом sing-box-клиенте. При форке или встраивании sing-box необходимо учитывать GPL-3.0-or-later и требования к распространению производного клиента.
 
 ## Приоритет работ
 
-1. Применить миграцию `9d1db660812a` и выполнить end-to-end тест Telegram → Xray → AmneziaVPN.
-2. Добавить авторизацию API и закрыть порт 8000 до LAN/Tailscale или localhost.
-3. Реализовать платёжный state machine и идемпотентный webhook.
-4. Перевести Xray-клиент на `grpc.aio` и привязать адрес управления к VPN-ноде.
-5. Добавить тесты создания, продления, истечения и компенсации ошибок Xray.
-6. Добавить reconciliation и безопасное восстановление после рестарта Xray.
-7. Укрепить сервер: SSH-ключи, запрет root password login, firewall, SELinux либо документированная альтернатива.
-8. После этого подключать Hetzner и DigitalOcean.
+1. Вынести конфигурацию и секреты в единый управляемый слой с `configctl`.
+2. Добавить авторизацию административного API и service token Telegram-бота.
+3. Добавить PostgreSQL audit log и централизованные Grafana/Loki/Alloy логи без alerting.
+4. Реализовать node-agent и исходящий desired-state протокол без Tailscale.
+5. Перевести прямой Xray-клиент на `grpc.aio`, добавить reconciliation и компенсацию ошибок.
+6. Расширить web admin управлением клиентами, нодами и sensitive-debug сессиями.
+7. Выполнить end-to-end тест Telegram → отдельная конфигурация → Xray → rotate/revoke/move.
+8. Развернуть production control plane и реальные VPN-ноды для США, Нидерландов и Германии.
+9. После стабилизации VPN-потока реализовать платёжный state machine и идемпотентный webhook.
+10. Последним этапом реализовать собственный multi-server клиент: device activation, subscription API, per-node credentials, sing-box remote profile, `urltest`, автоматический выбор, failover и клиентскую диагностику.
