@@ -1,5 +1,9 @@
 import unittest
+import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from bot.app.content import load_content
 from bot.app.domain import country_label, profile_flow, rotation_payload, subscription_payload
 
 
@@ -47,6 +51,25 @@ class ProfileTests(unittest.TestCase):
                 "fingerprint": "chrome",
             },
         )
+
+
+class ContentTests(unittest.TestCase):
+    def test_content_file_expands_environment_links(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "content.json"
+            path.write_text('{"links":{"support":"${TEST_SUPPORT_URL}"}}')
+            previous = os.environ.get("TEST_SUPPORT_URL")
+            os.environ["TEST_SUPPORT_URL"] = "https://example.test/support"
+            try:
+                self.assertEqual(
+                    "https://example.test/support",
+                    load_content(path)["links"]["support"],
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("TEST_SUPPORT_URL", None)
+                else:
+                    os.environ["TEST_SUPPORT_URL"] = previous
 
 
 if __name__ == "__main__":

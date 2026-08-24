@@ -18,7 +18,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
-from app.api.routes.subscriptions import renew_subscription
+from app.api.routes.subscriptions import renew_subscription, rotate_subscription_client
 from app.db.base import Base
 from app.db.models import (
     Payment,
@@ -31,6 +31,7 @@ from app.db.models import (
     VPNNodeConfig,
 )
 from app.schemas.payment import PaymentCreate
+from app.schemas.subscription import VPNClientRotate
 from app.services.payments import (
     PaymentInvalidTransition,
     PaymentProvisioningError,
@@ -401,6 +402,29 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             self.assertEqual(1, len(clients))
             self.assertEqual("active", clients[0].status)
             self.assertEqual({old_email}, set(FakeXray.users["node-grpc:10085"]))
+
+    async def test_agent_rotation_only_updates_desired_state(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            old_client_id = initial.client.id
+            payload = VPNClientRotate(
+                node_id=self.node_id,
+                client_type="amnezia",
+                flow="xtls-rprx-vision",
+                fingerprint="chrome",
+            )
+
+            with patch("app.api.routes.subscriptions.settings.xray_management_mode", "agent"):
+                rotated = await rotate_subscription_client(
+                    initial.subscription.id,
+                    payload,
+                    db,
+                )
+
+            await db.refresh(initial.client)
+            self.assertEqual("revoked", initial.client.status)
+            self.assertEqual("active", rotated.status)
+            self.assertNotEqual(old_client_id, rotated.id)
 
     async def test_expiration_revokes_xray_and_database_client(self) -> None:
         async with self.session_factory() as db:

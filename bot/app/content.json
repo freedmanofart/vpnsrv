@@ -1,0 +1,66 @@
+{
+  "texts": {
+    "welcome": "👋 <b>Добро пожаловать!</b>\n\nVPN для Android, iOS, macOS, Windows, Linux и Android TV. Выберите устройство, оплатите доступ и получите QR-код и ссылку для AmneziaVPN.",
+    "main_menu": "🏠 <b>Главное меню</b>\n\nВыберите действие:",
+    "platforms_intro": "📱 <b>Выберите устройство</b>\n\nНа следующем шаге будет официальная ссылка на клиент AmneziaVPN.",
+    "instructions": "📖 <b>Как подключиться</b>\n\n1. Нажмите «Оплатить» и выберите устройство.\n2. Установите AmneziaVPN по официальной ссылке.\n3. Выберите страну, VLESS Reality или XTLS Vision и срок.\n4. Оплатите через ЮMoney или QR.\n5. После подтверждения отсканируйте QR ключа либо скопируйте ссылку.\n6. В AmneziaVPN нажмите «Добавить → Вставить ключ из буфера».",
+    "try": "🧪 <b>Попробовать VPN</b>\n\nТестовый доступ стоит <b>50 ₽</b>. После оплаты отправьте подтверждение поддержке — тестовый ключ будет выдан отдельно.",
+    "promo": "🏷 <b>Введите промокод одним сообщением</b>",
+    "support_missing": "Ссылка поддержки пока не настроена",
+    "channel_missing": "Ссылка на канал пока не настроена"
+  },
+  "links": {
+    "support": "${SUPPORT_URL}",
+    "channel": "${TELEGRAM_CHANNEL_URL}",
+    "payment": "${YOOMONEY_PAYMENT_URL}",
+    "payment_vpn_14d": "${YOOMONEY_14D_URL}",
+    "payment_vpn_30d": "${YOOMONEY_30D_URL}",
+    "payment_vpn_90d": "${YOOMONEY_90D_URL}",
+    "try_payment": "${TRY_PAYMENT_URL}"
+  },
+  "platforms": [
+    {
+      "id": "android",
+      "label": "🤖 Android",
+      "client": "AmneziaVPN",
+      "url": "https://amnezia.org/downloads",
+      "description": "Android 9 и новее. Установите AmneziaVPN с официальной страницы загрузки."
+    },
+    {
+      "id": "ios",
+      "label": "📱 iPhone / iPad",
+      "client": "AmneziaVPN",
+      "url": "https://amnezia.org/downloads",
+      "description": "iOS 17 и новее. На странице загрузки откройте ссылку App Store."
+    },
+    {
+      "id": "macos",
+      "label": "💻 macOS",
+      "client": "AmneziaVPN",
+      "url": "https://amnezia.org/downloads",
+      "description": "macOS 14 и новее. Используйте официальный установщик или App Store."
+    },
+    {
+      "id": "windows",
+      "label": "🪟 Windows",
+      "client": "AmneziaVPN",
+      "url": "https://amnezia.org/downloads",
+      "description": "Windows 10/11 x64. Скачайте официальный установщик AmneziaVPN."
+    },
+    {
+      "id": "linux",
+      "label": "🐧 Linux",
+      "client": "AmneziaVPN",
+      "url": "https://amnezia.org/downloads",
+      "description": "Выберите сборку для вашего дистрибутива на официальной странице."
+    },
+    {
+      "id": "android_tv",
+      "label": "📺 Android TV",
+      "client": "AmneziaVPN",
+      "url": "https://docs.amnezia.org/ru/documentation/instructions/android_tv_connect/",
+      "description": "Установите AmneziaVPN из Google Play на телевизоре и перенесите ключ по официальной инструкции."
+    }
+  ],
+  "main_url_buttons": []
+}

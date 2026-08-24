@@ -622,8 +622,6 @@ async def renew_subscription(
     # Xray
     # =====================================================
 
-    xray = XrayClient(address=node_config.config.get("api_address"))
-
     inbound_tag = node_config.config.get(
         "inbound_tag",
         "vless-reality",
@@ -633,24 +631,27 @@ async def renew_subscription(
     # Step 1: Add NEW client to Xray
     # =====================================================
 
-    try:
-        await xray.add_vless_user(
-            inbound_tag=inbound_tag,
-            client_uuid=new_client.client_uuid,
-            email=f"vpn-{new_client.id}",
-            flow=new_client.flow,
-        )
+    xray = None
+    if settings.xray_management_mode == "direct":
+        xray = XrayClient(address=node_config.config.get("api_address"))
+        try:
+            await xray.add_vless_user(
+                inbound_tag=inbound_tag,
+                client_uuid=new_client.client_uuid,
+                email=f"vpn-{new_client.id}",
+                flow=new_client.flow,
+            )
 
-    except XrayError as exc:
-        await db.rollback()
+        except XrayError as exc:
+            await db.rollback()
 
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Failed to add renewed VPN client "
-                f"to Xray: {exc}"
-            ),
-        )
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Failed to add renewed VPN client "
+                    f"to Xray: {exc}"
+                ),
+            )
 
     # =====================================================
     # Step 2: Remove OLD client from Xray
@@ -661,7 +662,7 @@ async def renew_subscription(
             previous_client.status == "active"
         )
 
-        if old_was_active:
+        if old_was_active and xray is not None:
             try:
                 await xray.remove_vless_user(
                     inbound_tag=inbound_tag,
@@ -781,20 +782,22 @@ async def rotate_subscription_client(
     db.add(new_client)
     await db.flush()
 
-    target_xray = XrayClient(address=target_config.config.get("api_address"))
     target_tag = target_config.config.get("inbound_tag", "vless-reality")
-    try:
-        await target_xray.add_vless_user(
-            inbound_tag=target_tag,
-            client_uuid=new_client.client_uuid,
-            email=f"vpn-{new_client.id}",
-            flow=new_client.flow,
-        )
-    except XrayError as exc:
-        await db.rollback()
-        raise HTTPException(status_code=502, detail=f"Failed to add replacement client: {exc}")
+    target_xray = None
+    if settings.xray_management_mode == "direct":
+        target_xray = XrayClient(address=target_config.config.get("api_address"))
+        try:
+            await target_xray.add_vless_user(
+                inbound_tag=target_tag,
+                client_uuid=new_client.client_uuid,
+                email=f"vpn-{new_client.id}",
+                flow=new_client.flow,
+            )
+        except XrayError as exc:
+            await db.rollback()
+            raise HTTPException(status_code=502, detail=f"Failed to add replacement client: {exc}")
 
-    if previous:
+    if previous and target_xray is not None:
         old_result = await db.execute(
             select(VPNNodeConfig).where(
                 VPNNodeConfig.node_id == previous.node_id,
@@ -819,6 +822,7 @@ async def rotate_subscription_client(
                 pass
             await db.rollback()
             raise HTTPException(status_code=502, detail=f"Failed to revoke previous client: {exc}")
+    if previous:
         previous.status = "revoked"
         previous.revoked_at = now
 

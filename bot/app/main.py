@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 import httpx
 import qrcode
+from app.content import CONTENT, link as content_link, platform as get_platform, text as content_text
 from app.domain import country_label, profile_flow, rotation_payload, subscription_payload
 from app.logging_config import configure_logging
 from aiogram.exceptions import TelegramBadRequest
@@ -28,8 +29,15 @@ configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_URL = os.getenv("API_URL", "http://api:8000")
 SERVICE_API_TOKEN = os.environ["SERVICE_API_TOKEN"]
-TELEGRAM_CHANNEL_URL = os.getenv("TELEGRAM_CHANNEL_URL", "").strip()
-SUPPORT_URL = os.getenv("SUPPORT_URL", "").strip()
+TELEGRAM_CHANNEL_URL = content_link("channel")
+SUPPORT_URL = content_link("support")
+YOOMONEY_PAYMENT_URL = content_link("payment")
+TRY_PAYMENT_URL = content_link("try_payment")
+PUBLIC_PLAN_CODES = tuple(
+    item.strip()
+    for item in os.getenv("BOT_PLAN_CODES", "vpn_14d,vpn_30d,vpn_90d").split(",")
+    if item.strip()
+)
 
 
 class PromoFlow(StatesGroup):
@@ -65,25 +73,33 @@ def main_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📡 Мой VPN",
-                    callback_data="vpn_status",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💳 Купить VPN",
+                    text="💳 Оплатить",
                     callback_data="buy_vpn",
                 ),
             ],
             [
-                InlineKeyboardButton(text="🎁 Тест на 3 дня", callback_data="trial_start"),
-                InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"),
+                InlineKeyboardButton(
+                    text="📱 VPN для устройств",
+                    callback_data="devices",
+                ),
             ],
             [
-                InlineKeyboardButton(text="📖 Инструкция", callback_data="instructions"),
+                InlineKeyboardButton(text="👤 Личный кабинет", callback_data="vpn_status"),
+            ],
+            [
+                InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"),
+                InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start"),
+            ],
+            [
+                InlineKeyboardButton(text="📖 Инструкции", callback_data="instructions"),
                 support_button,
             ],
             [channel_button],
+            *[
+                [InlineKeyboardButton(text=item["text"], url=item["url"])]
+                for item in CONTENT.get("main_url_buttons", [])
+                if item.get("text") and item.get("url")
+            ],
         ]
     )
 
@@ -158,6 +174,51 @@ def active_vpn_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+async def show_screen(
+    callback: CallbackQuery,
+    text: str,
+    reply_markup: InlineKeyboardMarkup,
+    *,
+    parse_mode: str = "HTML",
+) -> None:
+    """Edit text messages and safely continue from QR/photo messages."""
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc):
+            return
+        if callback.message.photo:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except TelegramBadRequest:
+                pass
+            await callback.message.answer(
+                text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+            return
+        raise
+
+
+def platforms_keyboard(*, purchase: bool = False) -> InlineKeyboardMarkup:
+    prefix = "purchase_device" if purchase else "device"
+    rows = [
+        [InlineKeyboardButton(text=item["label"], callback_data=f"{prefix}:{item['id']}")]
+        for item in CONTENT.get("platforms", [])
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payment_url_for_plan(plan: dict) -> str:
+    return content_link(f"payment_{plan.get('code', '')}") or YOOMONEY_PAYMENT_URL
+
+
 # =========================================================
 # API
 # =========================================================
@@ -230,7 +291,12 @@ async def get_plans() -> list[dict]:
 
         response.raise_for_status()
 
-        return response.json()
+        plans = response.json()
+        selected = [plan for plan in plans if plan.get("code") in PUBLIC_PLAN_CODES]
+        if not selected:
+            return plans
+        order = {code: index for index, code in enumerate(PUBLIC_PLAN_CODES)}
+        return sorted(selected, key=lambda plan: order.get(plan.get("code"), 999))
 
 
 async def get_nodes() -> list[dict]:
@@ -444,11 +510,7 @@ async def start_handler(message: Message):
         )
 
         await message.answer(
-            "👋 <b>Добро пожаловать в VPN-сервис!</b>\n\n"
-            "• VLESS Reality и XTLS Vision\n"
-            "• серверы в США, Нидерландах и Германии\n"
-            "• ключ для AmneziaVPN или универсального VLESS\n\n"
-            "Можно начать с бесплатного теста на 3 дня.",
+            content_text("welcome"),
             reply_markup=main_menu(),
             parse_mode="HTML",
         )
@@ -476,27 +538,69 @@ async def start_handler(message: Message):
 
 @router.callback_query(F.data == "instructions")
 async def instructions_handler(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "📖 <b>Как подключиться</b>\n\n"
-        "1. Купите тариф или включите тест на 3 дня.\n"
-        "2. Выберите страну, AmneziaVPN и профиль Reality.\n"
-        "3. Нажмите «Показать ключ и QR».\n"
-        "4. В AmneziaVPN: <b>Добавить → Вставить ключ из буфера</b>.\n\n"
-        "Если подключение не заработало, пришлите поддержке страну, модель устройства и время ошибки — сам ключ отправляйте только в активной debug-сессии.",
-        parse_mode="HTML",
-        reply_markup=back_menu(),
+    await show_screen(callback, content_text("instructions"), back_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "devices")
+async def devices_handler(callback: CallbackQuery):
+    await show_screen(
+        callback,
+        content_text("platforms_intro"),
+        platforms_keyboard(),
     )
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("device:"))
+async def device_handler(callback: CallbackQuery):
+    platform_id = callback.data.split(":", 1)[1]
+    item = get_platform(platform_id)
+    if not item:
+        await callback.answer("Устройство не найдено", show_alert=True)
+        return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"⬇️ Скачать {item['client']}", url=item["url"])],
+            [InlineKeyboardButton(text="💳 Оплатить VPN", callback_data=f"purchase_device:{platform_id}")],
+            [InlineKeyboardButton(text="⬅️ К устройствам", callback_data="devices")],
+        ]
+    )
+    await show_screen(
+        callback,
+        f"{item['label']} <b>{item['client']}</b>\n\n{item['description']}",
+        keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "try_start")
+async def try_start_handler(callback: CallbackQuery):
+    rows = []
+    if TRY_PAYMENT_URL:
+        rows.append([InlineKeyboardButton(text="💳 Оплатить 50 ₽", url=TRY_PAYMENT_URL)])
+    if SUPPORT_URL:
+        rows.append([InlineKeyboardButton(text="✅ Я оплатил — поддержка", url=SUPPORT_URL)])
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
+    await show_screen(
+        callback,
+        content_text("try"),
+        InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    if TRY_PAYMENT_URL:
+        await callback.answer()
+    else:
+        await callback.answer("Ссылка оплаты пока не настроена", show_alert=True)
+
+
 @router.callback_query(F.data == "channel_info")
 async def channel_info_handler(callback: CallbackQuery):
-    await callback.answer("Ссылка на канал пока настраивается", show_alert=True)
+    await callback.answer(content_text("channel_missing"), show_alert=True)
 
 
 @router.callback_query(F.data == "support_info")
 async def support_info_handler(callback: CallbackQuery):
-    await callback.answer("Контакт поддержки пока настраивается", show_alert=True)
+    await callback.answer(content_text("support_missing"), show_alert=True)
 
 
 def access_node_keyboard(nodes: list[dict], prefix: str) -> InlineKeyboardMarkup:
@@ -605,11 +709,7 @@ async def trial_confirm_handler(callback: CallbackQuery):
 @router.callback_query(F.data == "promo_start")
 async def promo_start_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PromoFlow.waiting_code)
-    await callback.message.edit_text(
-        "🏷 <b>Введите промокод одним сообщением</b>",
-        parse_mode="HTML",
-        reply_markup=back_menu(),
-    )
+    await show_screen(callback, content_text("promo"), back_menu())
     await callback.answer()
 
 
@@ -739,16 +839,11 @@ async def vpn_status_handler(callback: CallbackQuery):
                 f"<code>{expires_at} UTC</code>"
             )
 
-        try:
-            await callback.message.edit_text(
-                text,
-                reply_markup=(active_vpn_keyboard() if vpn_client else main_menu()),
-                parse_mode="HTML",
-            )
-
-        except TelegramBadRequest as exc:
-            if "message is not modified" not in str(exc):
-                raise
+        await show_screen(
+            callback,
+            text,
+            active_vpn_keyboard() if vpn_client else main_menu(),
+        )
 
         await callback.answer()
 
@@ -790,25 +885,22 @@ async def vpn_key_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "vpn_reissue")
 async def vpn_reissue_handler(callback: CallbackQuery):
-    status_data = await get_vpn_status(callback.from_user.id)
-    subscription = status_data.get("subscription")
-    if not subscription or subscription.get("status") != "active":
-        await callback.answer("Активная подписка не найдена", show_alert=True)
-        return
-    nodes = [
-        n
-        for n in await get_nodes()
-        if n.get("status") == "active"
-        and n.get("health_status") != "offline"
-        and n.get("active_connections", 0) < n.get("capacity", 0)
-        and country_label(n.get("region"))
-    ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=country_label(n["region"]), callback_data=f"rotate_country:{subscription['id']}:{n['id']}")]
-        for n in nodes
-    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="vpn_status")]])
-    await callback.message.edit_text("🌍 <b>Куда перенести подключение?</b>", reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
+    try:
+        status_data = await get_vpn_status(callback.from_user.id)
+        subscription = status_data.get("subscription")
+        if not subscription or subscription.get("status") != "active":
+            await callback.answer("Активная подписка не найдена", show_alert=True)
+            return
+        nodes = await available_nodes()
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=country_label(n["region"]), callback_data=f"rotate_country:{subscription['id']}:{n['id']}")]
+            for n in nodes
+        ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="vpn_status")]])
+        await show_screen(callback, "🌍 <b>Куда перенести подключение?</b>", keyboard)
+        await callback.answer()
+    except Exception:
+        logging.exception("Failed to prepare VPN reissue")
+        await callback.answer("Не удалось открыть перевыпуск", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("rotate_country:"))
@@ -840,7 +932,11 @@ async def rotate_confirm_handler(callback: CallbackQuery):
     try:
         _, subscription_id, node_id, client_type, profile = callback.data.split(":")
         client = await rotate_vpn_client(int(subscription_id), int(node_id), client_type, profile_flow(profile))
-        await callback.message.edit_text("✅ Ключ перевыпущен. Старый ключ отозван.")
+        await show_screen(
+            callback,
+            "✅ Ключ перевыпущен. Старый ключ отозван.",
+            vpn_ready_keyboard(),
+        )
         await send_key_message(callback.message, client["id"], client_type)
         await callback.answer("Ключ обновлён")
     except Exception:
@@ -854,52 +950,158 @@ async def rotate_confirm_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "buy_vpn")
 async def buy_vpn_handler(callback: CallbackQuery):
-    try:
-        plans = await get_plans()
+    await show_screen(
+        callback,
+        content_text("platforms_intro"),
+        platforms_keyboard(purchase=True),
+    )
+    await callback.answer()
 
-        if not plans:
-            await callback.answer(
-                "❌ Сейчас нет доступных тарифов.",
-                show_alert=True,
-            )
-            return
 
-        text = (
-            "💳 <b>Купить VPN</b>\n\n"
-            "Выберите тариф:"
+@router.callback_query(F.data.startswith("purchase_device:"))
+async def purchase_device_handler(callback: CallbackQuery):
+    platform_id = callback.data.split(":", 1)[1]
+    item = get_platform(platform_id)
+    if not item:
+        await callback.answer("Устройство не найдено", show_alert=True)
+        return
+    nodes = await available_nodes()
+    if not nodes:
+        await callback.answer("Сейчас нет доступных серверов", show_alert=True)
+        return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=country_label(node["region"]),
+                    callback_data=f"purchase_country:{node['id']}",
+                )
+            ]
+            for node in nodes
+        ]
+        + [[InlineKeyboardButton(text="⬅️ К устройствам", callback_data="buy_vpn")]]
+    )
+    await show_screen(
+        callback,
+        f"{item['label']} <b>{item['client']}</b>\n\n"
+        f"{item['description']}\n\n🌍 <b>Выберите страну подключения</b>",
+        keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("purchase_country:"))
+async def purchase_country_handler(callback: CallbackQuery):
+    node_id = int(callback.data.split(":", 1)[1])
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛡 VLESS Reality", callback_data=f"purchase_profile:{node_id}:standard")],
+            [InlineKeyboardButton(text="⚡ VLESS + XTLS Vision", callback_data=f"purchase_profile:{node_id}:vision")],
+            [InlineKeyboardButton(text="⬅️ К устройствам", callback_data="buy_vpn")],
+        ]
+    )
+    await show_screen(
+        callback,
+        "🔐 <b>Выберите конфигурацию ключа</b>\n\n"
+        "Reality совместим с большинством клиентов. Vision может быть быстрее, но требует поддержки XTLS.",
+        keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("purchase_profile:"))
+async def purchase_profile_handler(callback: CallbackQuery):
+    _, node_id, profile = callback.data.split(":")
+    plans = await get_plans()
+    if not plans:
+        await callback.answer("Сейчас нет доступных тарифов", show_alert=True)
+        return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{plan['name']} — {plan['price']} {plan['currency']}",
+                    callback_data=f"purchase_plan:{plan['id']}:{node_id}:{profile}",
+                )
+            ]
+            for plan in plans
+        ]
+        + [[InlineKeyboardButton(text="⬅️ К конфигурациям", callback_data=f"purchase_country:{node_id}")]]
+    )
+    await show_screen(
+        callback,
+        "🗓 <b>Выберите срок</b>\n\nТариф выбирается последним шагом перед оплатой.",
+        keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("purchase_plan:"))
+async def purchase_plan_handler(callback: CallbackQuery):
+    _, raw_plan_id, raw_node_id, profile = callback.data.split(":")
+    plan_id = int(raw_plan_id)
+    node_id = int(raw_node_id)
+    plans = await get_plans()
+    nodes = await get_nodes()
+    plan = next((item for item in plans if item["id"] == plan_id), None)
+    node = next((item for item in nodes if item["id"] == node_id), None)
+    if not plan or not node:
+        await callback.answer("Тариф или сервер недоступен", show_alert=True)
+        return
+    payment_url = payment_url_for_plan(plan)
+    rows = []
+    if payment_url:
+        rows.extend(
+            [
+                [InlineKeyboardButton(text="💳 Перейти в ЮMoney", url=payment_url)],
+                [InlineKeyboardButton(text="📷 Показать QR оплаты", callback_data=f"payment_qr:{plan_id}:{node_id}:{profile}")],
+            ]
         )
-
-        try:
-            await callback.message.edit_text(
-                text,
-                reply_markup=plans_keyboard(plans),
-                parse_mode="HTML",
-            )
-        except TelegramBadRequest as exc:
-            if "message is not modified" not in str(exc):
-                raise
-
+    rows.extend(
+        [
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan_id}:{node_id}:amnezia:{profile}")],
+            [InlineKeyboardButton(text="⬅️ К тарифам", callback_data=f"purchase_profile:{node_id}:{profile}")],
+        ]
+    )
+    await show_screen(
+        callback,
+        "💳 <b>Оплата</b>\n\n"
+        f"Страна: <b>{country_label(node.get('region')) or node['name']}</b>\n"
+        f"Конфигурация: <b>{'XTLS Vision' if profile == 'vision' else 'VLESS Reality'}</b>\n"
+        f"Тариф: <b>{plan['name']}</b>\n"
+        f"Стоимость: <b>{plan['price']} {plan['currency']}</b>\n\n"
+        "Оплатите через ЮMoney, затем нажмите «Проверить оплату».",
+        InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    if payment_url:
         await callback.answer()
+    else:
+        await callback.answer("Ссылка ЮMoney пока не настроена", show_alert=True)
 
-    except httpx.HTTPError:
-        logging.exception(
-            "Failed to get plans"
-        )
 
-        await callback.answer(
-            "❌ Не удалось получить тарифы.",
-            show_alert=True,
-        )
-
-    except Exception:
-        logging.exception(
-            "Unexpected buy VPN error"
-        )
-
-        await callback.answer(
-            "❌ Произошла ошибка.",
-            show_alert=True,
-        )
+@router.callback_query(F.data.startswith("payment_qr:"))
+async def payment_qr_handler(callback: CallbackQuery):
+    _, raw_plan_id, raw_node_id, profile = callback.data.split(":")
+    plan_id = int(raw_plan_id)
+    plans = await get_plans()
+    plan = next((item for item in plans if item["id"] == plan_id), None)
+    payment_url = payment_url_for_plan(plan or {})
+    if not plan or not payment_url:
+        await callback.answer("Ссылка ЮMoney пока не настроена", show_alert=True)
+        return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Открыть ЮMoney", url=payment_url)],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan_id}:{raw_node_id}:amnezia:{profile}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"purchase_plan:{plan_id}:{raw_node_id}:{profile}")],
+        ]
+    )
+    await callback.message.answer_photo(
+        photo=qr_file(payment_url),
+        caption=f"📷 QR для оплаты тарифа «{html.escape(plan['name'])}»",
+        reply_markup=keyboard,
+    )
+    await callback.answer()
 
 
 # =========================================================
@@ -1180,14 +1382,12 @@ async def pay_qr_handler(
         # Creating subscription
         # -------------------------------------------------
 
-        try:
-            await callback.message.edit_text(
-                "⏳ <b>Создаём QR-платёж...</b>\n\n"
-                "После подтверждения VPN активируется автоматически.",
-                parse_mode="HTML",
-            )
-        except TelegramBadRequest:
-            pass
+        await show_screen(
+            callback,
+            "⏳ <b>Проверяем платёж...</b>\n\n"
+            "После подтверждения VPN активируется автоматически.",
+            back_menu(),
+        )
 
         payment = await create_payment(
             user_id=user_id,
@@ -1199,9 +1399,10 @@ async def pay_qr_handler(
         )
 
         if payment["status"] != "paid" or not payment.get("subscription_id"):
-            await callback.message.edit_text(
+            await show_screen(
+                callback,
                 "⏳ Платёж создан и ожидает подтверждения провайдера.",
-                reply_markup=main_menu(),
+                main_menu(),
             )
             await callback.answer("Ожидаем подтверждение платежа")
             return
@@ -1246,9 +1447,8 @@ async def pay_qr_handler(
             f"<b>{plan['price']} {plan['currency']}</b>\n"
             f"📅 Действует до: "
             f"<b>{expires_at} UTC</b>\n\n"
-            "🔐 <b>VLESS Reality</b>\n\n"
-            "Скопируй ссылку ниже и добавь её "
-            "в V2Ray-клиент:"
+            f"🔐 <b>{'VLESS + XTLS Vision' if profile == 'vision' else 'VLESS Reality'}</b>\n\n"
+            "Скопируйте ссылку ниже и добавьте её в AmneziaVPN:"
         )
 
         text += (
@@ -1257,15 +1457,7 @@ async def pay_qr_handler(
         if client_type == "amnezia":
             text += "\n\nОткройте AmneziaVPN → Добавить → Вставить ключ из буфера."
 
-        try:
-            await callback.message.edit_text(
-                text,
-                reply_markup=vpn_ready_keyboard(),
-                parse_mode="HTML",
-            )
-        except TelegramBadRequest as exc:
-            if "message is not modified" not in str(exc):
-                raise
+        await show_screen(callback, text, vpn_ready_keyboard())
 
         await callback.answer(
             "✅ VPN активирован!"
@@ -1333,12 +1525,7 @@ async def main_menu_handler(
 ):
     await state.clear()
     try:
-        await callback.message.edit_text(
-            "👋 <b>VPN-сервис</b>\n\n"
-            "VLESS Reality для AmneziaVPN. Выберите действие:",
-            reply_markup=main_menu(),
-            parse_mode="HTML",
-        )
+        await show_screen(callback, content_text("main_menu"), main_menu())
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc):
             raise
