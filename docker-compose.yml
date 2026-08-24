@@ -83,6 +83,8 @@ services:
       PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
       PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET}
       PAYMENT_AUTO_CONFIRM: ${PAYMENT_AUTO_CONFIRM:-false}
+      BACKGROUND_JOBS_ENABLED: ${BACKGROUND_JOBS_ENABLED:-false}
+      XRAY_MANAGEMENT_MODE: ${XRAY_MANAGEMENT_MODE:-direct}
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -94,6 +96,44 @@ services:
 
     ports:
       - "127.0.0.1:8000:8000"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    networks:
+      - vpn-backend
+
+  worker:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+
+    container_name: vpn-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      LOG_LEVEL: ${LOG_LEVEL}
+      XRAY_API_ADDRESS: ${XRAY_API_ADDRESS}
+      XRAY_INBOUND_TAG: ${XRAY_INBOUND_TAG}
+      SERVICE_API_TOKEN: ${SERVICE_API_TOKEN}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET}
+      BACKGROUND_JOBS_ENABLED: "true"
+      LIFECYCLE_INTERVAL_SECONDS: ${LIFECYCLE_INTERVAL_SECONDS:-60}
+      LIFECYCLE_ADVISORY_LOCK_KEY: ${LIFECYCLE_ADVISORY_LOCK_KEY:-846202608}
+      WORKER_RUN_ONCE: ${WORKER_RUN_ONCE:-false}
+      XRAY_MANAGEMENT_MODE: ${XRAY_MANAGEMENT_MODE:-direct}
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      - ./api/app:/app/app
 
     depends_on:
       postgres:
@@ -151,12 +191,107 @@ services:
       - -config
       - /usr/local/etc/xray/config.json
 
+  node-agent:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: vpn-node-agent
+    restart: unless-stopped
+    profiles: ["node-agent"]
+    command: ["python", "-m", "app.node_agent"]
+    environment:
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://api:8000}
+      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
+      NODE_XRAY_API_ADDRESS: ${XRAY_API_ADDRESS}
+      NODE_AGENT_INTERVAL_SECONDS: ${NODE_AGENT_INTERVAL_SECONDS:-30}
+      LOG_LEVEL: ${LOG_LEVEL}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./api/app:/app/app
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - vpn-backend
+
+  loki:
+    image: grafana/loki:3.7.0
+    container_name: vpn-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./observability/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD", "/usr/bin/loki", "-version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - vpn-backend
+
+  alloy:
+    image: grafana/alloy:v1.18.0
+    container_name: vpn-alloy
+    restart: unless-stopped
+    user: "0:0"
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy-config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    ports:
+      - "127.0.0.1:12345:12345"
+    depends_on:
+      - loki
+    networks:
+      - vpn-backend
+
+  grafana:
+    image: grafana/grafana:12.4.0
+    container_name: vpn-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_UNIFIED_ALERTING_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - loki
+    networks:
+      - vpn-backend
+
 volumes:
   postgres_data:
     name: vpn-postgres-data
 
   redis_data:
     name: vpn-redis-data
+  loki_data:
+    name: vpn-loki-data
+  alloy_data:
+    name: vpn-alloy-data
+  grafana_data:
+    name: vpn-grafana-data
 
 
 networks:

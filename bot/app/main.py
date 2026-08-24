@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 import httpx
 import qrcode
 from app.domain import country_label, profile_flow, rotation_payload, subscription_payload
+from app.logging_config import configure_logging
 from aiogram.exceptions import TelegramBadRequest
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
@@ -20,9 +21,7 @@ from aiogram.types import (
 )
 
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO")
-)
+configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_URL = os.getenv("API_URL", "http://api:8000")
@@ -522,7 +521,14 @@ async def vpn_reissue_handler(callback: CallbackQuery):
     if not subscription or subscription.get("status") != "active":
         await callback.answer("Активная подписка не найдена", show_alert=True)
         return
-    nodes = [n for n in await get_nodes() if n.get("status") == "active" and country_label(n.get("region"))]
+    nodes = [
+        n
+        for n in await get_nodes()
+        if n.get("status") == "active"
+        and n.get("health_status") != "offline"
+        and n.get("active_connections", 0) < n.get("capacity", 0)
+        and country_label(n.get("region"))
+    ]
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=country_label(n["region"]), callback_data=f"rotate_country:{subscription['id']}:{n['id']}")]
         for n in nodes
@@ -692,7 +698,13 @@ async def buy_plan_handler(callback: CallbackQuery):
                 )
                 return
 
-        nodes = [node for node in await get_nodes() if node.get("status") == "active"]
+        nodes = [
+            node
+            for node in await get_nodes()
+            if node.get("status") == "active"
+            and node.get("health_status") != "offline"
+            and node.get("active_connections", 0) < node.get("capacity", 0)
+        ]
         buttons = []
         for node in nodes:
             label = country_label(node.get("region"))

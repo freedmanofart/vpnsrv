@@ -44,3 +44,4 @@ class PaymentResponse(BaseModel):
     failed_at: datetime | None
     cancelled_at: datetime | None
     refunded_at: datetime | None
+    details: dict[str, Any]

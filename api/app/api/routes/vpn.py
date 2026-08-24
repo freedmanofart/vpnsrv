@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 from uuid import uuid4
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -116,14 +117,29 @@ async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(VPNNodeConfig).where(VPNNodeConfig.node_id == node_id, VPNNodeConfig.protocol == "vless"))
     config = result.scalar_one_or_none()
     if not config:
+        node.health_status = "offline"
+        node.last_seen_at = datetime.now(timezone.utc)
+        await db.commit()
         return VPNNodeHealthResponse(node_id=node_id, status="offline", error="VLESS configuration not found")
     api_address = config.config.get("api_address")
     if not api_address:
+        node.health_status = "offline"
+        node.last_seen_at = datetime.now(timezone.utc)
+        await db.commit()
         return VPNNodeHealthResponse(node_id=node_id, status="offline", error="Xray management address not configured")
+    started = time.perf_counter()
     try:
         users = await XrayClient(address=api_address).get_users(config.config.get("inbound_tag", "vless-reality"))
+        node.health_status = "online"
+        node.latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        node.last_seen_at = datetime.now(timezone.utc)
+        await db.commit()
         return VPNNodeHealthResponse(node_id=node_id, status="online", xray_users=len(users))
     except XrayError as exc:
+        node.health_status = "offline"
+        node.latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        node.last_seen_at = datetime.now(timezone.utc)
+        await db.commit()
         return VPNNodeHealthResponse(node_id=node_id, status="offline", error=str(exc))
 
 

@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import time
+from uuid import uuid4
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,18 +15,20 @@ from app.api.routes.vpn import router as vpn_router
 from app.api.routes.subscriptions import router as subscriptions_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.payments import router as payments_router
+from app.api.routes.agent import router as agent_router
+from app.api.routes.client import router as client_router
 
 from app.db.session import get_db, AsyncSessionLocal
 
-from app.services.vpn_expiration import (
-    expire_subscriptions,
-    expire_vpn_clients,
-)
-from app.services.reconciliation import reconcile_all_nodes
+from app.services.lifecycle import run_lifecycle_once
 from app.core.security import require_api_access
+from app.core.config import settings
+from app.core.logging import configure_logging, request_id_context
+from app.services.audit import write_audit
 
 
 logger = logging.getLogger(__name__)
+configure_logging(settings.log_level)
 
 
 async def vpn_expiration_loop():
@@ -41,9 +45,11 @@ async def vpn_expiration_loop():
             )
 
             async with AsyncSessionLocal() as db:
-                subscription_count = await expire_subscriptions(db)
-                client_count = await expire_vpn_clients(db)
-                reconciliation = await reconcile_all_nodes(db)
+                result = await run_lifecycle_once(db)
+
+            subscription_count = result.expired_subscriptions
+            client_count = result.revoked_clients
+            reconciliation = result.reconciliation
 
             if subscription_count:
                 logger.info(
@@ -98,9 +104,7 @@ async def lifespan(app: FastAPI):
         flush=True,
     )
 
-    task = asyncio.create_task(
-        vpn_expiration_loop()
-    )
+    task = asyncio.create_task(vpn_expiration_loop()) if settings.background_jobs_enabled else None
 
     try:
         yield
@@ -111,12 +115,12 @@ async def lifespan(app: FastAPI):
             flush=True,
         )
 
-        task.cancel()
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(
@@ -126,6 +130,53 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def request_context_and_audit(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id") or uuid4().hex
+    context_token = request_id_context.set(request_id)
+    started = time.perf_counter()
+    response = None
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-Id"] = request_id
+        return response
+    finally:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        logger.info(
+            "http_request",
+            extra={
+                "event": {
+                    "event_type": "http_request",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": status_code,
+                    "duration_ms": duration_ms,
+                    "client_ip": request.client.host if request.client else None,
+                }
+            },
+        )
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            principal = getattr(request.state, "principal", None)
+            try:
+                async with AsyncSessionLocal() as audit_db:
+                    await write_audit(
+                        audit_db,
+                        action=f"http.{request.method.lower()}",
+                        result="success" if status_code < 400 else "failure",
+                        actor_type=getattr(principal, "kind", "anonymous"),
+                        actor_id=getattr(principal, "name", None),
+                        resource_type="http",
+                        resource_id=request.url.path,
+                        ip_address=request.client.host if request.client else None,
+                        details={"status_code": status_code, "duration_ms": duration_ms},
+                    )
+            except Exception:
+                logger.exception("request audit failed")
+        request_id_context.reset(context_token)
+
+
 app.include_router(users_router)
 app.include_router(user_status_router)
 app.include_router(plans_router)
@@ -133,6 +184,8 @@ app.include_router(subscriptions_router)
 app.include_router(vpn_router)
 app.include_router(admin_router)
 app.include_router(payments_router)
+app.include_router(agent_router)
+app.include_router(client_router)
 
 
 @app.get("/health")

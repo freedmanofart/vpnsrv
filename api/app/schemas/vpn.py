@@ -34,6 +34,10 @@ class VPNNodeResponse(BaseModel):
     ip_address: str
     status: str
     capacity: int
+    health_status: str
+    last_seen_at: datetime | None
+    latency_ms: float | None
+    active_connections: int
     created_at: datetime
     updated_at: datetime
 

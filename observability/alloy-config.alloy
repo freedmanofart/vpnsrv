@@ -1,0 +1,62 @@
+logging {
+  level  = "info"
+  format = "json"
+}
+
+discovery.docker "local" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "docker_logs" {
+  targets = discovery.docker.local.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "service_name"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+
+  rule {
+    replacement  = "home-backend"
+    target_label = "instance"
+  }
+}
+
+loki.source.docker "local" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.local.targets
+  labels        = {platform = "docker", environment = "staging"}
+  relabel_rules = discovery.relabel.docker_logs.rules
+  forward_to    = [loki.process.application.receiver]
+}
+
+loki.process "application" {
+  stage.json {
+    expressions = {
+      level      = "level",
+      event_type = "event_type",
+      request_id = "request_id",
+      node_id    = "node_id",
+    }
+  }
+
+  stage.labels {
+    values = {
+      level      = "",
+      event_type = "",
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

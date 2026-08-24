@@ -1,7 +1,7 @@
 import secrets
 from dataclasses import dataclass
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import (
     HTTPAuthorizationCredentials,
     HTTPBasic,
@@ -49,6 +49,7 @@ def _service(credentials: HTTPAuthorizationCredentials | None) -> APIPrincipal |
 
 
 def require_admin(
+    request: Request,
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
 ) -> APIPrincipal:
     principal = _admin(credentials)
@@ -58,10 +59,12 @@ def require_admin(
             detail="Invalid admin credentials",
             headers={"WWW-Authenticate": "Basic"},
         )
+    request.state.principal = principal
     return principal
 
 
 def require_api_access(
+    request: Request,
     basic: HTTPBasicCredentials | None = Depends(basic_security),
     bearer: HTTPAuthorizationCredentials | None = Depends(bearer_security),
 ) -> APIPrincipal:
@@ -72,4 +75,5 @@ def require_api_access(
             detail="API authentication required",
             headers={"WWW-Authenticate": 'Basic realm="vpn-api", Bearer'},
         )
+    request.state.principal = principal
     return principal

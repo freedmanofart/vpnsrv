@@ -5,6 +5,13 @@ from app.db.models.subscription import Subscription
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.models.vpn_client import VPNClient
+from app.db.models.audit import (
+    ActivationCode,
+    AuditLog,
+    ClientDevice,
+    DebugSession,
+    NodeAgentCredential,
+)
 
 __all__ = [
     "User",
@@ -15,4 +22,9 @@ __all__ = [
     "VPNNode",
     "VPNNodeConfig",
     "VPNClient",
+    "ActivationCode",
+    "AuditLog",
+    "ClientDevice",
+    "DebugSession",
+    "NodeAgentCredential",
 ]

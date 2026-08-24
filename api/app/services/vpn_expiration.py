@@ -227,3 +227,51 @@ async def expire_vpn_clients(
         await db.commit()
 
     return expired_count
+
+
+async def expire_desired_state(db: AsyncSession) -> tuple[int, int]:
+    """Expire DB state when Xray is managed by outbound node agents.
+
+    The node agent treats active DB clients as the desired state. Marking an
+    expired client revoked therefore removes it from the next state response;
+    the agent performs the actual Xray removal and reports its result.
+    """
+
+    now = datetime.now(timezone.utc)
+    client_result = await db.execute(
+        select(VPNClient).where(
+            VPNClient.status == "active",
+            VPNClient.expires_at <= now,
+        )
+    )
+    clients = client_result.scalars().all()
+    for client in clients:
+        client.status = "revoked"
+        client.revoked_at = now
+
+    subscription_result = await db.execute(
+        select(Subscription).where(
+            Subscription.status == "active",
+            Subscription.expires_at <= now,
+        )
+    )
+    subscriptions = subscription_result.scalars().all()
+    subscription_ids = [subscription.id for subscription in subscriptions]
+    if subscription_ids:
+        remaining_result = await db.execute(
+            select(VPNClient).where(
+                VPNClient.subscription_id.in_(subscription_ids),
+                VPNClient.status == "active",
+            )
+        )
+        remaining = remaining_result.scalars().all()
+        for client in remaining:
+            client.status = "revoked"
+            client.revoked_at = now
+        clients.extend(client for client in remaining if client not in clients)
+    for subscription in subscriptions:
+        subscription.status = "expired"
+
+    if clients or subscriptions:
+        await db.commit()
+    return len(subscriptions), len(clients)

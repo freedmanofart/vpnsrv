@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 from typing import Callable
-from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +21,7 @@ from app.services.provisioning import (
     provision_subscription,
 )
 from app.services.xray import XrayClient
+from app.services.payment_providers import get_payment_provider
 
 
 class PaymentError(Exception):
@@ -100,20 +100,22 @@ async def create_payment(
     if node.status != "active":
         raise PaymentInvalidTransition("VPN node is not active")
 
+    adapter = get_payment_provider(provider)
+    provider_payment = await adapter.create(idempotency_key=data.idempotency_key)
     payment = Payment(
         user_id=data.user_id,
         plan_id=data.plan_id,
         node_id=data.node_id,
         provider=provider,
-        provider_payment_id=str(uuid4()),
+        provider_payment_id=provider_payment.provider_payment_id,
         idempotency_key=data.idempotency_key,
         amount=plan.price,
         currency=plan.currency,
-        status="pending",
+        status=provider_payment.status,
         client_type=data.client_type,
         flow=data.flow,
         fingerprint=data.fingerprint,
-        details={},
+        details=provider_payment.details,
     )
     db.add(payment)
     try:

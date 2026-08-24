@@ -39,7 +39,7 @@ from app.services.payments import (
 )
 from app.services.provisioning import commit_provisioning, provision_subscription
 from app.services.reconciliation import reconcile_node
-from app.services.vpn_expiration import expire_subscriptions
+from app.services.vpn_expiration import expire_desired_state, expire_subscriptions
 from app.services.xray import (
     XrayError,
     XrayUserAlreadyExists,
@@ -379,6 +379,24 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 f"vpn-{initial.client.id}",
                 FakeXray.users["node-grpc:10085"],
             )
+
+    async def test_agent_expiration_updates_desired_state_without_direct_xray(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            email = f"vpn-{initial.client.id}"
+            expired_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            initial.subscription.expires_at = expired_at
+            initial.client.expires_at = expired_at
+            await db.commit()
+
+            subscriptions, clients = await expire_desired_state(db)
+
+            self.assertEqual((1, 1), (subscriptions, clients))
+            await db.refresh(initial.subscription)
+            await db.refresh(initial.client)
+            self.assertEqual("expired", initial.subscription.status)
+            self.assertEqual("revoked", initial.client.status)
+            self.assertIn(email, FakeXray.users["node-grpc:10085"])
 
     async def test_reconciliation_restores_after_xray_restart_and_removes_orphan(self) -> None:
         async with self.session_factory() as db:

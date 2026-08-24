@@ -1,0 +1,12 @@
+[Unit]
+Description=VPN service PostgreSQL and configuration backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/freedman/vpn-service
+Environment=VPN_PROJECT_DIR=/home/freedman/vpn-service
+Environment=VPN_BACKUP_DIR=/var/backups/vpn-service
+ExecStart=/home/freedman/vpn-service/scripts/backup.sh
