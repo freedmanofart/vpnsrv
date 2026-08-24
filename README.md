@@ -459,7 +459,7 @@ Cockpit ранее удалён. Дополнительно удалены то�
 ### Критические для бизнес-потока
 
 1. **Реальный платёжный провайдер не подключён.** State machine и HMAC webhook реализованы, но тестовый стенд использует `mock` с автоматическим подтверждением.
-2. **Нет production control plane и реальных нод.** Outbound agent и scoped device/node tokens готовы, но HTTPS/mTLS, DNS и инстансы Hetzner/DigitalOcean ещё не созданы.
+2. **Control plane пока домашний.** Первая реальная DigitalOcean-нода во FRA1 разворачивается как Германия. До появления публичного HTTPS control plane node-agent использует временный обратный SSH-туннель; Tailscale в production-схеме не используется.
 3. **Telegram-flow ещё не проверен с тремя реальными нодами.** Автоматизированный цикл на домашнем Xray не заменяет импорт ключа в графический AmneziaVPN на целевых ОС.
 4. **Ссылки канала и поддержки не заполнены.** До задания `TELEGRAM_CHANNEL_URL` / `SUPPORT_URL` бот показывает информирующее окно вместо перехода.
 
@@ -517,6 +517,52 @@ Telegram bot / VPN client / web admin
 ```
 
 В production `api_address` используется только локальным node-agent. Control plane не соединяется с Xray gRPC напрямую. Текущий прямой `XrayClient` сохраняется для домашнего теста; production переключается на `XRAY_MANAGEMENT_MODE=agent`.
+
+### Быстрое добавление VPN-ноды
+
+Повторяемый bootstrap находится в `scripts/deploy_vpn_node.sh`. Он не ставит пакеты в хостовую ОС: целевой Fedora-инстанс должен уже иметь Podman, systemd, OpenSSH и OpenSSL. Скрипт:
+
+- создаёт отдельную пару Reality и short ID для ноды;
+- регистрирует ноду и VLESS-конфигурацию через API;
+- выпускает scoped token node-agent;
+- передаёт Xray-конфигурацию и собирает минимальный agent image;
+- устанавливает Quadlet units с автозапуском;
+- оставляет `10085/tcp` только на loopback, а `443/tcp` публикует для VPN;
+- безопасно повторяется: существующие Reality-ключи и node token не ротируются.
+
+Пример запуска для следующего инстанса:
+
+```bash
+export NODE_SSH=root@203.0.113.10
+export NODE_NAME=provider-region-01
+export NODE_PROVIDER=hetzner
+export NODE_REGION=nl                 # us, nl или de
+export NODE_IP=203.0.113.10
+export NODE_HOSTNAME=nl1.example.com  # до DNS можно использовать IP
+export NODE_CAPACITY=100
+export CONTROL_PLANE_URL=https://api.example.com
+export ADMIN_API_URL=http://127.0.0.1:8000
+export ADMIN_USERNAME=admin
+read -rs ADMIN_PASSWORD; export ADMIN_PASSWORD
+./scripts/deploy_vpn_node.sh
+unset ADMIN_PASSWORD
+```
+
+Для временного домашнего control plane `CONTROL_PLANE_URL` может указывать на loopback reverse SSH-туннеля ноды, например `http://127.0.0.1:18000`. Это переходная схема без Tailscale: после появления публичного HTTPS URL достаточно обновить `CONTROL_PLANE_URL` и повторно запустить bootstrap.
+
+### Первая DigitalOcean-нода
+
+25 августа 2026 года развёрнута нода `do-fra1-de-01` (`159.223.22.59`, DigitalOcean FRA1, регион `de`, node id `2`):
+
+- Xray `26.3.27` закреплён digest образа и работает через Podman Quadlet;
+- наружу доступны SSH и VLESS/Reality `443/tcp`; firewall не включался;
+- Xray gRPC `127.0.0.1:10085` и временный control-plane bridge `127.0.0.1:18000` снаружи недоступны;
+- `vpn-xray` и `vpn-node-agent` запускаются systemd и имеют memory limits;
+- backend переключён на `XRAY_MANAGEMENT_MODE=agent`;
+- node-agent отображается `online` и отправляет reconciliation/latency в audit log;
+- E2E проверка создала клиента, синхронизировала его в Xray, получила VLESS Reality URI, вывела трафик через `159.223.22.59`, затем отозвала клиента и подтвердила удаление из Xray.
+
+Временная связь с домашним control plane обслуживается `vpn-control-tunnel.service` на домашнем сервере. SSH-ключ ограничен только reverse-forward на loopback `18000`; пользователь `vpn-tunnel` на VPN-ноде не имеет sudo. После переноса API на публичный HTTPS этот tunnel нужно удалить.
 
 Готовность перед добавлением второй ноды:
 

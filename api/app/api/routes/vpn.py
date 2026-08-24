@@ -16,6 +16,7 @@ from app.db.session import get_db
 
 from app.services.xray import XrayClient, XrayError, XrayUserNotFound
 from app.core.security import require_api_access
+from app.core.config import settings
 
 from app.schemas.vpn import (
     VPNClientConfigResponse,
@@ -114,6 +115,13 @@ async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
     node = await db.get(VPNNode, node_id)
     if not node:
         raise HTTPException(status_code=404, detail="VPN node not found")
+    if settings.xray_management_mode == "agent":
+        return VPNNodeHealthResponse(
+            node_id=node_id,
+            status=node.health_status,
+            xray_users=None,
+            error=None if node.health_status == "online" else "Waiting for node-agent status",
+        )
     result = await db.execute(select(VPNNodeConfig).where(VPNNodeConfig.node_id == node_id, VPNNodeConfig.protocol == "vless"))
     config = result.scalar_one_or_none()
     if not config:
@@ -148,6 +156,11 @@ async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
     response_model=VPNNodeReconciliationResponse,
 )
 async def reconcile_vpn_node(node_id: int, db: AsyncSession = Depends(get_db)):
+    if settings.xray_management_mode == "agent":
+        raise HTTPException(
+            status_code=409,
+            detail="Reconciliation is performed automatically by the node-agent",
+        )
     try:
         report = await reconcile_node(db, node_id)
     except ValueError as exc:
@@ -459,10 +472,11 @@ async def create_vpn_client(
     await db.flush()
 
     # -----------------------------------------------------
-    #  Add client to Xray
+    # Add client to Xray only on the single-node test stand. In agent mode the
+    # committed database row is the desired state consumed by the node agent.
     # -----------------------------------------------------
 
-    if protocol == "vless":
+    if protocol == "vless" and settings.xray_management_mode == "direct":
         xray = XrayClient(address=node_config.config.get("api_address"))
 
         try:
@@ -579,7 +593,7 @@ async def revoke_vpn_client(
     # Remove client from Xray
     # -----------------------------------------------------
 
-    if client.protocol == "vless":
+    if client.protocol == "vless" and settings.xray_management_mode == "direct":
         xray = XrayClient(address=node_config.config.get("api_address"))
 
         try:
