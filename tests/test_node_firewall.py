@@ -9,7 +9,13 @@ def test_firewall_is_default_deny_and_keeps_vpn_public() -> None:
     assert '--set-target=DROP' in SCRIPT
     assert 'XRAY_TCP_PORTS=${XRAY_TCP_PORTS:-443}' in SCRIPT
     assert '--add-port="$port/tcp"' in SCRIPT
-    assert "SSH_ALLOW_CIDRS is required" in SCRIPT
+    assert "SSH_ACCESS_MODE=${SSH_ACCESS_MODE:-key-only}" in SCRIPT
+    assert 'SSH_ACCESS_MODE == key-only' in SCRIPT
+    assert '--add-port="$SSH_PORT/tcp"' in SCRIPT
+    assert "PasswordAuthentication no" in SCRIPT
+    assert "KbdInteractiveAuthentication no" in SCRIPT
+    assert "PubkeyAuthentication yes" in SCRIPT
+    assert "SSH_ALLOW_CIDRS is required in SSH_ACCESS_MODE=cidr" in SCRIPT
     assert "Refusing a world-open SSH CIDR" in SCRIPT
 
 

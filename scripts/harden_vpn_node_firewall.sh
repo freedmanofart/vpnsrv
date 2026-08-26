@@ -11,6 +11,7 @@ STATE_DIR=${STATE_DIR:-/run/vpn-node-firewall}
 ROLLBACK_SECONDS=${ROLLBACK_SECONDS:-300}
 XRAY_TCP_PORTS=${XRAY_TCP_PORTS:-443}
 SSH_ALLOW_CIDRS=${SSH_ALLOW_CIDRS:-}
+SSH_ACCESS_MODE=${SSH_ACCESS_MODE:-key-only}
 INSTALL_FIREWALL=${INSTALL_FIREWALL:-0}
 ROLLBACK_UNIT=vpn-node-firewall-rollback
 SELF_PATH=$(readlink -f "$0")
@@ -20,7 +21,8 @@ usage() {
 Usage: $0 [--apply|--confirm|--status|--rollback]
 
 Apply example (keep this SSH session open):
-  SSH_ALLOW_CIDRS=198.51.100.7/32 $0 --apply
+  $0 --apply                         # key-only SSH from any address
+  SSH_ACCESS_MODE=cidr SSH_ALLOW_CIDRS=198.51.100.7/32 $0 --apply
 Then log in through a second SSH session and run:
   $0 --confirm
 EOF
@@ -68,9 +70,13 @@ case "$ACTION" in
     ;;
 esac
 
-[[ -n $SSH_ALLOW_CIDRS ]] || {
-  echo "SSH_ALLOW_CIDRS is required (use the current public client IP with /32)." >&2; exit 2;
-}
+case "$SSH_ACCESS_MODE" in
+  key-only) ;;
+  cidr) [[ -n $SSH_ALLOW_CIDRS ]] || {
+    echo "SSH_ALLOW_CIDRS is required in SSH_ACCESS_MODE=cidr" >&2; exit 2;
+  } ;;
+  *) echo "SSH_ACCESS_MODE must be key-only or cidr" >&2; exit 2 ;;
+esac
 [[ ! -f $STATE_DIR/pending ]] || {
   echo "A firewall change is already pending; confirm or roll it back first." >&2; exit 3;
 }
@@ -90,9 +96,11 @@ command -v systemd-run >/dev/null
 command -v sshd >/dev/null
 systemctl enable --now firewalld
 
-IFS=, read -r -a cidrs <<<"$SSH_ALLOW_CIDRS"
 CURRENT_IP=${SSH_CONNECTION%% *}
-CIDRS_TEXT=$SSH_ALLOW_CIDRS CURRENT_IP=$CURRENT_IP python3 - <<'PY'
+[[ -n $CURRENT_IP ]] || { echo "Run --apply from an active SSH session" >&2; exit 2; }
+if [[ $SSH_ACCESS_MODE == cidr ]]; then
+  IFS=, read -r -a cidrs <<<"$SSH_ALLOW_CIDRS"
+  CIDRS_TEXT=$SSH_ALLOW_CIDRS CURRENT_IP=$CURRENT_IP python3 - <<'PY'
 import ipaddress, os
 networks=[]
 for raw in os.environ["CIDRS_TEXT"].split(","):
@@ -107,6 +115,20 @@ address=ipaddress.ip_address(current)
 if not any(address in network for network in networks):
     raise SystemExit(f"Current SSH source {address} is not in SSH_ALLOW_CIDRS")
 PY
+else
+  # A globally reachable SSH port is safe only when sshd itself rejects every
+  # password and keyboard-interactive login.  Do not silently weaken sshd here.
+  SSHD_EFFECTIVE=$(sshd -T)
+  grep -qx 'pubkeyauthentication yes' <<<"$SSHD_EFFECTIVE" || {
+    echo "sshd must have PubkeyAuthentication yes" >&2; exit 2;
+  }
+  grep -qx 'passwordauthentication no' <<<"$SSHD_EFFECTIVE" || {
+    echo "Refusing public SSH: set PasswordAuthentication no first" >&2; exit 2;
+  }
+  grep -qx 'kbdinteractiveauthentication no' <<<"$SSHD_EFFECTIVE" || {
+    echo "Refusing public SSH: set KbdInteractiveAuthentication no first" >&2; exit 2;
+  }
+fi
 
 SSH_PORT=$(sshd -T | awk '$1 == "port" {print $2; exit}')
 IFACE=$(ip -4 route show default | awk '$1 == "default" {print $5; exit}')
@@ -127,12 +149,16 @@ firewall-cmd --permanent --zone="$ZONE" --set-target=DROP >/dev/null
 for port in ${XRAY_TCP_PORTS//,/ }; do
   firewall-cmd --permanent --zone="$ZONE" --add-port="$port/tcp" >/dev/null
 done
-for cidr in "${cidrs[@]}"; do
-  cidr=${cidr//[[:space:]]/}
-  family=ipv4; [[ $cidr == *:* ]] && family=ipv6
-  firewall-cmd --permanent --zone="$ZONE" \
-    --add-rich-rule="rule family=$family source address=$cidr port port=$SSH_PORT protocol=tcp accept" >/dev/null
-done
+if [[ $SSH_ACCESS_MODE == key-only ]]; then
+  firewall-cmd --permanent --zone="$ZONE" --add-port="$SSH_PORT/tcp" >/dev/null
+else
+  for cidr in "${cidrs[@]}"; do
+    cidr=${cidr//[[:space:]]/}
+    family=ipv4; [[ $cidr == *:* ]] && family=ipv6
+    firewall-cmd --permanent --zone="$ZONE" \
+      --add-rich-rule="rule family=$family source address=$cidr port port=$SSH_PORT protocol=tcp accept" >/dev/null
+  done
+fi
 
 # Arm rollback BEFORE changing the active interface.  The transient timer calls
 # this same, already-installed script and survives loss of the SSH connection.
@@ -143,7 +169,7 @@ firewall-cmd --reload
 
 cat <<EOF
 Firewall is active on $IFACE with DROP-by-default.
-SSH port $SSH_PORT is allowed only from: $SSH_ALLOW_CIDRS
+SSH port $SSH_PORT access mode: $SSH_ACCESS_MODE
 Public Xray TCP ports: $XRAY_TCP_PORTS
 
 DO NOT CLOSE THIS SESSION. Open a second terminal, log in again, then run there:
