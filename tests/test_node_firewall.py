@@ -21,10 +21,28 @@ def test_firewall_is_default_deny_and_keeps_vpn_public() -> None:
 
 def test_firewall_has_automatic_rollback_and_requires_new_session() -> None:
     assert 'systemd-run --unit="$ROLLBACK_UNIT"' in SCRIPT
+    assert '--setenv="STATE_DIR=$STATE_DIR" --setenv="ZONE=$ZONE"' in SCRIPT
     assert '"$SELF_PATH" --rollback' in SCRIPT
     assert '${SSH_CONNECTION} != "$apply_connection"' in SCRIPT
     assert "DO NOT CLOSE THIS SESSION" in SCRIPT
     assert "--confirm" in SCRIPT
+
+
+def test_reapply_replaces_old_allow_list() -> None:
+    remove_ports = '--remove-port="$port"'
+    remove_rules = '--remove-rich-rule="$rule"'
+    assert remove_ports in SCRIPT
+    assert remove_rules in SCRIPT
+    assert SCRIPT.index(remove_ports) < SCRIPT.index('--add-port="$port/tcp"')
+    assert SCRIPT.index(remove_rules) < SCRIPT.index('--add-rich-rule=')
+
+
+def test_rollback_keeps_state_until_restoration_is_verified() -> None:
+    verification = 'restored_zone=$(firewall-cmd --get-zone-of-interface="$iface"'
+    cleanup = 'rm -rf "$STATE_DIR"'
+    assert "rollback state retained" in SCRIPT
+    assert verification in SCRIPT
+    assert SCRIPT.index(verification) < SCRIPT.index(cleanup)
 
 
 def test_copy_helper_does_not_apply_firewall() -> None:
