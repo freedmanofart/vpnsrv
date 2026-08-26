@@ -14,6 +14,23 @@ CLIENT_CONTAINER_NAME=${CLIENT_CONTAINER_NAME:-vpn-xray-standalone-client}
 SOCKS_PORT=${SOCKS_PORT:-10808}
 PUBLIC_HOST=${PUBLIC_HOST:-}
 
+if (( $# > 1 )); then
+  echo "Usage: $0 [--diagnose|--remove]" >&2
+  exit 2
+fi
+case ${1:-} in
+  ""|--diagnose|--remove) ;;
+  --diagnose*)
+    cat >&2 <<EOF
+Invalid argument: ${1}
+It looks like two diagnose commands were pasted without a newline. Run exactly:
+  $0 --diagnose
+EOF
+    exit 2
+    ;;
+  *) echo "Usage: $0 [--diagnose|--remove]" >&2; exit 2 ;;
+esac
+
 if [[ ${1:-} == "--diagnose" ]]; then
   if [[ $EUID -ne 0 ]]; then
     echo "Run as root on the VPN node" >&2
@@ -29,21 +46,26 @@ if [[ ${1:-} == "--diagnose" ]]; then
     echo "Built-in reference client has no successful egress result"
   fi
   accepted=0
-  [[ -f $STATE_DIR/log/access.log ]] && \
+  external_accepted=0
+  if [[ -f $STATE_DIR/log/access.log ]]; then
     accepted=$(grep -c 'accepted' "$STATE_DIR/log/access.log" || true)
+    external_accepted=$(grep 'accepted' "$STATE_DIR/log/access.log" | \
+      grep -Evc 'from (tcp:)?127\.0\.0\.1:' || true)
+  fi
   invalid=$(podman logs --since 30m "$CONTAINER_NAME" 2>&1 | \
     grep -c 'failed to read client hello' || true)
-  echo "Accepted VLESS requests in access.log: $accepted"
+  echo "Accepted VLESS requests in access.log (including built-in): $accepted"
+  echo "Accepted requests from external clients: $external_accepted"
   echo "Invalid Reality ClientHello connections in last 30 minutes: $invalid"
-  if (( invalid > 0 && accepted == 0 )); then
+  if (( invalid > 0 && external_accepted == 0 )); then
     cat <<'EOF'
 Diagnosis: TCP reaches this node, but the external client is not speaking Reality.
 An empty access.log is expected because rejected handshakes never become VLESS
 requests. Re-import the newly printed URI into a new Reality-capable profile
 without editing its security, SNI, public key, short ID or fingerprint parameters.
 EOF
-  elif (( accepted > 0 )); then
-    echo "Diagnosis: at least one request passed Reality and VLESS authentication."
+  elif (( external_accepted > 0 )); then
+    echo "Diagnosis: an external request passed Reality and VLESS authentication."
   else
     echo "Diagnosis: no external Reality/VLESS request is visible yet."
   fi
@@ -141,6 +163,9 @@ podman run --rm -v "$STATE_DIR/config.json:/config.json:ro,Z" \
   "$XRAY_IMAGE" run -test -config /config.json
 install -d -m 700 "$STATE_DIR/log"
 chown 65532:65532 "$STATE_DIR/log"
+# Do not mix a new diagnostic run with accepted requests from an older profile.
+: > "$STATE_DIR/log/access.log"
+chown 65532:65532 "$STATE_DIR/log/access.log"
 podman run -d --name "$CONTAINER_NAME" --network host --restart=unless-stopped \
   -v "$STATE_DIR/config.json:/usr/local/etc/xray/config.json:ro,Z" \
   -v "$STATE_DIR/log:/var/log/xray:Z" \

@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run_standalone_xray_node.sh"
@@ -50,3 +51,27 @@ def test_runner_explains_rejected_reality_before_vless_access() -> None:
     assert "failed to read client hello" in source
     assert "rejected handshakes never become VLESS" in source
     assert "external client is not speaking Reality" in source
+    assert "external_accepted == 0" in source
+    assert "127\\.0\\.0\\.1" in source
+
+
+def test_runner_rejects_concatenated_diagnose_command() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "two diagnose commands were pasted without a newline" in source
+    assert "Usage: $0 [--diagnose|--remove]" in source
+
+    result = subprocess.run(
+        [str(SCRIPT), "--diagnose/root/run_standalone_xray_node.sh", "--diagnose"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "Usage:" in result.stderr
+
+
+def test_runner_starts_each_access_log_cleanly() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert ': > "$STATE_DIR/log/access.log"' in source
