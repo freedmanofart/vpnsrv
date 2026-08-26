@@ -41,6 +41,7 @@ from app.schemas.vpn import VPNClientResponse
 from app.core.security import require_api_access
 from app.core.config import settings
 from app.services.audit import write_audit
+from app.services.node_health import node_accepts_clients
 
 
 router = APIRouter(
@@ -269,10 +270,10 @@ async def get_node_for_client(
             detail="VPN node not found",
         )
 
-    if node.status != "active":
+    if not node_accepts_clients(node, management_mode=settings.xray_management_mode):
         raise HTTPException(
-            status_code=400,
-            detail="VPN node is not active",
+            status_code=503,
+            detail="VPN node is not available",
         )
 
     result = await db.execute(
@@ -310,7 +311,16 @@ async def get_active_node_and_config(
         .order_by(VPNNode.id)
     )
 
-    node = result.scalars().first()
+    node = next(
+        (
+            candidate
+            for candidate in result.scalars().all()
+            if node_accepts_clients(
+                candidate, management_mode=settings.xray_management_mode
+            )
+        ),
+        None,
+    )
 
     if not node:
         raise HTTPException(

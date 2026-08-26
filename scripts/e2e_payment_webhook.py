@@ -1,4 +1,4 @@
-"""Verify signed and idempotent payment webhook behavior on a test payment."""
+"""Проверить подпись и идемпотентность webhook на тестовом платеже."""
 
 import hashlib
 import hmac
@@ -9,6 +9,7 @@ import httpx
 
 
 def main() -> None:
+    """Дважды вернуть тестовый платёж и отклонить поддельную подпись webhook."""
     payment_id = int(os.environ["E2E_PAYMENT_ID"])
     api_url = os.getenv("E2E_API_URL", "http://127.0.0.1:8000")
     token = os.environ["SERVICE_API_TOKEN"]
@@ -19,6 +20,8 @@ def main() -> None:
         payment_response = client.get(f"/payments/{payment_id}", headers=auth)
         payment_response.raise_for_status()
         payment = payment_response.json()
+        # Подписываем точные компактные байты, отправляемые по HTTP. Повторная
+        # сериализация после HMAC дала бы другую подпись при равнозначном JSON.
         body = json.dumps(
             {
                 "provider_payment_id": payment["provider_payment_id"],
@@ -33,6 +36,8 @@ def main() -> None:
             "X-Payment-Event-Id": f"e2e-refund-{payment_id}",
             "X-Payment-Signature": signature,
         }
+        # Повторяем тело и event ID: второй запрос должен вернуть сохранённый
+        # результат, не применяя переход refund второй раз.
         first = client.post(
             f"/payments/webhooks/{payment['provider']}",
             content=body,
@@ -46,6 +51,8 @@ def main() -> None:
         )
         second.raise_for_status()
 
+        # Используем новый event ID, чтобы отказ подтверждал проверку подписи,
+        # а не попадание корректного запроса в кэш идемпотентности.
         invalid_headers = {
             **headers,
             "X-Payment-Event-Id": f"e2e-invalid-{payment_id}",
