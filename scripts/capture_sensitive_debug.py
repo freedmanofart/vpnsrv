@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture an explicit sensitive-debug snapshot without printing its values."""
+"""Создать явный sensitive-debug снимок, не печатая содержащиеся в нём значения."""
 
 from __future__ import annotations
 
@@ -11,6 +11,11 @@ from urllib.request import Request, urlopen
 
 
 def load_env(path: Path) -> dict[str, str]:
+    """Прочитать простые записи KEY=VALUE без интерпретации синтаксиса shell.
+
+    Проект записывает этот формат через configctl. Значения намеренно остаются
+    без изменений: снятие кавычек или подстановка переменных изменили бы секрет.
+    """
     values: dict[str, str] = {}
     for line in path.read_text().splitlines():
         stripped = line.strip()
@@ -22,6 +27,7 @@ def load_env(path: Path) -> dict[str, str]:
 
 
 def find_private_keys(value):
+    """Рекурсивно собрать известные поля закрытых ключей из JSON Xray."""
     found = []
     if isinstance(value, dict):
         for key, item in value.items():
@@ -36,6 +42,7 @@ def find_private_keys(value):
 
 
 def request_json(url: str, auth: str, *, method: str = "GET", body=None):
+    """Выполнить один авторизованный JSON-запрос с ограниченным тайм-аутом."""
     headers = {"Authorization": auth}
     data = None
     if body is not None:
@@ -47,6 +54,7 @@ def request_json(url: str, auth: str, *, method: str = "GET", body=None):
 
 
 def main() -> None:
+    """Собрать секреты, разрешённые активной серверной debug-сессией."""
     parser = argparse.ArgumentParser()
     parser.add_argument("session_id", type=int)
     parser.add_argument("--project", type=Path, default=Path("."))
@@ -59,6 +67,8 @@ def main() -> None:
     basic = f"Basic {basic_value}"
     bearer = f"Bearer {env['SERVICE_API_TOKEN']}"
 
+    # Overview содержит ID клиентов, но не полные VPN URI. Каждую активную
+    # конфигурацию явно получаем через аудитируемый административный endpoint.
     overview = request_json(f"{args.api_url}/admin/overview", basic)
     client_keys = []
     for client in overview.get("clients", []):
@@ -69,6 +79,8 @@ def main() -> None:
         )
         client_keys.append(response.get("config"))
 
+    # Allow-list задан явно, чтобы новые переменные окружения не попадали
+    # незаметно в чувствительный снимок без проверки кода.
     xray_config = json.loads((args.project / "xray/config.json").read_text())
     secret_names = {
         "BOT_TOKEN",
@@ -90,6 +102,8 @@ def main() -> None:
         "vpn_uris": client_keys,
         "client_key_contents": client_keys,
     }
+    # За сохранение и аудит отвечает API. Утилита не пишет открытый снимок
+    # локально, а её stdout содержит только количества и идентификаторы.
     result = request_json(
         f"{args.api_url}/admin/debug-sessions/{args.session_id}/snapshot",
         basic,

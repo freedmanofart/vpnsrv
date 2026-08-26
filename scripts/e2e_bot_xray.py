@@ -1,7 +1,7 @@
-"""Run the bot-side purchase path against a deployed test API.
+"""Проверить сценарий покупки со стороны бота через развёрнутый тестовый API.
 
-The script intentionally prints only structural URI fields, not the client UUID
-or complete VPN URI. It is meant to run inside the bot container.
+Скрипт намеренно печатает только структурные поля URI, но не UUID клиента и не
+полный VPN URI. Он предназначен для запуска внутри контейнера бота.
 """
 
 import asyncio
@@ -21,6 +21,7 @@ from app.main import (
 
 
 async def main() -> None:
+    """Купить доступ, проверить URI и изменение количества пользователей Xray."""
     telegram_id = int(os.environ["E2E_TELEGRAM_ID"])
     expect_new = os.getenv("E2E_EXPECT_NEW", "true").lower() == "true"
     async with api_client(timeout=15.0) as client:
@@ -38,6 +39,8 @@ async def main() -> None:
         response.raise_for_status()
         user = response.json()
 
+    # Следуем публичным правилам выбора бота, а не берём произвольные записи БД,
+    # которые реальный пользователь не смог бы приобрести.
     plans = [plan for plan in await get_plans() if plan["is_active"]]
     nodes = [
         node
@@ -54,6 +57,8 @@ async def main() -> None:
         before_response.raise_for_status()
         health_before = before_response.json()
 
+    # Стабильный ключ позволяет сначала запустить с E2E_EXPECT_NEW=true, затем
+    # повторить с false и подтвердить сквозную идемпотентность выдачи по платежу.
     payment = await create_payment(
         user_id=user["id"],
         plan_id=plan["id"],
@@ -73,6 +78,7 @@ async def main() -> None:
     if vpn_client["client_type"] != "amnezia":
         raise RuntimeError("The issued client is not marked as AmneziaVPN")
 
+    # Разбираем выданный URI, но не печатаем UUID из user-info или полное значение.
     config = await get_vpn_client_config(vpn_client["id"])
     parsed = urlsplit(config["config"])
     query = parse_qs(parsed.query)

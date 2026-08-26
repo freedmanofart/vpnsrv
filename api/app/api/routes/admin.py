@@ -20,6 +20,8 @@ from app.db.models.audit import AuditLog, ClientDevice, DebugSession
 from app.db.session import get_db
 from app.core.security import APIPrincipal, require_admin
 from app.services.audit import write_audit
+from app.services.node_health import node_accepts_clients
+from app.core.config import settings
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -166,7 +168,9 @@ async def update_user_access(
     if plan is None:
         raise HTTPException(status_code=404, detail="Plan not found")
     node = await db.get(VPNNode, data.node_id)
-    if node is None or node.status != "active":
+    if node is None or not node_accepts_clients(
+        node, management_mode=settings.xray_management_mode
+    ):
         raise HTTPException(status_code=404, detail="Active VPN node not found")
     config_result = await db.execute(
         select(VPNNodeConfig).where(

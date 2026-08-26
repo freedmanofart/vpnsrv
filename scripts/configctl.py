@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small, dependency-free manager for the project's .env configuration."""
+"""Небольшой менеджер конфигурации .env проекта без внешних зависимостей."""
 
 from __future__ import annotations
 
@@ -14,11 +14,14 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Variable:
+    """Метаданные политики для маскирования, проверки и генерации."""
     secret: bool = False
     required: bool = False
     generated_bytes: int | None = None
 
 
+# Центральный allow-list. Неизвестные ключи .env можно менять и просматривать,
+# но только объявленные здесь ключи получают специальную проверку и маскирование.
 VARIABLES: dict[str, Variable] = {
     "POSTGRES_DB": Variable(required=True),
     "POSTGRES_USER": Variable(required=True),
@@ -54,11 +57,14 @@ VARIABLES: dict[str, Variable] = {
 
 
 class EnvFile:
+    """Сохранять комментарии и порядок при безопасном изменении dotenv-файла."""
+
     def __init__(self, path: Path):
         self.path = path
         self.lines = path.read_text().splitlines() if path.exists() else []
 
     def values(self) -> dict[str, str]:
+        """Вернуть последнее значение каждой простой записи KEY=VALUE."""
         result: dict[str, str] = {}
         for line in self.lines:
             stripped = line.strip()
@@ -69,6 +75,7 @@ class EnvFile:
         return result
 
     def set(self, key: str, value: str) -> None:
+        """Заменить первую совпавшую запись или добавить новую."""
         if "\n" in value or "\r" in value:
             raise ValueError("Multiline values are not supported")
         prefix = f"{key}="
@@ -81,6 +88,7 @@ class EnvFile:
         self.lines.append(prefix + value)
 
     def save(self) -> None:
+        """Атомарно заменить файл, оставив доступ только владельцу."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.tmp")
         temporary.write_text("\n".join(self.lines).rstrip() + "\n")
@@ -89,6 +97,7 @@ class EnvFile:
 
 
 def mask(value: str) -> str:
+    """Показать достаточно символов для узнавания секрета, не раскрывая его."""
     if not value:
         return "<empty>"
     if len(value) <= 8:
@@ -97,6 +106,7 @@ def mask(value: str) -> str:
 
 
 def validate(values: dict[str, str]) -> list[str]:
+    """Вернуть за один проход все требующие исправления ошибки конфигурации."""
     errors: list[str] = []
     for key, metadata in VARIABLES.items():
         value = values.get(key, "")
@@ -114,6 +124,7 @@ def validate(values: dict[str, str]) -> list[str]:
 
 
 def parser() -> argparse.ArgumentParser:
+    """Построить грамматику CLI для ручного и автоматизированного запуска."""
     result = argparse.ArgumentParser(prog="configctl")
     result.add_argument(
         "--env-file",
@@ -142,6 +153,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """Выполнить команду configctl и вернуть код завершения процесса."""
     args = parser().parse_args()
     env = EnvFile(args.env_file)
     values = env.values()
@@ -185,7 +197,8 @@ def main() -> int:
         print("configuration is valid")
         return 0
 
-
+    # Пересоздание сервисов с неверной конфигурацией может вызвать простой,
+    # поэтому `apply` всегда выполняет проверку перед запуском Docker Compose.
     errors = validate(values)
     if errors:
         raise SystemExit("configuration is invalid; run configctl validate")
@@ -202,6 +215,8 @@ def main() -> int:
         "--force-recreate",
         *args.services,
     ]
+    # Передаём аргументы списком, а не shell-строкой, чтобы пути и имена сервисов
+    # не могли быть повторно интерпретированы как синтаксис shell.
     subprocess.run(command, check=True)
     return 0
 

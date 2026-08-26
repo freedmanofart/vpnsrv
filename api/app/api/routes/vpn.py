@@ -31,6 +31,7 @@ from app.schemas.vpn import (
     VPNNodeReconciliationResponse,
 )
 from app.services.reconciliation import reconcile_node
+from app.services.node_health import effective_node_health, node_accepts_clients
 
 router = APIRouter(
     prefix="/vpn",
@@ -55,7 +56,19 @@ async def get_nodes(
         .order_by(VPNNode.id)
     )
 
-    return result.scalars().all()
+    nodes = result.scalars().all()
+    return [
+        VPNNodeResponse.model_validate(node).model_copy(
+            update={
+                "health_status": effective_node_health(
+                    node.health_status,
+                    node.last_seen_at,
+                    management_mode=settings.xray_management_mode,
+                )
+            }
+        )
+        for node in nodes
+    ]
 
 
 @router.post(
@@ -116,11 +129,16 @@ async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
     if not node:
         raise HTTPException(status_code=404, detail="VPN node not found")
     if settings.xray_management_mode == "agent":
+        health_status = effective_node_health(
+            node.health_status,
+            node.last_seen_at,
+            management_mode=settings.xray_management_mode,
+        )
         return VPNNodeHealthResponse(
             node_id=node_id,
-            status=node.health_status,
+            status=health_status,
             xray_users=None,
-            error=None if node.health_status == "online" else "Waiting for node-agent status",
+            error=None if health_status == "online" else "Node-agent heartbeat is missing or stale",
         )
     result = await db.execute(select(VPNNodeConfig).where(VPNNodeConfig.node_id == node_id, VPNNodeConfig.protocol == "vless"))
     config = result.scalar_one_or_none()
@@ -401,10 +419,10 @@ async def create_vpn_client(
             detail="VPN node not found",
         )
 
-    if node.status != "active":
+    if not node_accepts_clients(node, management_mode=settings.xray_management_mode):
         raise HTTPException(
-            status_code=400,
-            detail="VPN node is not active",
+            status_code=503,
+            detail="VPN node is not available",
         )
 
     # -----------------------------------------------------

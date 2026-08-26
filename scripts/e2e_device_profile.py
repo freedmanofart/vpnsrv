@@ -1,4 +1,4 @@
-"""Exercise scoped device activation/profile/debug/refresh without printing secrets."""
+"""Проверить activation/profile/debug/refresh устройства без печати секретов."""
 
 import json
 import os
@@ -7,6 +7,7 @@ import httpx
 
 
 def main() -> None:
+    """Проверить полный жизненный цикл device token через работающий API."""
     telegram_id = int(os.environ["E2E_TELEGRAM_ID"])
     api_url = os.getenv("E2E_API_URL", "http://127.0.0.1:8000")
     service_headers = {
@@ -17,6 +18,8 @@ def main() -> None:
         os.environ["ADMIN_PASSWORD"],
     )
 
+    # Сервисная авторизация может выпустить короткоживущий activation code;
+    # следующие запросы профиля используют только scoped token устройства.
     with httpx.Client(base_url=api_url, timeout=15.0) as client:
         code_response = client.post(
             "/v1/client/activation-codes",
@@ -43,6 +46,8 @@ def main() -> None:
         if not nodes or not nodes[0]["config"].startswith("vless://"):
             raise RuntimeError("Device profile does not contain VLESS configuration")
 
+        # Sensitive-debug подтверждает, что профиль доступен при активном серверном
+        # аудите. При успехе сессия закрывается и не живёт дольше этой проверки.
         debug = client.post(
             "/admin/debug-sessions",
             auth=admin_auth,
@@ -53,6 +58,8 @@ def main() -> None:
         debug_profile = client.get("/v1/client/profile", headers=old_headers)
         debug_profile.raise_for_status()
 
+        # Refresh должен быть атомарным: новый токен принимается, а старый
+        # отклоняется немедленно, без ожидания фоновой задачи очистки.
         refreshed = client.post("/v1/client/refresh", headers=old_headers)
         refreshed.raise_for_status()
         new_headers = {
@@ -69,6 +76,8 @@ def main() -> None:
         revoke = client.delete(f"/admin/devices/{device_id}", auth=admin_auth)
         revoke.raise_for_status()
 
+    # Проверяем важный для безопасности негативный сценарий до вывода компактного
+    # JSON без секретов, предназначенного для журналов CI.
     if old_rejected.status_code != 401:
         raise RuntimeError("Old device token remained valid after refresh")
     print(

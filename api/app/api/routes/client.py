@@ -26,6 +26,8 @@ from app.schemas.client import (
     DeviceTokenResponse,
 )
 from app.services.audit import write_audit
+from app.services.node_health import node_accepts_clients
+from app.core.config import settings
 
 
 router = APIRouter(prefix="/v1/client", tags=["Client devices"])
@@ -206,10 +208,8 @@ async def client_profile(
                 node_id=node.id,
                 name=node.name,
                 region=node.region,
-                available=(
-                    node.status == "active"
-                    and node.health_status != "offline"
-                    and node.active_connections < node.capacity
+                available=node_accepts_clients(
+                    node, management_mode=settings.xray_management_mode
                 ),
                 latency_ms=node.latency_ms,
                 protocol=client.protocol,

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Repeatable bootstrap for an Xray/Reality VPN node. The target only needs
-# Fedora/Podman, systemd and SSH; no host packages are installed.
+# Повторяемая начальная настройка VPN-ноды Xray/Reality. На целевом узле нужны
+# только Fedora/Podman, systemd и SSH; пакеты на хост не устанавливаются.
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Обязательные значения описывают удалённый хост и его запись в control plane.
+# `${VAR:?сообщение}` останавливает скрипт до удалённых изменений при нехватке данных.
 NODE_SSH=${NODE_SSH:?Set NODE_SSH, for example root@159.223.22.59}
 NODE_NAME=${NODE_NAME:?Set NODE_NAME, for example do-fra1-01}
 NODE_PROVIDER=${NODE_PROVIDER:?Set NODE_PROVIDER, for example digitalocean}
@@ -24,6 +26,7 @@ case "$NODE_REGION" in
   *) echo "NODE_REGION must be us, nl or de" >&2; exit 2 ;;
 esac
 
+# Проверяем локальные команды до выпуска учётных данных и изменения SSH на ноде.
 command -v ssh >/dev/null
 command -v scp >/dev/null
 command -v curl >/dev/null
@@ -41,16 +44,21 @@ SSH_ARGS=(
   -o "ControlPath=$SSH_DIR/%C"
 )
 
+# Выполняет команду через мультиплексированное неинтерактивное SSH-соединение.
 remote() {
   ssh "${SSH_ARGS[@]}" "$NODE_SSH" "$@"
 }
 
+# Все административные API-вызовы используют Basic auth, завершаются ошибкой при
+# ответе не 2xx и запрашивают JSON. Тихий curl не раскрывает секреты в verbose-логах.
 api() {
   curl --fail --silent --show-error \
     --user "$ADMIN_USERNAME:$ADMIN_PASSWORD" \
     -H 'Content-Type: application/json' "$@"
 }
 
+# Извлекает доверенное выражение из JSON-ответа. Вызывающий код передаёт выражения
+# наподобие '["id"]'; Python устраняет зависимость от jq на машине оператора.
 json_value() {
   python3 -c 'import json,sys; value=json.load(sys.stdin); print(value'"$1"')'
 }
@@ -62,6 +70,8 @@ scp "${SSH_ARGS[@]}" "$PROJECT_ROOT/deploy/ssh/00-vpn-hardening.conf" "$PROJECT_
 remote "restorecon -F /etc/ssh/sshd_config.d/00-vpn-hardening.conf /etc/ssh/sshd_config.d/01-vpn-preauth.conf 2>/dev/null || true; sshd -t; systemctl reload sshd"
 
 echo "[2/7] Generating node-specific Reality material"
+# Повторный запуск сохраняет существующие данные Reality. Неявная ротация сделала
+# бы недействительными все клиентские URI, уже выданные для этой ноды.
 if remote "test -s /etc/vpn-node/xray-config.json"; then
   scp "${SSH_ARGS[@]}" "$NODE_SSH:/etc/vpn-node/xray-config.json" "$TMP_DIR/xray-config.json" >/dev/null
   REALITY_PRIVATE_KEY=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["inbounds"][1]["streamSettings"]["realitySettings"]["privateKey"])' "$TMP_DIR/xray-config.json")
@@ -78,6 +88,8 @@ else
     "$PROJECT_ROOT/deploy/node/xray-config.example.json" > "$TMP_DIR/xray-config.json"
 fi
 python3 - "$TMP_DIR/xray-config.json" <<'PY'
+# Включаем access log даже для сохранённой старой конфигурации: node-agent читает
+# его и сообщает время последней активности клиента.
 import json
 import sys
 
@@ -85,6 +97,11 @@ path = sys.argv[1]
 with open(path, encoding="utf-8") as source:
     config = json.load(source)
 config.setdefault("log", {})["access"] = "/var/log/xray/access.log"
+# На VPS без рабочего IPv6 принудительно разрешаем домены в IPv4. Иначе Xray
+# может принять VLESS-туннель, но не суметь открыть адрес назначения для клиента.
+for outbound in config.get("outbounds", []):
+    if outbound.get("tag") == "direct" and outbound.get("protocol") == "freedom":
+        outbound.setdefault("settings", {})["domainStrategy"] = "UseIPv4"
 with open(path, "w", encoding="utf-8") as destination:
     json.dump(config, destination, indent=2)
     destination.write("\n")
@@ -95,6 +112,8 @@ test -n "$REALITY_PUBLIC_KEY"
 test -n "$REALITY_SHORT_ID"
 
 echo "[3/7] Registering node and VLESS configuration"
+# Регистрация идемпотентна по имени ноды. Перед заменой файлов или сервисов на
+# удалённом хосте существующие публичные данные Reality сравниваются ниже.
 NODES_JSON=$(api "$ADMIN_API_URL/vpn/nodes")
 NODE_ID=$(printf '%s' "$NODES_JSON" | NODE_LOOKUP="$NODE_NAME" python3 -c '
 import json, os, sys
@@ -150,6 +169,8 @@ print(config.get("pbk", "") + " " + config.get("sid", ""))
 fi
 
 echo "[4/7] Issuing a scoped node-agent token"
+# Открытый токен возвращается только при ротации. При повторном запуске сохраняем
+# развёрнутый токен, чтобы исправная нода не потеряла доступ к control plane.
 if remote "test -s /etc/vpn-node/node-agent.env"; then
   NODE_TOKEN=$(remote "sed -n 's/^NODE_AGENT_TOKEN=//p' /etc/vpn-node/node-agent.env")
 else
@@ -167,11 +188,15 @@ LOG_LEVEL=INFO
 EOF
 
 echo "[5/7] Uploading configuration and building the agent image"
+# Секретные файлы остаются с правами 0600. Конфигурация Xray принадлежит
+# непривилегированному UID контейнера, а юниты Quadlet ставятся для всей системы.
 remote "install -d -m 700 /etc/vpn-node /opt/vpn-node/build /etc/containers/systemd; install -d -m 750 -o 65532 -g 65532 /var/log/vpn-xray"
 scp "${SSH_ARGS[@]}" "$TMP_DIR/xray-config.json" "$NODE_SSH:/etc/vpn-node/xray-config.json"
 scp "${SSH_ARGS[@]}" "$TMP_DIR/node-agent.env" "$NODE_SSH:/etc/vpn-node/node-agent.env"
 scp "${SSH_ARGS[@]}" "$PROJECT_ROOT/deploy/node/NodeAgent.Dockerfile" "$NODE_SSH:/opt/vpn-node/build/NodeAgent.Dockerfile"
 remote "rm -rf /opt/vpn-node/build/app"
+# Передаём по SSH только исходники приложения, исключая кэши и xattr хоста для
+# воспроизводимого build context и без создания промежуточного архива.
 COPYFILE_DISABLE=1 tar --no-xattrs --exclude='__pycache__' --exclude='*.pyc' -C "$PROJECT_ROOT/api" -czf - app \
   | ssh "${SSH_ARGS[@]}" "$NODE_SSH" "tar -xzf - -C /opt/vpn-node/build"
 scp "${SSH_ARGS[@]}" "$PROJECT_ROOT/deploy/node/vpn-xray.container" "$NODE_SSH:/etc/containers/systemd/vpn-xray.container"
@@ -179,9 +204,13 @@ scp "${SSH_ARGS[@]}" "$PROJECT_ROOT/deploy/node/vpn-node-agent.container" "$NODE
 remote "chown 65532:65532 /etc/vpn-node/xray-config.json && chmod 600 /etc/vpn-node/xray-config.json /etc/vpn-node/node-agent.env && podman build -q -t localhost/vpn-node-agent:latest -f /opt/vpn-node/build/NodeAgent.Dockerfile /opt/vpn-node/build >/dev/null"
 
 echo "[6/7] Validating Xray and enabling services"
+# Собственный парсер Xray должен принять конфигурацию до перезапуска production-
+# юнитов systemd. Ошибка на этом шаге не затрагивает уже работающий юнит.
 remote "podman run --rm -v /etc/vpn-node/xray-config.json:/config.json:ro,Z '$XRAY_IMAGE' run -test -config /config.json"
 remote "systemctl daemon-reload && systemctl restart vpn-xray.service vpn-node-agent.service"
 
 echo "[7/7] Verifying listeners and service health"
+# Финальная проверка намеренно строгая: отсутствие сервиса или listener завершает
+# развёртывание ошибкой вместо вывода вводящего в заблуждение сообщения об успехе.
 remote "systemctl --no-pager --full status vpn-xray.service vpn-node-agent.service | sed -n '1,80p'; ss -lnt | grep -E '(:443|:10085)'"
 echo "Node $NODE_NAME registered as id=$NODE_ID. Public key and agent token were not printed."
