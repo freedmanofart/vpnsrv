@@ -158,6 +158,28 @@ tail -n 100 /var/log/vpn-xray/access.log
 тест разделяет установление Reality-сессии и фактический HTTPS egress; heartbeat
 node-agent проверяет только управление Xray и не заменяет эту проверку.
 
+### Полностью автономная проверка ноды
+
+Чтобы исключить API, БД, node-agent и генерацию ключа ботом, скопируйте на ноду
+`scripts/run_standalone_xray_node.sh` и запустите его от root. Скрипт создаёт
+новые Reality-ключи, один статический UUID и максимально простой профиль
+VLESS Reality TCP без Vision/flow. Он сначала проверяет конфигурацию встроенным
+парсером Xray и только затем запускает отдельный Podman-контейнер.
+
+Production `443/tcp` скрипт самостоятельно не останавливает. Для проверки на 443
+сначала остановите production Xray в отдельном SSH-сеансе либо задайте открытый в
+firewall альтернативный порт:
+
+```bash
+PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 ./scripts/run_standalone_xray_node.sh
+```
+
+Импортируйте напечатанный URI как **новый** профиль клиента. Если автономный URI
+также не открывает `https://api.ipify.org` и в `access.log` нет запросов, причина
+находится до Xray outbound: firewall/маршрут до ноды либо TUN клиента. Если есть
+`accepted`, смотрите `podman logs -f vpn-xray-standalone`. После проверки удалите
+контейнер командой `./scripts/run_standalone_xray_node.sh --remove`.
+
 ### Покупка и Xray — `e2e_bot_xray.py`
 
 Запускается внутри bot-контейнера, где импортируется приложение. Нужны активный
