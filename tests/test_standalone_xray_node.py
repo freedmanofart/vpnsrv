@@ -41,3 +41,12 @@ def test_runner_verifies_reality_egress_with_an_xray_client() -> None:
     assert '"protocol": "vless"' in source
     assert '--proxy "socks5h://127.0.0.1:$SOCKS_PORT"' in source
     assert "Built-in Xray client egress succeeded" in source
+
+
+def test_runner_explains_rejected_reality_before_vless_access() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert '"--diagnose"' in source
+    assert "failed to read client hello" in source
+    assert "rejected handshakes never become VLESS" in source
+    assert "external client is not speaking Reality" in source

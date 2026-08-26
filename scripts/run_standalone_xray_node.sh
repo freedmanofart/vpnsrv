@@ -14,6 +14,42 @@ CLIENT_CONTAINER_NAME=${CLIENT_CONTAINER_NAME:-vpn-xray-standalone-client}
 SOCKS_PORT=${SOCKS_PORT:-10808}
 PUBLIC_HOST=${PUBLIC_HOST:-}
 
+if [[ ${1:-} == "--diagnose" ]]; then
+  if [[ $EUID -ne 0 ]]; then
+    echo "Run as root on the VPN node" >&2
+    exit 2
+  fi
+  command -v podman >/dev/null
+  echo "Standalone container state:"
+  podman ps -a --filter "name=^${CONTAINER_NAME}$" --format \
+    '  {{.Names}}: {{.Status}}'
+  if [[ -s $STATE_DIR/egress-ip.txt ]]; then
+    echo "Built-in reference client egress IP: $(cat "$STATE_DIR/egress-ip.txt")"
+  else
+    echo "Built-in reference client has no successful egress result"
+  fi
+  accepted=0
+  [[ -f $STATE_DIR/log/access.log ]] && \
+    accepted=$(grep -c 'accepted' "$STATE_DIR/log/access.log" || true)
+  invalid=$(podman logs --since 30m "$CONTAINER_NAME" 2>&1 | \
+    grep -c 'failed to read client hello' || true)
+  echo "Accepted VLESS requests in access.log: $accepted"
+  echo "Invalid Reality ClientHello connections in last 30 minutes: $invalid"
+  if (( invalid > 0 && accepted == 0 )); then
+    cat <<'EOF'
+Diagnosis: TCP reaches this node, but the external client is not speaking Reality.
+An empty access.log is expected because rejected handshakes never become VLESS
+requests. Re-import the newly printed URI into a new Reality-capable profile
+without editing its security, SNI, public key, short ID or fingerprint parameters.
+EOF
+  elif (( accepted > 0 )); then
+    echo "Diagnosis: at least one request passed Reality and VLESS authentication."
+  else
+    echo "Diagnosis: no external Reality/VLESS request is visible yet."
+  fi
+  exit 0
+fi
+
 if [[ ${1:-} == "--remove" ]]; then
   podman rm -f "$CLIENT_CONTAINER_NAME" >/dev/null 2>&1 || true
   podman rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -191,6 +227,8 @@ Watch requests on the node with:
   tail -f $STATE_DIR/log/access.log
   podman logs -f $CONTAINER_NAME
   podman logs -f $CLIENT_CONTAINER_NAME
+Diagnose rejected handshakes with:
+  $0 --diagnose
 Remove the test container with:
   $0 --remove
 EOF
