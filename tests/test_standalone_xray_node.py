@@ -53,6 +53,17 @@ def test_runner_explains_rejected_reality_before_vless_access() -> None:
     assert "external client is not speaking Reality" in source
     assert "external_accepted == 0" in source
     assert "127\\.0\\.0\\.1" in source
+    assert "handshake did not complete successfully" in source
+
+
+def test_runner_does_not_treat_mixed_handshakes_as_node_failure() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    mixed = source.index("external_accepted > 0 && invalid > 0")
+    rejected_only = source.index("invalid > 0 && external_accepted == 0")
+    assert mixed < rejected_only
+    assert "the node data plane works" in source
+    assert "client's TUN, DNS" in source
 
 
 def test_runner_rejects_concatenated_diagnose_command() -> None:

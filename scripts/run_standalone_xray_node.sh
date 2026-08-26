@@ -13,6 +13,7 @@ CONTAINER_NAME=${CONTAINER_NAME:-vpn-xray-standalone}
 CLIENT_CONTAINER_NAME=${CLIENT_CONTAINER_NAME:-vpn-xray-standalone-client}
 SOCKS_PORT=${SOCKS_PORT:-10808}
 PUBLIC_HOST=${PUBLIC_HOST:-}
+DIAGNOSE_SINCE=${DIAGNOSE_SINCE:-30m}
 
 if (( $# > 1 )); then
   echo "Usage: $0 [--diagnose|--remove]" >&2
@@ -52,12 +53,20 @@ if [[ ${1:-} == "--diagnose" ]]; then
     external_accepted=$(grep 'accepted' "$STATE_DIR/log/access.log" | \
       grep -Evc 'from (tcp:)?127\.0\.0\.1:' || true)
   fi
-  invalid=$(podman logs --since 30m "$CONTAINER_NAME" 2>&1 | \
-    grep -c 'failed to read client hello' || true)
+  invalid=$(podman logs --since "$DIAGNOSE_SINCE" "$CONTAINER_NAME" 2>&1 | \
+    grep -Ec 'failed to read client hello|handshake did not complete successfully' || true)
   echo "Accepted VLESS requests in access.log (including built-in): $accepted"
   echo "Accepted requests from external clients: $external_accepted"
-  echo "Invalid Reality ClientHello connections in last 30 minutes: $invalid"
-  if (( invalid > 0 && external_accepted == 0 )); then
+  echo "Rejected Reality handshakes in last $DIAGNOSE_SINCE: $invalid"
+  if (( external_accepted > 0 && invalid > 0 )); then
+    cat <<'EOF'
+Diagnosis: mixed traffic. External Reality/VLESS requests were authenticated and
+forwarded, so the node data plane works. Rejected handshakes are separate TCP
+probes or incomplete client attempts and do not cancel successful sessions. If
+system-wide Internet is still unavailable, inspect the client's TUN, DNS,
+firewall and policy routing rather than changing the server Reality parameters.
+EOF
+  elif (( invalid > 0 && external_accepted == 0 )); then
     cat <<'EOF'
 Diagnosis: TCP reaches this node, but the external client is not speaking Reality.
 An empty access.log is expected because rejected handshakes never become VLESS

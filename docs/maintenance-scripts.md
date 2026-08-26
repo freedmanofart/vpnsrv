@@ -189,6 +189,13 @@ non-443 ports` для диагностического `8443` также не я
 склеенные без перевода строки; она не запускает диагностику. Счётчик принятых
 внешних запросов отделён от loopback-запроса встроенного эталонного клиента.
 
+Если одновременно присутствуют `accepted ... [vless-reality >> direct]` от
+внешнего IP и `failed to read client hello`/`handshake did not complete`, это не
+противоречие: первые строки доказывают рабочие Reality, VLESS и outbound, а вторые
+относятся к отдельным TCP-пробам или незавершённым попыткам клиента. При наличии
+принятых TCP **и** UDP-запросов с адреса клиента дальнейшую потерю системного
+интернета следует искать в клиентских TUN, DNS, firewall и policy routing.
+
 `run_standalone_xray_node.sh` запускается **на VPN-ноде**. Из checkout проекта на
 управляющем сервере или рабочем компьютере его можно безопасно скопировать так:
 
@@ -197,6 +204,37 @@ NODE_SSH=root@203.0.113.10 ./scripts/copy_standalone_xray_node.sh
 ssh root@203.0.113.10
 PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 /root/run_standalone_xray_node.sh
 ```
+
+### Независимая проверка AmneziaWG
+
+Чтобы полностью исключить Xray/Reality и сравнить другой transport, добавлен
+`run_standalone_amneziawg_node.sh`. Он не интегрирован с backend и требует заранее
+установленные официальные `awg` и `awg-quick`. Скрипт создаёт отдельный интерфейс
+`awg-test`, одну пару ключей клиента, PSK, runtime-правила firewalld и готовый
+конфиг для импорта в AmneziaVPN:
+
+```bash
+scp scripts/run_standalone_amneziawg_node.sh root@203.0.113.10:/root/
+ssh root@203.0.113.10
+PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 \
+  /root/run_standalone_amneziawg_node.sh
+```
+
+Разрешите `51820/udp` также в cloud firewall. Затем скопируйте напечатанный
+`/etc/vpn-standalone-awg/client.conf` на клиент и импортируйте как AmneziaWG.
+Текущий handshake и счётчики байтов доступны через `--status`; отсутствие
+handshake при видимых UDP-пакетах в `tcpdump` указывает на несовместимость
+параметров/клиента, а отсутствие самих пакетов — на firewall или блокировку UDP:
+
+```bash
+/root/run_standalone_amneziawg_node.sh --status
+tcpdump -ni any udp port 51820
+```
+
+После теста удалите runtime-интерфейс и правила командой `--remove`. Никакая
+криптографическая библиотека или VPN-протокол не может гарантировать работу с
+вероятностью 100% во всех ОС и сетях; эта проверка нужна именно для независимого
+сравнения UDP AmneziaWG с TCP Reality.
 
 Путь назначения можно заменить через `REMOTE_PATH`. Скрипт копирования ничего не
 запускает на ноде и не меняет firewall; он только создаёт каталог, копирует файл и
