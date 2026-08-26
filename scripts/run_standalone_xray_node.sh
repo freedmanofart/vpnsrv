@@ -167,6 +167,7 @@ chown 65532:65532 "$STATE_DIR/log"
 : > "$STATE_DIR/log/access.log"
 chown 65532:65532 "$STATE_DIR/log/access.log"
 podman run -d --name "$CONTAINER_NAME" --network host --restart=unless-stopped \
+  --cap-add=NET_BIND_SERVICE \
   -v "$STATE_DIR/config.json:/usr/local/etc/xray/config.json:ro,Z" \
   -v "$STATE_DIR/log:/var/log/xray:Z" \
   "$XRAY_IMAGE" run -config /usr/local/etc/xray/config.json >/dev/null

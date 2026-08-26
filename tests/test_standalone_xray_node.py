@@ -35,6 +35,14 @@ def test_config_is_readable_by_xray_uid_before_validation() -> None:
     assert ownership < validation
 
 
+def test_server_can_bind_the_default_privileged_port() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    server_launch = source[source.index('podman run -d --name "$CONTAINER_NAME"') :]
+    server_launch = server_launch[: server_launch.index(" >/dev/null")]
+
+    assert "--cap-add=NET_BIND_SERVICE" in server_launch
+
+
 def test_runner_verifies_reality_egress_with_an_xray_client() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
