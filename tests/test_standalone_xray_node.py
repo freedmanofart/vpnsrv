@@ -32,3 +32,12 @@ def test_config_is_readable_by_xray_uid_before_validation() -> None:
     validation = source.index('run -test -config /config.json')
 
     assert ownership < validation
+
+
+def test_runner_verifies_reality_egress_with_an_xray_client() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert '"protocol": "socks"' in source
+    assert '"protocol": "vless"' in source
+    assert '--proxy "socks5h://127.0.0.1:$SOCKS_PORT"' in source
+    assert "Built-in Xray client egress succeeded" in source
