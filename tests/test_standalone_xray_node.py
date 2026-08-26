@@ -24,3 +24,11 @@ def test_standalone_script_does_not_stop_existing_listener() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     assert "never stops production services automatically" in source
     assert 'ss -H -lnt "sport = :$XRAY_PORT"' in source
+
+
+def test_config_is_readable_by_xray_uid_before_validation() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    ownership = source.index('chown 65532:65532 "$STATE_DIR/config.json"')
+    validation = source.index('run -test -config /config.json')
+
+    assert ownership < validation

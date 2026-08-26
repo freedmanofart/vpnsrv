@@ -93,10 +93,15 @@ with open(path, "w", encoding="utf-8") as destination:
     destination.write("\n")
 PY
 
+# Закреплённый образ Xray работает не от root (UID 65532). Конфигурация должна
+# принадлежать этому UID уже во время `run -test`; одного SELinux relabel `:Z`
+# недостаточно, если файл создан root с umask 077.
+chown 65532:65532 "$STATE_DIR/config.json"
+chmod 600 "$STATE_DIR/config.json"
 podman run --rm -v "$STATE_DIR/config.json:/config.json:ro,Z" \
   "$XRAY_IMAGE" run -test -config /config.json
 install -d -m 700 "$STATE_DIR/log"
-chown 65532:65532 "$STATE_DIR/config.json" "$STATE_DIR/log"
+chown 65532:65532 "$STATE_DIR/log"
 podman run -d --name "$CONTAINER_NAME" --network host --restart=unless-stopped \
   -v "$STATE_DIR/config.json:/usr/local/etc/xray/config.json:ro,Z" \
   -v "$STATE_DIR/log:/var/log/xray:Z" \
