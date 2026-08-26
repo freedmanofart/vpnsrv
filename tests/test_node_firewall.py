@@ -45,6 +45,21 @@ def test_rollback_keeps_state_until_restoration_is_verified() -> None:
     assert SCRIPT.index(verification) < SCRIPT.index(cleanup)
 
 
+def test_reapply_rollback_snapshots_and_restores_old_allow_list() -> None:
+    snapshot_guard = 'if [[ $OLD_ZONE == "$ZONE" ]]'
+    restore_guard = 'if [[ -f $STATE_DIR/restore-zone ]]'
+    assert snapshot_guard in SCRIPT
+    assert '--list-ports >"$STATE_DIR/zone-ports"' in SCRIPT
+    assert '--list-rich-rules >"$STATE_DIR/zone-rich-rules"' in SCRIPT
+    assert '--get-target >"$STATE_DIR/zone-target"' in SCRIPT
+    assert restore_guard in SCRIPT
+    assert '--add-port="$port"' in SCRIPT
+    assert '--add-rich-rule="$rule"' in SCRIPT
+    assert '--set-target="$old_target"' in SCRIPT
+    assert SCRIPT.index(snapshot_guard) < SCRIPT.index('--set-target=DROP')
+    assert SCRIPT.index(restore_guard) < SCRIPT.index('firewall-cmd --reload')
+
+
 def test_copy_helper_does_not_apply_firewall() -> None:
     helper = (ROOT / "scripts/copy_vpn_node_firewall.sh").read_text(encoding="utf-8")
     assert "scp -o BatchMode=yes" in helper
