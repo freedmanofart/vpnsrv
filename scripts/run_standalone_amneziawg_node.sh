@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Independent AmneziaWG data-plane test. It does not use this project's API,
+# database, bot, Xray, or node-agent. The node must already have the official
+# `awg` and `awg-quick` tools installed.
+
+INTERFACE=${INTERFACE:-awg-test}
+STATE_DIR=${STATE_DIR:-/etc/vpn-standalone-awg}
+AWG_PORT=${AWG_PORT:-51820}
+AWG_SUBNET=${AWG_SUBNET:-10.77.77.0/24}
+SERVER_ADDRESS=${SERVER_ADDRESS:-10.77.77.1/24}
+CLIENT_ADDRESS=${CLIENT_ADDRESS:-10.77.77.2/32}
+PUBLIC_HOST=${PUBLIC_HOST:-}
+WAN_INTERFACE=${WAN_INTERFACE:-}
+Jc=${Jc:-4}; Jmin=${Jmin:-40}; Jmax=${Jmax:-70}
+S1=${S1:-0}; S2=${S2:-0}
+H1=${H1:-1}; H2=${H2:-2}; H3=${H3:-3}; H4=${H4:-4}
+
+usage() { echo "Usage: $0 [--status|--remove]" >&2; }
+(( $# <= 1 )) || { usage; exit 2; }
+case ${1:-} in ""|--status|--remove) ;; *) usage; exit 2 ;; esac
+[[ $EUID -eq 0 ]] || { echo "Run as root on the VPN node" >&2; exit 2; }
+command -v awg >/dev/null || { echo "Install the official amneziawg-tools (`awg`) first" >&2; exit 2; }
+command -v awg-quick >/dev/null || { echo "Install the official `awg-quick` first" >&2; exit 2; }
+command -v ip >/dev/null
+command -v curl >/dev/null
+command -v sysctl >/dev/null
+
+CONFIG="$STATE_DIR/$INTERFACE.conf"
+if [[ ${1:-} == --status ]]; then
+  awg show "$INTERFACE" || { echo "Interface $INTERFACE is not running" >&2; exit 3; }
+  ip -s link show dev "$INTERFACE"
+  echo "Live packet capture: tcpdump -ni any udp port $AWG_PORT"
+  exit 0
+fi
+if [[ ${1:-} == --remove ]]; then
+  [[ -f $CONFIG ]] && awg-quick down "$CONFIG" >/dev/null 2>&1 || true
+  if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    [[ -s $STATE_DIR/wan-zone.txt ]] && WAN_ZONE=$(cat "$STATE_DIR/wan-zone.txt") || WAN_ZONE=public
+    if [[ $(cat "$STATE_DIR/port-added.txt" 2>/dev/null || true) == 1 ]]; then
+      firewall-cmd --zone="$WAN_ZONE" --remove-port="$AWG_PORT/udp" >/dev/null 2>&1 || true
+    fi
+    firewall-cmd --zone=trusted --remove-interface="$INTERFACE" >/dev/null 2>&1 || true
+    if [[ $(cat "$STATE_DIR/masquerade-added.txt" 2>/dev/null || true) == 1 ]]; then
+      firewall-cmd --zone="$WAN_ZONE" --remove-masquerade >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ -s $STATE_DIR/ip-forward-original.txt ]]; then
+    sysctl -w "net.ipv4.ip_forward=$(cat "$STATE_DIR/ip-forward-original.txt")" >/dev/null
+  fi
+  echo "Standalone AmneziaWG interface removed; keys remain in $STATE_DIR"
+  exit 0
+fi
+
+[[ $AWG_PORT =~ ^[0-9]+$ ]] && (( AWG_PORT > 0 && AWG_PORT < 65536 )) || {
+  echo "Invalid AWG_PORT" >&2; exit 2;
+}
+[[ ! -e /sys/class/net/$INTERFACE ]] || { echo "Interface $INTERFACE already exists" >&2; exit 3; }
+if [[ -z $PUBLIC_HOST ]]; then
+  PUBLIC_HOST=$(curl -4fsS --max-time 10 https://api.ipify.org) || {
+    echo "Set PUBLIC_HOST to the node public IPv4" >&2; exit 2;
+  }
+fi
+if [[ -z $WAN_INTERFACE ]]; then
+  WAN_INTERFACE=$(ip -4 route show default | awk '$1 == "default" {print $5; exit}')
+fi
+[[ -n $WAN_INTERFACE && -e /sys/class/net/$WAN_INTERFACE ]] || {
+  echo "Could not determine WAN_INTERFACE" >&2; exit 2;
+}
+if ! command -v firewall-cmd >/dev/null || ! firewall-cmd --state >/dev/null 2>&1; then
+  echo "firewalld must be active so the test does not expose an unmanaged UDP listener" >&2
+  exit 2
+fi
+
+umask 077
+install -d -m 700 "$STATE_DIR"
+SERVER_PRIVATE=$(awg genkey)
+SERVER_PUBLIC=$(printf '%s' "$SERVER_PRIVATE" | awg pubkey)
+CLIENT_PRIVATE=$(awg genkey)
+CLIENT_PUBLIC=$(printf '%s' "$CLIENT_PRIVATE" | awg pubkey)
+PRESHARED_KEY=$(awg genpsk)
+
+cat >"$CONFIG" <<EOF
+[Interface]
+Address = $SERVER_ADDRESS
+ListenPort = $AWG_PORT
+PrivateKey = $SERVER_PRIVATE
+Jc = $Jc
+Jmin = $Jmin
+Jmax = $Jmax
+S1 = $S1
+S2 = $S2
+H1 = $H1
+H2 = $H2
+H3 = $H3
+H4 = $H4
+
+[Peer]
+PublicKey = $CLIENT_PUBLIC
+PresharedKey = $PRESHARED_KEY
+AllowedIPs = $CLIENT_ADDRESS
+EOF
+
+cat >"$STATE_DIR/client.conf" <<EOF
+[Interface]
+Address = $CLIENT_ADDRESS
+DNS = 1.1.1.1, 1.0.0.1
+PrivateKey = $CLIENT_PRIVATE
+Jc = $Jc
+Jmin = $Jmin
+Jmax = $Jmax
+S1 = $S1
+S2 = $S2
+H1 = $H1
+H2 = $H2
+H3 = $H3
+H4 = $H4
+
+[Peer]
+PublicKey = $SERVER_PUBLIC
+PresharedKey = $PRESHARED_KEY
+Endpoint = $PUBLIC_HOST:$AWG_PORT
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+chmod 600 "$CONFIG" "$STATE_DIR/client.conf"
+
+cat /proc/sys/net/ipv4/ip_forward >"$STATE_DIR/ip-forward-original.txt"
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+WAN_ZONE=$(firewall-cmd --get-zone-of-interface="$WAN_INTERFACE")
+[[ -n $WAN_ZONE ]] || WAN_ZONE=$(firewall-cmd --get-default-zone)
+printf '%s\n' "$WAN_ZONE" >"$STATE_DIR/wan-zone.txt"
+if firewall-cmd --zone="$WAN_ZONE" --query-masquerade >/dev/null; then
+  printf '0\n' >"$STATE_DIR/masquerade-added.txt"
+else
+  printf '1\n' >"$STATE_DIR/masquerade-added.txt"
+fi
+if firewall-cmd --zone="$WAN_ZONE" --query-port="$AWG_PORT/udp" >/dev/null; then
+  printf '0\n' >"$STATE_DIR/port-added.txt"
+else
+  printf '1\n' >"$STATE_DIR/port-added.txt"
+fi
+cleanup_failed_start() {
+  awg-quick down "$CONFIG" >/dev/null 2>&1 || true
+  if [[ $(cat "$STATE_DIR/port-added.txt" 2>/dev/null || true) == 1 ]]; then
+    firewall-cmd --zone="$WAN_ZONE" --remove-port="$AWG_PORT/udp" >/dev/null 2>&1 || true
+  fi
+  firewall-cmd --zone=trusted --remove-interface="$INTERFACE" >/dev/null 2>&1 || true
+  if [[ $(cat "$STATE_DIR/masquerade-added.txt" 2>/dev/null || true) == 1 ]]; then
+    firewall-cmd --zone="$WAN_ZONE" --remove-masquerade >/dev/null 2>&1 || true
+  fi
+  sysctl -w "net.ipv4.ip_forward=$(cat "$STATE_DIR/ip-forward-original.txt")" >/dev/null 2>&1 || true
+}
+trap cleanup_failed_start ERR
+firewall-cmd --zone="$WAN_ZONE" --add-port="$AWG_PORT/udp" >/dev/null
+firewall-cmd --zone="$WAN_ZONE" --add-masquerade >/dev/null
+awg-quick up "$CONFIG"
+firewall-cmd --zone=trusted --add-interface="$INTERFACE" >/dev/null
+trap - ERR
+
+cat <<EOF
+Standalone AmneziaWG listens on $PUBLIC_HOST:$AWG_PORT/udp.
+Import this file into AmneziaVPN: $STATE_DIR/client.conf
+Copy it securely to the operator machine with:
+  scp root@$PUBLIC_HOST:$STATE_DIR/client.conf ./amneziawg-test.conf
+Inspect handshakes and byte counters:
+  $0 --status
+  tcpdump -ni any udp port $AWG_PORT
+Remove the test:
+  $0 --remove
+The cloud firewall must also allow $AWG_PORT/udp.
+EOF
