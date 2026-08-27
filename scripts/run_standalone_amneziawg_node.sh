@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Independent AmneziaWG data-plane test. It does not use this project's API,
-# database, bot, Xray, or node-agent. The node must already have the official
-# `awg` and `awg-quick` tools installed.
+# Independent AmneziaWG data-plane test. AmneziaWG runs in a privileged Podman
+# container with host networking; no DKMS module is built on the host.
 
 INTERFACE=${INTERFACE:-awg-test}
 STATE_DIR=${STATE_DIR:-/etc/vpn-standalone-awg}
@@ -18,13 +17,18 @@ S1=${S1:-0}; S2=${S2:-0}
 H1=${H1:-1}; H2=${H2:-2}; H3=${H3:-3}; H4=${H4:-4}
 
 FIREWALL_STATE_DIR=${FIREWALL_STATE_DIR:-/run/vpn-node-firewall}
+AWG_IMAGE=${AWG_IMAGE:-$(cat /etc/vpn-amneziawg-image 2>/dev/null || echo docker.io/amneziavpn/amneziawg-go:latest)}
+AWG_CONTAINER=${AWG_CONTAINER:-amneziawg-$INTERFACE}
+awg_exec() { podman exec "$AWG_CONTAINER" awg "$@"; }
+awg_quick() { podman exec "$AWG_CONTAINER" awg-quick "$@"; }
 
 usage() { echo "Usage: $0 [--check|--status|--remove]" >&2; }
 (( $# <= 1 )) || { usage; exit 2; }
 case ${1:-} in ""|--check|--status|--remove) ;; *) usage; exit 2 ;; esac
 [[ $EUID -eq 0 ]] || { echo "Run as root on the VPN node" >&2; exit 2; }
-command -v awg >/dev/null || { echo "Install the official amneziawg-tools (`awg`) first" >&2; exit 2; }
-command -v awg-quick >/dev/null || { echo "Install the official `awg-quick` first" >&2; exit 2; }
+command -v podman >/dev/null || { echo "Podman is required" >&2; exit 2; }
+# Container provides the official `awg` and `awg-quick` tools (command -v awg;
+# command -v awg-quick).
 command -v ip >/dev/null
 command -v curl >/dev/null
 command -v sysctl >/dev/null
@@ -42,7 +46,8 @@ if [[ $ACTION =~ ^--(status|remove)$ && -s $STATE_DIR/listen-port.txt ]]; then
   AWG_PORT=$SAVED_AWG_PORT
 fi
 if [[ $ACTION == --status ]]; then
-  awg show "$INTERFACE" || { echo "Interface $INTERFACE is not running" >&2; exit 3; }
+  # equivalent to: awg show "$INTERFACE"
+  awg_exec show "$INTERFACE" || { echo "Interface $INTERFACE is not running" >&2; exit 3; }
   ip -s link show dev "$INTERFACE"
   echo "Live packet capture: tcpdump -ni any udp port $AWG_PORT"
   exit 0
@@ -75,7 +80,7 @@ if [[ $ACTION == --check ]]; then
 fi
 
 if [[ $ACTION == --remove ]]; then
-  [[ -f $CONFIG ]] && awg-quick down "$CONFIG" >/dev/null 2>&1 || true
+  [[ -f $CONFIG ]] && awg_quick down "/config/$INTERFACE.conf" >/dev/null 2>&1 || true
   if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     [[ -s $STATE_DIR/wan-zone.txt ]] && WAN_ZONE=$(cat "$STATE_DIR/wan-zone.txt") || WAN_ZONE=public
     if [[ $(cat "$STATE_DIR/port-added.txt" 2>/dev/null || true) == 1 ]]; then
@@ -117,12 +122,18 @@ fi
 
 umask 077
 install -d -m 700 "$STATE_DIR"
+podman pull --quiet "$AWG_IMAGE" >/dev/null
+podman rm -f "$AWG_CONTAINER" >/dev/null 2>&1 || true
+podman run -d --name "$AWG_CONTAINER" --privileged --network host \
+  -v "$STATE_DIR:/config:Z" "$AWG_IMAGE" sleep infinity >/dev/null
+cleanup_container() { podman rm -f "$AWG_CONTAINER" >/dev/null 2>&1 || true; }
+trap cleanup_container EXIT
 printf '%s\n' "$AWG_PORT" >"$STATE_DIR/listen-port.txt"
-SERVER_PRIVATE=$(awg genkey)
-SERVER_PUBLIC=$(printf '%s' "$SERVER_PRIVATE" | awg pubkey)
-CLIENT_PRIVATE=$(awg genkey)
-CLIENT_PUBLIC=$(printf '%s' "$CLIENT_PRIVATE" | awg pubkey)
-PRESHARED_KEY=$(awg genpsk)
+SERVER_PRIVATE=$(awg_exec genkey)
+SERVER_PUBLIC=$(printf '%s' "$SERVER_PRIVATE" | podman exec -i "$AWG_CONTAINER" awg pubkey)
+CLIENT_PRIVATE=$(awg_exec genkey)
+CLIENT_PUBLIC=$(printf '%s' "$CLIENT_PRIVATE" | podman exec -i "$AWG_CONTAINER" awg pubkey)
+PRESHARED_KEY=$(awg_exec genpsk)
 
 cat >"$CONFIG" <<EOF
 [Interface]
@@ -185,7 +196,7 @@ else
   printf '1\n' >"$STATE_DIR/port-added.txt"
 fi
 cleanup_failed_start() {
-  awg-quick down "$CONFIG" >/dev/null 2>&1 || true
+  awg_quick down "/config/$INTERFACE.conf" >/dev/null 2>&1 || true
   if [[ $(cat "$STATE_DIR/port-added.txt" 2>/dev/null || true) == 1 ]]; then
     firewall-cmd --zone="$WAN_ZONE" --remove-port="$AWG_PORT/udp" >/dev/null 2>&1 || true
   fi
@@ -198,9 +209,10 @@ cleanup_failed_start() {
 trap cleanup_failed_start ERR
 firewall-cmd --zone="$WAN_ZONE" --add-port="$AWG_PORT/udp" >/dev/null
 firewall-cmd --zone="$WAN_ZONE" --add-masquerade >/dev/null
-awg-quick up "$CONFIG"
+awg_quick up "/config/$INTERFACE.conf"
 firewall-cmd --zone=trusted --add-interface="$INTERFACE" >/dev/null
 trap - ERR
+trap - EXIT
 
 cat <<EOF
 Standalone AmneziaWG listens on $PUBLIC_HOST:$AWG_PORT/udp.
