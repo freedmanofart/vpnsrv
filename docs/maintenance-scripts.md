@@ -281,12 +281,9 @@ INSTALL_AWG=1 /root/install_amneziawg_node_dependencies.sh
 /root/run_standalone_amneziawg_node.sh --check
 ```
 
-Установщик поддерживает Fedora/RHEL, требует явного `INSTALL_AWG=1` и использует
-официальный COPR `amneziavpn/amneziawg`. Copy-helper только копирует runner и
-установщик с правами `0700`: он ничего не устанавливает и не запускает.
-Runner требует официальные `awg` и `awg-quick`. Скрипт создаёт отдельный интерфейс
-`awg-test`, одну пару ключей клиента, PSK, runtime-правила firewalld и готовый
-конфиг для импорта в AmneziaVPN:
+Установщик требует явного `INSTALL_AWG=1`. Он устанавливает Podman (через `dnf`, если команда отсутствует), загружает образ `docker.io/amneziavpn/amneziawg-go:latest` и сохраняет его reference в `/etc/vpn-amneziawg-image`. DKMS, `kernel-devel`, COPR и host-пакеты `awg` не используются, поэтому тест работает и на ядрах без DKMS. Образ можно переопределить переменной `AWG_IMAGE`. Copy-helper только копирует runner и установщик с правами `0700`: он ничего не устанавливает и не запускает.
+
+Runner запускает privileged-контейнер Podman с host networking; команды `awg` и `awg-quick` выполняются внутри него, а конфигурация монтируется в `/config`. Скрипт создаёт отдельный интерфейс `awg-test`, одну пару ключей клиента, PSK, runtime-правила firewalld и готовый конфиг для импорта в AmneziaVPN:
 
 ```bash
 PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 \
