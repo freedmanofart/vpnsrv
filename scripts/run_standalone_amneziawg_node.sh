@@ -210,18 +210,25 @@ cleanup_failed_start() {
   sysctl -w "net.ipv4.ip_forward=$(cat "$STATE_DIR/ip-forward-original.txt")" >/dev/null 2>&1 || true
 }
 trap cleanup_failed_start ERR
-firewall-cmd --zone="$WAN_ZONE" --add-port="$AWG_PORT/udp" >/dev/null
-firewall-cmd --zone="$WAN_ZONE" --add-masquerade >/dev/null
+if [[ $(cat "$STATE_DIR/port-added.txt") == 1 ]]; then
+  firewall-cmd --zone="$WAN_ZONE" --add-port="$AWG_PORT/udp" >/dev/null
+fi
+if [[ $(cat "$STATE_DIR/masquerade-added.txt") == 1 ]]; then
+  firewall-cmd --zone="$WAN_ZONE" --add-masquerade >/dev/null
+fi
 awg_quick up "/config/$INTERFACE.conf"
-firewall-cmd --zone=trusted --add-interface="$INTERFACE" >/dev/null
+if ! firewall-cmd --zone=trusted --query-interface="$INTERFACE" >/dev/null; then
+  firewall-cmd --zone=trusted --add-interface="$INTERFACE" >/dev/null
+fi
 trap - ERR
 # Keep the container alive after a successful start: --status executes `awg`
 # inside this container. It is removed by the explicit --remove action.
+trap - EXIT
 
 cat <<EOF
 Standalone AmneziaWG listens on $PUBLIC_HOST:$AWG_PORT/udp.
 Import this file into AmneziaVPN: $STATE_DIR/client.conf
-Copy it securely to the operator machine with:
+On the operator/backend machine (not inside this VPN node), copy it with:
   scp root@$PUBLIC_HOST:$STATE_DIR/client.conf ./amneziawg-test.conf
 Inspect handshakes and byte counters:
   $0 --status

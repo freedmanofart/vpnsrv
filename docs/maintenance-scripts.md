@@ -274,6 +274,12 @@ PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 /root/run_standalone_xray_node.sh
 `run_standalone_amneziawg_node.sh`. Он не интегрирован с backend. Полный комплект
 безопасно копируется helper-скриптом (старое имя сохранено как alias).
 
+**Поддерживается только контейнерный запуск.** AmneziaWG не устанавливается и не
+запускается как host-служба: runner всегда вызывает `awg`/`awg-quick` внутри
+образа Podman `amneziavpn/amneziawg-go`. Не пытайтесь запускать `awg-quick` с
+хоста или устанавливать `amneziawg-dkms`/`amneziawg-tools`; такие пакеты не
+нужны и не являются поддерживаемым вариантом этой проверки.
+
 #### Пошаговая установка на сервер
 
 1. Выполняйте команды копирования **на сервере с checkout/backend**. На VPN-ноде
@@ -317,6 +323,12 @@ PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 /root/run_standalone_xray_node.sh
    /root/run_standalone_amneziawg_node.sh --check
    ```
 
+   Если на ноде остались артефакты предыдущего запуска, перед повторной
+   установкой можно выполнить `--remove`. Команда идемпотентна: при отсутствии
+   интерфейса или контейнера она всё равно завершится успешно и сохранит ключи в
+   каталоге state. Повторный `podman pull` также может вывести `skipped: already
+   exists` — это нормальный результат, означающий, что слой образа уже загружен.
+
 5. Запустите тест, предварительно разрешив выбранный UDP-порт в cloud firewall:
 
    ```bash
@@ -324,9 +336,26 @@ PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 /root/run_standalone_xray_node.sh
      /root/run_standalone_amneziawg_node.sh
    ```
 
-   Скопируйте напечатанный `client.conf` на клиент, импортируйте его в
-   AmneziaVPN и проверьте трафик командами ниже. После завершения удалите
-   интерфейс, firewall-правила и контейнер через `--remove`.
+   Выйдите из SSH-сессии ноды и скопируйте напечатанный `client.conf` **с
+   backend/операторского компьютера**, где находится подходящий SSH private key:
+
+   ```bash
+   exit
+   scp root@203.0.113.10:/etc/vpn-standalone-awg/client.conf \
+     ./amneziawg-test.conf
+   ```
+
+   Не запускайте эту команду на самой ноде: подключение ноды к собственному
+   публичному адресу потребует отсутствующий там private key и завершится
+   `Permission denied (publickey)`. Импортируйте полученный файл в AmneziaVPN и
+   проверьте трафик командами ниже. После завершения удалите интерфейс,
+   firewall-правила и контейнер через `--remove`.
+
+   В выводе `awg-quick` на узлах без kernel-модуля может появиться `Error:
+   Unknown device type`, после чего `amneziawg-go` переключается на userspace.
+   Это штатный fallback контейнерного образа, а не ошибка запуска. Предупреждения
+   firewalld `ALREADY_ENABLED`/`ZONE_ALREADY_SET` также безвредны при повторном
+   запуске; runner проверяет состояние правил перед добавлением.
 
 ```bash
 NODE_SSH=root@203.0.113.10 ./scripts/copy_amneziawg_node_test.sh
@@ -382,6 +411,24 @@ cloud/firewalld; если пакеты есть, но внешний адрес 
 криптографическая библиотека или VPN-протокол не может гарантировать работу с
 вероятностью 100% во всех ОС и сетях; эта проверка нужна именно для независимого
 сравнения UDP AmneziaWG с TCP Reality.
+
+Если в выводе снова появляются `ALREADY_ENABLED` или `--status` сообщает
+`no container with name ...`, на ноде запущена старая копия runner. Файлы в
+checkout обновляются только на backend-сервере и автоматически на ноду не
+попадают. Повторите копирование с backend, затем удалите остатки и запустите
+тест заново:
+
+```bash
+# выполнять на сервере с Git/checkout
+NODE_SSH=root@203.0.113.10 ./scripts/copy_amneziawg_node_test.sh
+ssh root@203.0.113.10 '/root/run_standalone_amneziawg_node.sh --remove'
+ssh root@203.0.113.10 'PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 /root/run_standalone_amneziawg_node.sh'
+ssh root@203.0.113.10 '/root/run_standalone_amneziawg_node.sh --status'
+```
+
+Сообщение `tcpdump ... 0 packets captured` означает только, что за время
+наблюдения клиент не отправлял UDP-трафик; сначала активируйте импортированный
+профиль AmneziaVPN и повторите захват.
 
 Путь назначения можно заменить через `REMOTE_PATH`. Скрипт копирования ничего не
 запускает на ноде и не меняет firewall; он только создаёт каталог, копирует файл и
