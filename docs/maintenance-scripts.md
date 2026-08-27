@@ -271,14 +271,24 @@ PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 /root/run_standalone_xray_node.sh
 ### Независимая проверка AmneziaWG
 
 Чтобы полностью исключить Xray/Reality и сравнить другой transport, добавлен
-`run_standalone_amneziawg_node.sh`. Он не интегрирован с backend и требует заранее
-установленные официальные `awg` и `awg-quick`. Скрипт создаёт отдельный интерфейс
+`run_standalone_amneziawg_node.sh`. Он не интегрирован с backend. Полный комплект
+безопасно копируется helper-скриптом (старое имя сохранено как alias):
+
+```bash
+NODE_SSH=root@203.0.113.10 ./scripts/copy_amneziawg_node_test.sh
+ssh root@203.0.113.10
+INSTALL_AWG=1 /root/install_amneziawg_node_dependencies.sh
+/root/run_standalone_amneziawg_node.sh --check
+```
+
+Установщик поддерживает Fedora/RHEL, требует явного `INSTALL_AWG=1` и использует
+официальный COPR `amneziavpn/amneziawg`. Copy-helper только копирует runner и
+установщик с правами `0700`: он ничего не устанавливает и не запускает.
+Runner требует официальные `awg` и `awg-quick`. Скрипт создаёт отдельный интерфейс
 `awg-test`, одну пару ключей клиента, PSK, runtime-правила firewalld и готовый
 конфиг для импорта в AmneziaVPN:
 
 ```bash
-scp scripts/run_standalone_amneziawg_node.sh root@203.0.113.10:/root/
-ssh root@203.0.113.10
 PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 \
   /root/run_standalone_amneziawg_node.sh
 ```
