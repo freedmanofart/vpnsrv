@@ -353,7 +353,12 @@ PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 /root/run_standalone_xray_node.sh
 
    В выводе `awg-quick` на узлах без kernel-модуля может появиться `Error:
    Unknown device type`, после чего `amneziawg-go` переключается на userspace.
-   Это штатный fallback контейнерного образа, а не ошибка запуска. Предупреждения
+   Runner принудительно разрешает этот режим через контейнерную переменную
+   `WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1`: без неё `amneziawg-go`
+   может ошибочно решить, что подходящий kernel-модуль уже доступен, завершиться
+   после информационного баннера и оставить интерфейс без работающего backend.
+   Результат такого состояния — входящие UDP-пакеты в `tcpdump`, но отсутствие
+   handshake и нулевой RX в `--status`. Предупреждения
    firewalld `ALREADY_ENABLED`/`ZONE_ALREADY_SET` также безвредны при повторном
    запуске; runner проверяет состояние правил перед добавлением.
 

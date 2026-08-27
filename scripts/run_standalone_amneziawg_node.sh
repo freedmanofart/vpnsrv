@@ -128,6 +128,7 @@ install -d -m 700 "$STATE_DIR"
 podman pull --quiet "$AWG_IMAGE" >/dev/null
 podman rm -f "$AWG_CONTAINER" >/dev/null 2>&1 || true
 podman run -d --name "$AWG_CONTAINER" --privileged --network host \
+  -e WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1 \
   -v "$STATE_DIR:/config:Z" "$AWG_IMAGE" sleep infinity >/dev/null
 cleanup_container() { podman rm -f "$AWG_CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup_container EXIT
