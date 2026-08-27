@@ -19,11 +19,16 @@ ADMIN_API_URL=${ADMIN_API_URL:-http://127.0.0.1:8000}
 ADMIN_USERNAME=${ADMIN_USERNAME:?Set ADMIN_USERNAME}
 ADMIN_PASSWORD=${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}
 REALITY_SNI=${REALITY_SNI:-www.cloudflare.com}
+REALITY_FINGERPRINT=${REALITY_FINGERPRINT:-chrome}
 XRAY_IMAGE=${XRAY_IMAGE:-ghcr.io/xtls/xray-core@sha256:4198aa816f04eeacde6470f4f07947eb4f701a1bba3657e366636681eaae5855}
 
 case "$NODE_REGION" in
   us|nl|de) ;;
   *) echo "NODE_REGION must be us, nl or de" >&2; exit 2 ;;
+esac
+case "$REALITY_FINGERPRINT" in
+  chrome|firefox|safari|randomized) ;;
+  *) echo "REALITY_FINGERPRINT must be chrome, firefox, safari or randomized" >&2; exit 2 ;;
 esac
 
 # Проверяем локальные команды до выпуска учётных данных и изменения SSH на ноде.
@@ -140,7 +145,7 @@ fi
 CONFIGS_JSON=$(api "$ADMIN_API_URL/vpn/nodes/$NODE_ID/configs")
 HAS_VLESS=$(printf '%s' "$CONFIGS_JSON" | python3 -c 'import json,sys; print(any(x["protocol"] == "vless" for x in json.load(sys.stdin)))')
 if [[ "$HAS_VLESS" != "True" ]]; then
-  CONFIG_BODY=$(NODE_HOSTNAME="$NODE_HOSTNAME" REALITY_SNI="$REALITY_SNI" REALITY_PUBLIC_KEY="$REALITY_PUBLIC_KEY" REALITY_SHORT_ID="$REALITY_SHORT_ID" python3 -c '
+  CONFIG_BODY=$(NODE_HOSTNAME="$NODE_HOSTNAME" REALITY_SNI="$REALITY_SNI" REALITY_FINGERPRINT="$REALITY_FINGERPRINT" REALITY_PUBLIC_KEY="$REALITY_PUBLIC_KEY" REALITY_SHORT_ID="$REALITY_SHORT_ID" python3 -c '
 import json, os
 print(json.dumps({"protocol": "vless", "config": {
     "api_address": "127.0.0.1:10085",
@@ -149,7 +154,7 @@ print(json.dumps({"protocol": "vless", "config": {
     "type": "tcp",
     "security": "reality",
     "sni": os.environ["REALITY_SNI"],
-    "fp": "chrome",
+    "fp": os.environ["REALITY_FINGERPRINT"],
     "pbk": os.environ["REALITY_PUBLIC_KEY"],
     "sid": os.environ["REALITY_SHORT_ID"],
     "inbound_tag": "vless-reality",

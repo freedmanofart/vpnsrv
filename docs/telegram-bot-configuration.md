@@ -75,7 +75,20 @@ python3 scripts/configctl.py set YOOMONEY_90D_URL 'https://yoomoney.ru/to/...'
 sudo docker compose up -d --force-recreate bot
 ```
 
-QR оплаты строится из той же ссылки, поэтому URL и QR всегда совпадают.
+На экране подтверждения покупки бот показывает две кнопки: «Оплатить по QR» и
+«Оплатить через ЮMoney». QR строится из той же ссылки ЮMoney, поэтому для её
+изменения достаточно изменить `YOOMONEY_*_URL` (или `YOOMONEY_PAYMENT_URL`, если
+тариф не имеет отдельной ссылки), пересоздать bot-контейнер и проверить обе
+кнопки в тестовом чате:
+
+```bash
+python3 scripts/configctl.py set YOOMONEY_30D_URL 'https://yoomoney.ru/to/new-link'
+sudo docker compose up -d --force-recreate bot
+```
+
+Кнопка QR не является отдельным платёжным провайдером: она показывает QR-код
+для перехода по настроенной ссылке ЮMoney. После оплаты пользователь нажимает
+«Проверить оплату».
 
 ## Редактирование устройств и клиентских ссылок
 

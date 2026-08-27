@@ -98,6 +98,9 @@ if [[ $ACTION == --remove ]]; then
     if [[ $(cat "$STATE_DIR/masquerade-added.txt" 2>/dev/null || true) == 1 ]]; then
       firewall-cmd --zone="$WAN_ZONE" --remove-masquerade >/dev/null 2>&1 || true
     fi
+    if [[ $(cat "$STATE_DIR/trusted-forward-added.txt" 2>/dev/null || true) == 1 ]]; then
+      firewall-cmd --zone=trusted --remove-forward >/dev/null 2>&1 || true
+    fi
   fi
   if [[ -s $STATE_DIR/ip-forward-original.txt ]]; then
     sysctl -w "net.ipv4.ip_forward=$(cat "$STATE_DIR/ip-forward-original.txt")" >/dev/null
@@ -213,6 +216,9 @@ cleanup_failed_start() {
   if [[ $(cat "$STATE_DIR/masquerade-added.txt" 2>/dev/null || true) == 1 ]]; then
     firewall-cmd --zone="$WAN_ZONE" --remove-masquerade >/dev/null 2>&1 || true
   fi
+  if [[ $(cat "$STATE_DIR/trusted-forward-added.txt" 2>/dev/null || true) == 1 ]]; then
+    firewall-cmd --zone=trusted --remove-forward >/dev/null 2>&1 || true
+  fi
   sysctl -w "net.ipv4.ip_forward=$(cat "$STATE_DIR/ip-forward-original.txt")" >/dev/null 2>&1 || true
 }
 trap cleanup_failed_start ERR
@@ -225,6 +231,12 @@ fi
 awg_quick up "/config/$INTERFACE.conf"
 if ! firewall-cmd --zone=trusted --query-interface="$INTERFACE" >/dev/null; then
   firewall-cmd --zone=trusted --add-interface="$INTERFACE" >/dev/null
+fi
+if firewall-cmd --zone=trusted --query-forward >/dev/null 2>&1; then
+  printf '0\n' >"$STATE_DIR/trusted-forward-added.txt"
+else
+  firewall-cmd --zone=trusted --add-forward >/dev/null
+  printf '1\n' >"$STATE_DIR/trusted-forward-added.txt"
 fi
 trap - ERR
 # Keep the container alive after a successful start: --status executes `awg`

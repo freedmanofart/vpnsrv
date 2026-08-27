@@ -223,6 +223,32 @@ node-agent проверяет только управление Xray и не з�
 
 ### Полностью автономная проверка ноды
 
+#### Настройка SNI и fingerprint
+
+Для standalone Xray значения можно менять при каждом создании нового профиля:
+
+```bash
+REALITY_SNI=www.microsoft.com REALITY_FINGERPRINT=firefox \
+  PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 \
+  /root/run_standalone_xray_node.sh
+```
+
+Поддерживаемые fingerprint: `chrome`, `firefox`, `safari`, `randomized`. В
+админке при создании VLESS Reality укажите SNI и fingerprint в форме конфигурации
+ноды; значения сохраняются в JSON-конфигурации ноды и используются при выдаче
+новых URI. Смена параметров не изменяет уже выданные ссылки — для них создайте
+нового клиента или выполните ротацию.
+
+Для ноды, работающей с backend, задавайте параметры при bootstrap (на backend):
+
+```bash
+REALITY_SNI=www.microsoft.com REALITY_FINGERPRINT=firefox \
+  ./scripts/deploy_vpn_node.sh
+```
+
+`deploy_vpn_node.sh` сохраняет `sni` и `fp` в конфигурации VLESS-ноды control
+plane; бот использует их для всех новых профилей. Уже выданные URI не меняются.
+
 Чтобы исключить API, БД, node-agent и генерацию ключа ботом, скопируйте на ноду
 `scripts/run_standalone_xray_node.sh` и запустите его от root. Скрипт создаёт
 новые Reality-ключи, один статический UUID и максимально простой профиль
@@ -516,3 +542,12 @@ audit/Loki через API. Закройте session сразу после диа
   после ротации.
 - E2E не видит активный тариф/ноду — создайте тестовые данные через admin/API и
   дождитесь успешного node-agent status перед повтором.
+
+### Проверка node-agent
+
+Для read-only проверки на VPN-ноде используйте `scripts/check_node_agent.sh` (скопируйте его helper-скриптом или отдельно):
+
+```bash
+AGENT_URL=http://127.0.0.1:10086 /root/check_node_agent.sh
+```
+Скрипт проверяет HTTP health endpoint и наличие контейнера `vpn-node-agent`; он не меняет конфигурацию.

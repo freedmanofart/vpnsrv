@@ -230,6 +230,11 @@ docker compose up -d
 Подробный справочник по обслуживающим скриптам — с предусловиями, побочными
 эффектами, примерами, восстановлением и диагностикой — находится в
 [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md).
+Отдельный справочник переменных, credentials, ролей доступа и служебных страниц:
+[`docs/access-and-credentials.md`](docs/access-and-credentials.md).
+В том же справочнике описаны container-only AmneziaWG, повторное копирование
+runner с backend-сервера, проверка node-agent (`scripts/check_node_agent.sh`) и
+настройка Reality SNI/fingerprint для production-нод.
 Пошаговая production-процедура получения новой версии, применения миграций,
 проверки и восстановления после грязного рабочего дерева описана в
 [`docs/server-update.md`](docs/server-update.md).
@@ -536,6 +541,19 @@ Telegram bot / VPN client / web admin
 ### Быстрое добавление VPN-ноды
 
 Повторяемый bootstrap находится в `scripts/deploy_vpn_node.sh`. Он не ставит пакеты в хостовую ОС: целевой Fedora-инстанс должен уже иметь Podman, systemd, OpenSSH и OpenSSL. Скрипт:
+
+Параметры Reality для backend-ноды задаются до запуска bootstrap: `REALITY_SNI`
+определяет доменное имя маскировки, а `REALITY_FINGERPRINT` — TLS fingerprint
+клиента (`chrome`, `firefox`, `safari` или `randomized`). Они сохраняются в
+конфигурации ноды control plane и применяются к новым выдаваемым профилям:
+
+```bash
+REALITY_SNI=www.microsoft.com REALITY_FINGERPRINT=firefox \
+  ./scripts/deploy_vpn_node.sh
+```
+
+Изменение этих переменных не переписывает уже выданные URI; для них выполните
+ротацию клиента.
 
 - создаёт отдельную пару Reality и short ID для ноды;
 - регистрирует ноду и VLESS-конфигурацию через API;
