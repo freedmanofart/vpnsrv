@@ -20,7 +20,12 @@ FIREWALL_STATE_DIR=${FIREWALL_STATE_DIR:-/run/vpn-node-firewall}
 AWG_IMAGE=${AWG_IMAGE:-$(cat /etc/vpn-amneziawg-image 2>/dev/null || echo docker.io/amneziavpn/amneziawg-go:latest)}
 AWG_CONTAINER=${AWG_CONTAINER:-amneziawg-$INTERFACE}
 awg_exec() { podman exec "$AWG_CONTAINER" awg "$@"; }
-awg_quick() { podman exec "$AWG_CONTAINER" awg-quick "$@"; }
+awg_quick() {
+  # Force userspace implementation even when the host advertises an unrelated
+  # WireGuard module; otherwise awg-quick may leave an interface with no backend.
+  podman exec -e WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1 \
+    "$AWG_CONTAINER" awg-quick "$@"
+}
 
 usage() { echo "Usage: $0 [--check|--status|--remove]" >&2; }
 (( $# <= 1 )) || { usage; exit 2; }
