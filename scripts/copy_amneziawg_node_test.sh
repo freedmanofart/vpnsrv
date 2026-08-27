@@ -34,10 +34,13 @@ done
 scp "${SSH_ARGS[@]}" "$RUNNER_SOURCE" "$NODE_SSH:$RUNNER_REMOTE_PATH"
 scp "${SSH_ARGS[@]}" "$INSTALLER_SOURCE" "$NODE_SSH:$INSTALLER_REMOTE_PATH"
 ssh "${SSH_ARGS[@]}" "$NODE_SSH" \
-  "chmod 0700 '$RUNNER_REMOTE_PATH' '$INSTALLER_REMOTE_PATH' && test -x '$RUNNER_REMOTE_PATH' && test -x '$INSTALLER_REMOTE_PATH'"
+  "chmod 0700 '$RUNNER_REMOTE_PATH' '$INSTALLER_REMOTE_PATH' && \
+   test -x '$RUNNER_REMOTE_PATH' && test -x '$INSTALLER_REMOTE_PATH'"
 
 cat <<EOF
 Copied the standalone AmneziaWG toolkit to $NODE_SSH.
+  runner:    $RUNNER_REMOTE_PATH
+  installer: $INSTALLER_REMOTE_PATH
 Nothing was installed or started. On the node, run explicitly:
   INSTALL_AWG=1 $INSTALLER_REMOTE_PATH
   $RUNNER_REMOTE_PATH --check
