@@ -17,9 +17,11 @@ Jc=${Jc:-4}; Jmin=${Jmin:-40}; Jmax=${Jmax:-70}
 S1=${S1:-0}; S2=${S2:-0}
 H1=${H1:-1}; H2=${H2:-2}; H3=${H3:-3}; H4=${H4:-4}
 
-usage() { echo "Usage: $0 [--status|--remove]" >&2; }
+FIREWALL_STATE_DIR=${FIREWALL_STATE_DIR:-/run/vpn-node-firewall}
+
+usage() { echo "Usage: $0 [--check|--status|--remove]" >&2; }
 (( $# <= 1 )) || { usage; exit 2; }
-case ${1:-} in ""|--status|--remove) ;; *) usage; exit 2 ;; esac
+case ${1:-} in ""|--check|--status|--remove) ;; *) usage; exit 2 ;; esac
 [[ $EUID -eq 0 ]] || { echo "Run as root on the VPN node" >&2; exit 2; }
 command -v awg >/dev/null || { echo "Install the official amneziawg-tools (`awg`) first" >&2; exit 2; }
 command -v awg-quick >/dev/null || { echo "Install the official `awg-quick` first" >&2; exit 2; }
@@ -27,14 +29,52 @@ command -v ip >/dev/null
 command -v curl >/dev/null
 command -v sysctl >/dev/null
 
+ACTION=${1:-}
 CONFIG="$STATE_DIR/$INTERFACE.conf"
-if [[ ${1:-} == --status ]]; then
+# A saved port is operational state for status/removal only. An explicit
+# AWG_PORT must remain effective when the operator starts a later test.
+if [[ $ACTION =~ ^--(status|remove)$ && -s $STATE_DIR/listen-port.txt ]]; then
+  SAVED_AWG_PORT=$(cat "$STATE_DIR/listen-port.txt")
+  [[ $SAVED_AWG_PORT =~ ^[0-9]+$ ]] && (( SAVED_AWG_PORT > 0 && SAVED_AWG_PORT < 65536 )) || {
+    echo "Invalid saved AmneziaWG port in $STATE_DIR/listen-port.txt" >&2
+    exit 3
+  }
+  AWG_PORT=$SAVED_AWG_PORT
+fi
+if [[ $ACTION == --status ]]; then
   awg show "$INTERFACE" || { echo "Interface $INTERFACE is not running" >&2; exit 3; }
   ip -s link show dev "$INTERFACE"
   echo "Live packet capture: tcpdump -ni any udp port $AWG_PORT"
   exit 0
 fi
-if [[ ${1:-} == --remove ]]; then
+
+preflight() {
+  [[ ! -e $FIREWALL_STATE_DIR/pending ]] || {
+    echo "A hardened firewall change is awaiting --confirm or --rollback in $FIREWALL_STATE_DIR" >&2
+    return 2
+  }
+  command -v firewall-cmd >/dev/null || {
+    echo "firewalld is required" >&2; return 2;
+  }
+  firewall-cmd --state >/dev/null 2>&1 || {
+    echo "firewalld must be active" >&2; return 2;
+  }
+  local wan=$WAN_INTERFACE
+  if [[ -z $wan ]]; then
+    wan=$(ip -4 route show default | awk '$1 == "default" {print $5; exit}')
+  fi
+  [[ -n $wan && -e /sys/class/net/$wan ]] || {
+    echo "Could not determine WAN_INTERFACE" >&2; return 2;
+  }
+  echo "Preflight passed: firewalld is active; WAN interface is $wan; no firewall change is pending."
+}
+
+if [[ $ACTION == --check ]]; then
+  preflight
+  exit 0
+fi
+
+if [[ $ACTION == --remove ]]; then
   [[ -f $CONFIG ]] && awg-quick down "$CONFIG" >/dev/null 2>&1 || true
   if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     [[ -s $STATE_DIR/wan-zone.txt ]] && WAN_ZONE=$(cat "$STATE_DIR/wan-zone.txt") || WAN_ZONE=public
@@ -52,6 +92,8 @@ if [[ ${1:-} == --remove ]]; then
   echo "Standalone AmneziaWG interface removed; keys remain in $STATE_DIR"
   exit 0
 fi
+
+preflight >/dev/null
 
 [[ $AWG_PORT =~ ^[0-9]+$ ]] && (( AWG_PORT > 0 && AWG_PORT < 65536 )) || {
   echo "Invalid AWG_PORT" >&2; exit 2;
@@ -75,6 +117,7 @@ fi
 
 umask 077
 install -d -m 700 "$STATE_DIR"
+printf '%s\n' "$AWG_PORT" >"$STATE_DIR/listen-port.txt"
 SERVER_PRIVATE=$(awg genkey)
 SERVER_PUBLIC=$(printf '%s' "$SERVER_PRIVATE" | awg pubkey)
 CLIENT_PRIVATE=$(awg genkey)

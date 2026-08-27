@@ -33,3 +33,15 @@ def test_amneziawg_test_configures_forwarding_firewall_and_status() -> None:
     assert "trap cleanup_failed_start ERR" in source
     assert 'awg show "$INTERFACE"' in source
     assert "tcpdump -ni any udp port $AWG_PORT" in source
+
+
+def test_amneziawg_preflight_and_persisted_port() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "--check" in source
+    assert "firewall-cmd --state" in source
+    assert "Could not determine WAN_INTERFACE" in source
+    assert "/run/vpn-node-firewall" in source
+    assert "--confirm or --rollback" in source
+    assert "listen-port.txt" in source
+    assert '$ACTION =~ ^--(status|remove)$' in source
+    assert "Invalid saved AmneziaWG port" in source
