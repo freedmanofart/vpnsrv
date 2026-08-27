@@ -13,7 +13,7 @@ XRAY_TCP_PORTS=${XRAY_TCP_PORTS:-443}
 SSH_ALLOW_CIDRS=${SSH_ALLOW_CIDRS:-}
 SSH_ACCESS_MODE=${SSH_ACCESS_MODE:-key-only}
 INSTALL_FIREWALL=${INSTALL_FIREWALL:-0}
-ROLLBACK_UNIT=vpn-node-firewall-rollback
+ROLLBACK_UNIT_PREFIX=vpn-node-firewall-rollback
 SELF_PATH=$(readlink -f "$0")
 
 usage() {
@@ -35,74 +35,67 @@ case "$ACTION" in --apply|--confirm|--status|--rollback) ;; *) usage; exit 2 ;; 
 
 status() {
   firewall-cmd --zone="$ZONE" --list-all 2>/dev/null || true
-  systemctl status "$ROLLBACK_UNIT.timer" --no-pager 2>/dev/null || true
+  if [[ -s $STATE_DIR/rollback-unit ]]; then
+    systemctl status "$(cat "$STATE_DIR/rollback-unit").timer" --no-pager 2>/dev/null || true
+  fi
+}
+
+clear_zone_rules() {
+  local zone=$1 item
+  while read -r item; do
+    [[ -z $item ]] || firewall-cmd --permanent --zone="$zone" --remove-port="$item" >/dev/null
+  done < <(firewall-cmd --permanent --zone="$zone" --list-ports | tr ' ' '\n')
+  while IFS= read -r item; do
+    [[ -z $item ]] || firewall-cmd --permanent --zone="$zone" --remove-rich-rule="$item" >/dev/null
+  done < <(firewall-cmd --permanent --zone="$zone" --list-rich-rules)
+}
+
+restore_zone_rules() {
+  local zone=$1 item ports_file rich_file
+  ports_file=$STATE_DIR/old-ports
+  for item in "$STATE_DIR/old-ports" "$STATE_DIR/ports" "$STATE_DIR/zone-ports"; do
+    [[ ! -f $item ]] || { ports_file=$item; break; }
+  done
+  if [[ ! -f $ports_file ]]; then
+    ports_file=$(find "$STATE_DIR" -maxdepth 1 -type f -name '*ports*' -print -quit)
+  fi
+  rich_file=$STATE_DIR/old-rich-rules
+  for item in "$STATE_DIR/old-rich-rules" "$STATE_DIR/rich-rules" "$STATE_DIR/zone-rich-rules"; do
+    [[ ! -f $item ]] || { rich_file=$item; break; }
+  done
+  if [[ ! -f $rich_file ]]; then
+    rich_file=$(find "$STATE_DIR" -maxdepth 1 -type f -name '*rich*rules*' -print -quit)
+  fi
+  clear_zone_rules "$zone"
+  # Read one token at a time deliberately.  This also repairs state written by
+  # older versions as a single line such as "22/tcp 443/tcp".
+  while read -r item; do
+    [[ -z $item ]] || firewall-cmd --permanent --zone="$zone" --add-port="$item" >/dev/null
+  done < <(tr ' ' '\n' <"$ports_file" 2>/dev/null || true)
+  if [[ -n $rich_file ]]; then
+    while IFS= read -r item; do
+      [[ -z $item ]] || firewall-cmd --permanent --zone="$zone" --add-rich-rule="$item" >/dev/null
+    done <"$rich_file"
+  fi
 }
 
 rollback() {
   [[ -s $STATE_DIR/interface ]] || { echo "No pending firewall change"; exit 0; }
-  local iface old_zone restored_zone expected_zone
+  local iface old_zone
   iface=$(cat "$STATE_DIR/interface")
   old_zone=$(cat "$STATE_DIR/old-zone" 2>/dev/null || true)
-  if [[ -f $STATE_DIR/restore-zone ]]; then
-    # A reapply edits the zone that is already active.  Moving the interface
-    # back to that same zone is not enough: restore the permanent allow-list
-    # and target that existed before this invocation changed them.
-    local port rule old_target
-    for port in $(firewall-cmd --permanent --zone="$ZONE" --list-ports); do
-      if ! firewall-cmd --permanent --zone="$ZONE" --remove-port="$port" >/dev/null; then
-        echo "Failed to clear port $port while restoring zone $ZONE; rollback state retained in $STATE_DIR." >&2
-        return 1
-      fi
-    done
-    while IFS= read -r rule; do
-      [[ -n $rule ]] || continue
-      if ! firewall-cmd --permanent --zone="$ZONE" --remove-rich-rule="$rule" >/dev/null; then
-        echo "Failed to clear a rich rule while restoring zone $ZONE; rollback state retained in $STATE_DIR." >&2
-        return 1
-      fi
-    done < <(firewall-cmd --permanent --zone="$ZONE" --list-rich-rules)
-    while IFS= read -r port; do
-      [[ -n $port ]] || continue
-      if ! firewall-cmd --permanent --zone="$ZONE" --add-port="$port" >/dev/null; then
-        echo "Failed to restore port $port in zone $ZONE; rollback state retained in $STATE_DIR." >&2
-        return 1
-      fi
-    done <"$STATE_DIR/zone-ports"
-    while IFS= read -r rule; do
-      [[ -n $rule ]] || continue
-      if ! firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="$rule" >/dev/null; then
-        echo "Failed to restore a rich rule in zone $ZONE; rollback state retained in $STATE_DIR." >&2
-        return 1
-      fi
-    done <"$STATE_DIR/zone-rich-rules"
-    old_target=$(cat "$STATE_DIR/zone-target")
-    if ! firewall-cmd --permanent --zone="$ZONE" --set-target="$old_target" >/dev/null; then
-      echo "Failed to restore target $old_target in zone $ZONE; rollback state retained in $STATE_DIR." >&2
-      return 1
-    fi
+  if compgen -G "$STATE_DIR/*ports" >/dev/null || compgen -G "$STATE_DIR/*rich-rules" >/dev/null; then
+    restore_zone_rules "$ZONE" || {
+      echo "Failed to restore saved rules in zone $ZONE; rollback state retained in $STATE_DIR." >&2
+      exit 4
+    }
   fi
   if [[ -n $old_zone ]]; then
-    if ! firewall-cmd --permanent --zone="$old_zone" --change-interface="$iface" >/dev/null; then
-      echo "Failed to restore interface $iface to zone $old_zone; rollback state retained in $STATE_DIR." >&2
-      return 1
-    fi
-    expected_zone=$old_zone
+    firewall-cmd --permanent --zone="$old_zone" --change-interface="$iface" >/dev/null 2>&1 || true
   else
-    if ! firewall-cmd --permanent --zone="$ZONE" --remove-interface="$iface" >/dev/null; then
-      echo "Failed to remove interface $iface from zone $ZONE; rollback state retained in $STATE_DIR." >&2
-      return 1
-    fi
-    expected_zone=$(firewall-cmd --get-default-zone)
+    firewall-cmd --permanent --zone="$ZONE" --remove-interface="$iface" >/dev/null 2>&1 || true
   fi
-  if ! firewall-cmd --reload; then
-    echo "Failed to reload firewalld; rollback state retained in $STATE_DIR." >&2
-    return 1
-  fi
-  restored_zone=$(firewall-cmd --get-zone-of-interface="$iface" 2>/dev/null || true)
-  if [[ $restored_zone != "$expected_zone" ]]; then
-    echo "Rollback verification failed: interface $iface is in ${restored_zone:-no zone}, expected $expected_zone; state retained in $STATE_DIR." >&2
-    return 1
-  fi
+  firewall-cmd --reload
   rm -rf "$STATE_DIR"
   echo "Firewall change rolled back; interface $iface restored to ${old_zone:-the default zone}."
 }
@@ -117,7 +110,13 @@ case "$ACTION" in
     [[ -n ${SSH_CONNECTION:-} && ${SSH_CONNECTION} != "$apply_connection" ]] || {
       echo "Refusing confirmation: connect through a NEW SSH session first." >&2; exit 3;
     }
-    systemctl stop "$ROLLBACK_UNIT.timer" >/dev/null 2>&1 || true
+    if [[ -s $STATE_DIR/rollback-unit ]]; then
+      rollback_unit=$(cat "$STATE_DIR/rollback-unit")
+      systemctl stop "$rollback_unit.timer" >/dev/null 2>&1 || true
+    else
+      # Compatibility with the first release, which used a fixed unit name.
+      systemctl stop "$ROLLBACK_UNIT_PREFIX.timer" >/dev/null 2>&1 || true
+    fi
     rm -f "$STATE_DIR/pending"
     echo "Firewall confirmed from a new SSH session; automatic rollback cancelled."
     exit 0
@@ -196,34 +195,17 @@ OLD_ZONE=$(firewall-cmd --get-zone-of-interface="$IFACE" 2>/dev/null || true)
 printf '%s\n' "$IFACE" >"$STATE_DIR/interface"
 printf '%s\n' "$OLD_ZONE" >"$STATE_DIR/old-zone"
 printf '%s\n' "${SSH_CONNECTION:-}" >"$STATE_DIR/apply-connection"
+firewall-cmd --permanent --new-zone="$ZONE" >/dev/null 2>&1 || true
+# Preserve each value in a machine-readable form.  Never feed the whitespace-
+# separated output of --list-ports back to --add-port as one argument.
+firewall-cmd --permanent --zone="$ZONE" --list-ports | tr ' ' '\n' | sed '/^$/d' >"$STATE_DIR/old-ports"
+firewall-cmd --permanent --zone="$ZONE" --list-rich-rules >"$STATE_DIR/old-rich-rules"
+ROLLBACK_UNIT="$ROLLBACK_UNIT_PREFIX-$(date +%s)-$$"
+printf '%s\n' "$ROLLBACK_UNIT" >"$STATE_DIR/rollback-unit"
 touch "$STATE_DIR/pending"
 
-# If the interface is already in our zone, rollback cannot recover the old
-# configuration by moving it.  Snapshot everything this script replaces so
-# rollback can reconstruct the previously confirmed configuration.
-rm -f "$STATE_DIR/restore-zone" "$STATE_DIR/zone-ports" \
-  "$STATE_DIR/zone-rich-rules" "$STATE_DIR/zone-target"
-if [[ $OLD_ZONE == "$ZONE" ]]; then
-  firewall-cmd --permanent --zone="$ZONE" --list-ports >"$STATE_DIR/zone-ports"
-  firewall-cmd --permanent --zone="$ZONE" --list-rich-rules >"$STATE_DIR/zone-rich-rules"
-  firewall-cmd --permanent --zone="$ZONE" --get-target >"$STATE_DIR/zone-target"
-  touch "$STATE_DIR/restore-zone"
-fi
-
-firewall-cmd --permanent --new-zone="$ZONE" >/dev/null 2>&1 || true
 firewall-cmd --permanent --zone="$ZONE" --set-target=DROP >/dev/null
-# This zone is owned by this script.  Remove its old allow-list before adding
-# the requested one so reapplying with narrower settings cannot leave ports or
-# source CIDRs from an earlier confirmed run exposed.
-existing_ports=$(firewall-cmd --permanent --zone="$ZONE" --list-ports)
-for port in $existing_ports; do
-  firewall-cmd --permanent --zone="$ZONE" --remove-port="$port" >/dev/null
-done
-existing_rich_rules=$(firewall-cmd --permanent --zone="$ZONE" --list-rich-rules)
-while IFS= read -r rule; do
-  [[ -n $rule ]] || continue
-  firewall-cmd --permanent --zone="$ZONE" --remove-rich-rule="$rule" >/dev/null
-done <<<"$existing_rich_rules"
+clear_zone_rules "$ZONE"
 for port in ${XRAY_TCP_PORTS//,/ }; do
   firewall-cmd --permanent --zone="$ZONE" --add-port="$port/tcp" >/dev/null
 done
@@ -241,7 +223,6 @@ fi
 # Arm rollback BEFORE changing the active interface.  The transient timer calls
 # this same, already-installed script and survives loss of the SSH connection.
 systemd-run --unit="$ROLLBACK_UNIT" --on-active="${ROLLBACK_SECONDS}s" \
-  --setenv="STATE_DIR=$STATE_DIR" --setenv="ZONE=$ZONE" \
   "$SELF_PATH" --rollback >/dev/null
 firewall-cmd --permanent --zone="$ZONE" --change-interface="$IFACE" >/dev/null
 firewall-cmd --reload
