@@ -36,6 +36,13 @@ def test_rollback_restores_ports_as_individual_firewalld_arguments() -> None:
     assert 'clear_zone_rules "$ZONE"' in SCRIPT
 
 
+def test_reapply_is_noop_when_zone_already_has_requested_rules() -> None:
+    assert 'OLD_ZONE == "$ZONE"' in SCRIPT
+    assert 'CURRENT_TARGET == DROP' in SCRIPT
+    assert "no rollback timer was created" in SCRIPT
+    assert 'if [[ $OLD_ZONE != "$ZONE" ]]' in SCRIPT
+
+
 def test_copy_helper_does_not_apply_firewall() -> None:
     helper = (ROOT / "scripts/copy_vpn_node_firewall.sh").read_text(encoding="utf-8")
     assert "scp -o BatchMode=yes" in helper

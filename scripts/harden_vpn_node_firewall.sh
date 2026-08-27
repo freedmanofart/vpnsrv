@@ -190,8 +190,25 @@ for port in ${XRAY_TCP_PORTS//,/ }; do
   [[ $port =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) || { echo "Invalid XRAY_TCP_PORTS" >&2; exit 2; }
 done
 
-install -d -m 700 "$STATE_DIR"
 OLD_ZONE=$(firewall-cmd --get-zone-of-interface="$IFACE" 2>/dev/null || true)
+if [[ $SSH_ACCESS_MODE == key-only && $OLD_ZONE == "$ZONE" ]]; then
+  DESIRED_PORTS=$(
+    {
+      printf '%s\n' "$SSH_PORT/tcp"
+      for port in ${XRAY_TCP_PORTS//,/ }; do printf '%s\n' "$port/tcp"; done
+    } | sort -u
+  )
+  CURRENT_PORTS=$(firewall-cmd --permanent --zone="$ZONE" --list-ports | tr ' ' '\n' | sed '/^$/d' | sort -u)
+  CURRENT_RICH_RULES=$(firewall-cmd --permanent --zone="$ZONE" --list-rich-rules)
+  CURRENT_TARGET=$(firewall-cmd --permanent --zone="$ZONE" --get-target)
+  if [[ $CURRENT_PORTS == "$DESIRED_PORTS" && -z $CURRENT_RICH_RULES && $CURRENT_TARGET == DROP ]]; then
+    echo "Firewall is already configured; no rules changed and no rollback timer was created."
+    firewall-cmd --zone="$ZONE" --list-all
+    exit 0
+  fi
+fi
+
+install -d -m 700 "$STATE_DIR"
 printf '%s\n' "$IFACE" >"$STATE_DIR/interface"
 printf '%s\n' "$OLD_ZONE" >"$STATE_DIR/old-zone"
 printf '%s\n' "${SSH_CONNECTION:-}" >"$STATE_DIR/apply-connection"
@@ -224,7 +241,9 @@ fi
 # this same, already-installed script and survives loss of the SSH connection.
 systemd-run --unit="$ROLLBACK_UNIT" --on-active="${ROLLBACK_SECONDS}s" \
   "$SELF_PATH" --rollback >/dev/null
-firewall-cmd --permanent --zone="$ZONE" --change-interface="$IFACE" >/dev/null
+if [[ $OLD_ZONE != "$ZONE" ]]; then
+  firewall-cmd --permanent --zone="$ZONE" --change-interface="$IFACE" >/dev/null
+fi
 firewall-cmd --reload
 
 cat <<EOF
