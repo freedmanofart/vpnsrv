@@ -1290,18 +1290,15 @@ async def profile_handler(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("confirm_buy:"))
 async def confirm_buy_handler(callback: CallbackQuery):
     _, plan_id, node_id, client_type, profile = callback.data.split(":")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="📱 Оплатить по QR",
-                callback_data=f"pay_qr:{plan_id}:{node_id}:{client_type}:{profile}",
-            )
-        ],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"profile:{plan_id}:{node_id}:{client_type}:{profile}")],
-    ])
+    payment_url = YOOMONEY_PAYMENT_URL
+    rows = [[InlineKeyboardButton(text="📷 Оплатить по QR", callback_data=f"pay_qr:{plan_id}:{node_id}:{client_type}:{profile}")]]
+    if payment_url:
+        rows.append([InlineKeyboardButton(text="💳 Оплатить через ЮMoney", url=payment_url)])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"profile:{plan_id}:{node_id}:{client_type}:{profile}")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     await callback.message.edit_text(
         "💳 <b>Выберите способ оплаты</b>\n\n"
-        "Сейчас доступна оплата по QR. После подключения реального провайдера здесь появятся дополнительные варианты.",
+        "Выберите способ оплаты: QR-код или ЮMoney. После оплаты нажмите кнопку проверки.",
         parse_mode="HTML",
         reply_markup=keyboard,
     )

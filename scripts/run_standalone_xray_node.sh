@@ -8,6 +8,7 @@ set -euo pipefail
 XRAY_IMAGE=${XRAY_IMAGE:-ghcr.io/xtls/xray-core@sha256:4198aa816f04eeacde6470f4f07947eb4f701a1bba3657e366636681eaae5855}
 XRAY_PORT=${XRAY_PORT:-443}
 REALITY_SNI=${REALITY_SNI:-www.cloudflare.com}
+REALITY_FINGERPRINT=${REALITY_FINGERPRINT:-chrome}
 STATE_DIR=${STATE_DIR:-/etc/vpn-standalone}
 CONTAINER_NAME=${CONTAINER_NAME:-vpn-xray-standalone}
 CLIENT_CONTAINER_NAME=${CLIENT_CONTAINER_NAME:-vpn-xray-standalone-client}
@@ -184,11 +185,11 @@ podman run -d --name "$CONTAINER_NAME" --network host --restart=unless-stopped \
 # Reality keys, VLESS и HTTPS egress независимо от AmneziaVPN и control plane.
 # 127.0.0.1 используется только как адрес тестового server outbound; Reality SNI
 # и ключи остаются теми же, что в напечатанном публичном URI.
-python3 - "$STATE_DIR/client-config.json" "$XRAY_PORT" "$SOCKS_PORT" "$REALITY_SNI" "$PUBLIC_KEY" "$SHORT_ID" "$CLIENT_ID" <<'PY'
+python3 - "$STATE_DIR/client-config.json" "$XRAY_PORT" "$SOCKS_PORT" "$REALITY_SNI" "$REALITY_FINGERPRINT" "$PUBLIC_KEY" "$SHORT_ID" "$CLIENT_ID" <<'PY'
 import json
 import sys
 
-path, port, socks_port, sni, public_key, short_id, client_id = sys.argv[1:]
+path, port, socks_port, sni, fingerprint, public_key, short_id, client_id = sys.argv[1:]
 config = {
     "log": {"loglevel": "warning"},
     "inbounds": [{
@@ -211,7 +212,7 @@ config = {
             "security": "reality",
             "realitySettings": {
                 "serverName": sni,
-                "fingerprint": "chrome",
+                "fingerprint": fingerprint,
                 "publicKey": public_key,
                 "shortId": short_id,
             },
@@ -245,7 +246,7 @@ if [[ ! -s $STATE_DIR/egress-ip.txt ]]; then
   exit 4
 fi
 
-URI="vless://${CLIENT_ID}@${PUBLIC_HOST}:${XRAY_PORT}?type=tcp&security=reality&encryption=none&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#standalone-node-test"
+URI="vless://${CLIENT_ID}@${PUBLIC_HOST}:${XRAY_PORT}?type=tcp&security=reality&encryption=none&sni=${REALITY_SNI}&fp=${REALITY_FINGERPRINT}&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}#standalone-node-test"
 printf '%s\n' "$URI" > "$STATE_DIR/client-uri.txt"
 chmod 600 "$STATE_DIR/config.json" "$STATE_DIR/client-uri.txt"
 

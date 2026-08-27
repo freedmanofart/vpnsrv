@@ -20,7 +20,12 @@ FIREWALL_STATE_DIR=${FIREWALL_STATE_DIR:-/run/vpn-node-firewall}
 AWG_IMAGE=${AWG_IMAGE:-$(cat /etc/vpn-amneziawg-image 2>/dev/null || echo docker.io/amneziavpn/amneziawg-go:latest)}
 AWG_CONTAINER=${AWG_CONTAINER:-amneziawg-$INTERFACE}
 awg_exec() { podman exec "$AWG_CONTAINER" awg "$@"; }
-awg_quick() { podman exec "$AWG_CONTAINER" awg-quick "$@"; }
+awg_quick() {
+  # Force userspace implementation even when the host advertises an unrelated
+  # WireGuard module; otherwise awg-quick may leave an interface with no backend.
+  podman exec -e WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1 \
+    "$AWG_CONTAINER" awg-quick "$@"
+}
 
 usage() { echo "Usage: $0 [--check|--status|--remove]" >&2; }
 (( $# <= 1 )) || { usage; exit 2; }
@@ -81,6 +86,9 @@ fi
 
 if [[ $ACTION == --remove ]]; then
   [[ -f $CONFIG ]] && awg_quick down "/config/$INTERFACE.conf" >/dev/null 2>&1 || true
+  # The runner container is kept alive so that --status can query awg. Remove
+  # it only after the interface has been brought down.
+  podman rm -f "$AWG_CONTAINER" >/dev/null 2>&1 || true
   if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     [[ -s $STATE_DIR/wan-zone.txt ]] && WAN_ZONE=$(cat "$STATE_DIR/wan-zone.txt") || WAN_ZONE=public
     if [[ $(cat "$STATE_DIR/port-added.txt" 2>/dev/null || true) == 1 ]]; then
@@ -89,6 +97,9 @@ if [[ $ACTION == --remove ]]; then
     firewall-cmd --zone=trusted --remove-interface="$INTERFACE" >/dev/null 2>&1 || true
     if [[ $(cat "$STATE_DIR/masquerade-added.txt" 2>/dev/null || true) == 1 ]]; then
       firewall-cmd --zone="$WAN_ZONE" --remove-masquerade >/dev/null 2>&1 || true
+    fi
+    if [[ $(cat "$STATE_DIR/trusted-forward-added.txt" 2>/dev/null || true) == 1 ]]; then
+      firewall-cmd --zone=trusted --remove-forward >/dev/null 2>&1 || true
     fi
   fi
   if [[ -s $STATE_DIR/ip-forward-original.txt ]]; then
@@ -125,6 +136,7 @@ install -d -m 700 "$STATE_DIR"
 podman pull --quiet "$AWG_IMAGE" >/dev/null
 podman rm -f "$AWG_CONTAINER" >/dev/null 2>&1 || true
 podman run -d --name "$AWG_CONTAINER" --privileged --network host \
+  -e WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1 \
   -v "$STATE_DIR:/config:Z" "$AWG_IMAGE" sleep infinity >/dev/null
 cleanup_container() { podman rm -f "$AWG_CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup_container EXIT
@@ -204,20 +216,37 @@ cleanup_failed_start() {
   if [[ $(cat "$STATE_DIR/masquerade-added.txt" 2>/dev/null || true) == 1 ]]; then
     firewall-cmd --zone="$WAN_ZONE" --remove-masquerade >/dev/null 2>&1 || true
   fi
+  if [[ $(cat "$STATE_DIR/trusted-forward-added.txt" 2>/dev/null || true) == 1 ]]; then
+    firewall-cmd --zone=trusted --remove-forward >/dev/null 2>&1 || true
+  fi
   sysctl -w "net.ipv4.ip_forward=$(cat "$STATE_DIR/ip-forward-original.txt")" >/dev/null 2>&1 || true
 }
 trap cleanup_failed_start ERR
-firewall-cmd --zone="$WAN_ZONE" --add-port="$AWG_PORT/udp" >/dev/null
-firewall-cmd --zone="$WAN_ZONE" --add-masquerade >/dev/null
+if [[ $(cat "$STATE_DIR/port-added.txt") == 1 ]]; then
+  firewall-cmd --zone="$WAN_ZONE" --add-port="$AWG_PORT/udp" >/dev/null
+fi
+if [[ $(cat "$STATE_DIR/masquerade-added.txt") == 1 ]]; then
+  firewall-cmd --zone="$WAN_ZONE" --add-masquerade >/dev/null
+fi
 awg_quick up "/config/$INTERFACE.conf"
-firewall-cmd --zone=trusted --add-interface="$INTERFACE" >/dev/null
+if ! firewall-cmd --zone=trusted --query-interface="$INTERFACE" >/dev/null; then
+  firewall-cmd --zone=trusted --add-interface="$INTERFACE" >/dev/null
+fi
+if firewall-cmd --zone=trusted --query-forward >/dev/null 2>&1; then
+  printf '0\n' >"$STATE_DIR/trusted-forward-added.txt"
+else
+  firewall-cmd --zone=trusted --add-forward >/dev/null
+  printf '1\n' >"$STATE_DIR/trusted-forward-added.txt"
+fi
 trap - ERR
+# Keep the container alive after a successful start: --status executes `awg`
+# inside this container. It is removed by the explicit --remove action.
 trap - EXIT
 
 cat <<EOF
 Standalone AmneziaWG listens on $PUBLIC_HOST:$AWG_PORT/udp.
 Import this file into AmneziaVPN: $STATE_DIR/client.conf
-Copy it securely to the operator machine with:
+On the operator/backend machine (not inside this VPN node), copy it with:
   scp root@$PUBLIC_HOST:$STATE_DIR/client.conf ./amneziawg-test.conf
 Inspect handshakes and byte counters:
   $0 --status
