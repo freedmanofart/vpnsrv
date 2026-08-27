@@ -272,7 +272,95 @@ PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 /root/run_standalone_xray_node.sh
 
 Чтобы полностью исключить Xray/Reality и сравнить другой transport, добавлен
 `run_standalone_amneziawg_node.sh`. Он не интегрирован с backend. Полный комплект
-безопасно копируется helper-скриптом (старое имя сохранено как alias):
+безопасно копируется helper-скриптом (старое имя сохранено как alias).
+
+**Поддерживается только контейнерный запуск.** AmneziaWG не устанавливается и не
+запускается как host-служба: runner всегда вызывает `awg`/`awg-quick` внутри
+образа Podman `amneziavpn/amneziawg-go`. Не пытайтесь запускать `awg-quick` с
+хоста или устанавливать `amneziawg-dkms`/`amneziawg-tools`; такие пакеты не
+нужны и не являются поддерживаемым вариантом этой проверки.
+
+#### Пошаговая установка на сервер
+
+1. Выполняйте команды копирования **на сервере с checkout/backend**. На VPN-ноде
+   Git и репозиторий не требуются: helper передаёт только два готовых скрипта по
+   SSH. Проверьте доступ к ноде под root (или пользователем с разрешённым
+   `sudo`) и перейдите в checkout проекта:
+
+   ```bash
+   cd /path/to/vpnsrv                 # сервер с backend и Git
+   ssh root@203.0.113.10 'hostname && id'
+   ```
+
+2. Скопируйте оба скрипта на ноду. Единственная обязательная переменная —
+   `NODE_SSH`; helper ничего не устанавливает и не запускает:
+
+   ```bash
+   export NODE_SSH=root@203.0.113.10
+   ./scripts/copy_amneziawg_node_test.sh
+   ```
+
+   Для другого каталога назначения задайте абсолютные пути без пробелов:
+
+   ```bash
+   NODE_SSH=root@203.0.113.10 \
+   RUNNER_REMOTE_PATH=/usr/local/sbin/run-awg-test \
+   INSTALLER_REMOTE_PATH=/usr/local/sbin/install-awg-test \
+   ./scripts/copy_amneziawg_node_test.sh
+   ```
+
+3. Подключитесь к серверу и установите Podman-образ от root. Флаг подтверждения
+   обязателен и защищает от случайной установки:
+
+   ```bash
+   ssh root@203.0.113.10
+   INSTALL_AWG=1 /root/install_amneziawg_node_dependencies.sh
+   ```
+
+4. Выполните preflight без изменения firewall:
+
+   ```bash
+   /root/run_standalone_amneziawg_node.sh --check
+   ```
+
+   Если на ноде остались артефакты предыдущего запуска, перед повторной
+   установкой можно выполнить `--remove`. Команда идемпотентна: при отсутствии
+   интерфейса или контейнера она всё равно завершится успешно и сохранит ключи в
+   каталоге state. Повторный `podman pull` также может вывести `skipped: already
+   exists` — это нормальный результат, означающий, что слой образа уже загружен.
+
+5. Запустите тест, предварительно разрешив выбранный UDP-порт в cloud firewall:
+
+   ```bash
+   PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 \
+     /root/run_standalone_amneziawg_node.sh
+   ```
+
+   Выйдите из SSH-сессии ноды и скопируйте напечатанный `client.conf` **с
+   backend/операторского компьютера**, где находится подходящий SSH private key:
+
+   ```bash
+   exit
+   scp root@203.0.113.10:/etc/vpn-standalone-awg/client.conf \
+     ./amneziawg-test.conf
+   ```
+
+   Не запускайте эту команду на самой ноде: подключение ноды к собственному
+   публичному адресу потребует отсутствующий там private key и завершится
+   `Permission denied (publickey)`. Импортируйте полученный файл в AmneziaVPN и
+   проверьте трафик командами ниже. После завершения удалите интерфейс,
+   firewall-правила и контейнер через `--remove`.
+
+   В выводе `awg-quick` на узлах без kernel-модуля может появиться `Error:
+   Unknown device type`, после чего `amneziawg-go` переключается на userspace.
+   Runner принудительно разрешает этот режим через контейнерную переменную
+   `WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1`: без неё `amneziawg-go`
+   может ошибочно решить, что подходящий kernel-модуль уже доступен, завершиться
+   после информационного баннера и оставить интерфейс без работающего backend.
+   Результат такого состояния — входящие UDP-пакеты в `tcpdump`, но отсутствие
+   handshake и нулевой RX в `--status`. Предупреждения
+   firewalld `ALREADY_ENABLED`/`ZONE_ALREADY_SET` также безвредны при повторном
+   запуске; runner проверяет состояние правил перед добавлением.
 
 ```bash
 NODE_SSH=root@203.0.113.10 ./scripts/copy_amneziawg_node_test.sh
@@ -281,33 +369,71 @@ INSTALL_AWG=1 /root/install_amneziawg_node_dependencies.sh
 /root/run_standalone_amneziawg_node.sh --check
 ```
 
-Установщик поддерживает Fedora/RHEL, требует явного `INSTALL_AWG=1` и использует
-официальный COPR `amneziavpn/amneziawg`. Copy-helper только копирует runner и
-установщик с правами `0700`: он ничего не устанавливает и не запускает.
-Runner требует официальные `awg` и `awg-quick`. Скрипт создаёт отдельный интерфейс
-`awg-test`, одну пару ключей клиента, PSK, runtime-правила firewalld и готовый
-конфиг для импорта в AmneziaVPN:
+Установщик требует явного `INSTALL_AWG=1`. Он устанавливает Podman (через `dnf`, если команда отсутствует), загружает образ `docker.io/amneziavpn/amneziawg-go:latest` и сохраняет его reference в `/etc/vpn-amneziawg-image`. DKMS, `kernel-devel`, COPR и host-пакеты `awg` не используются, поэтому тест работает и на ядрах без DKMS. Образ можно переопределить переменной `AWG_IMAGE`. Copy-helper только копирует runner и установщик с правами `0700`: он ничего не устанавливает и не запускает.
+
+Runner запускает privileged-контейнер Podman с host networking; команды `awg` и `awg-quick` выполняются внутри него, а конфигурация монтируется в `/config`. Скрипт создаёт отдельный интерфейс `awg-test`, одну пару ключей клиента, PSK, runtime-правила firewalld и готовый конфиг для импорта в AmneziaVPN:
 
 ```bash
 PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 \
   /root/run_standalone_amneziawg_node.sh
 ```
 
+После установки безопасно убедитесь, что Podman-образ доступен и локальный
+firewalld готов, до запуска интерфейса:
+
+```text
+AmneziaWG container image pulled: docker.io/amneziavpn/amneziawg-go:latest
+No DKMS, kernel-devel, or host awg packages are installed.
+Preflight passed: firewalld is active; WAN interface is eth0; no firewall change is pending.
+```
+
+Эти сообщения являются ожидаемым результатом установщика и `--check`: проверка
+не создаёт контейнер, интерфейс или правила firewall. Если WAN-интерфейс не
+называется `eth0`, задайте `WAN_INTERFACE` до запуска runner. Фактический запуск
+создаёт контейнер и оставляет его работающим для последующих `--status`; удаление выполняется явной командой `--remove`.
+
 Разрешите `51820/udp` также в cloud firewall. Затем скопируйте напечатанный
 `/etc/vpn-standalone-awg/client.conf` на клиент и импортируйте как AmneziaWG.
-Текущий handshake и счётчики байтов доступны через `--status`; отсутствие
-handshake при видимых UDP-пакетах в `tcpdump` указывает на несовместимость
-параметров/клиента, а отсутствие самих пакетов — на firewall или блокировку UDP:
+Проверяйте VPN именно с клиентского устройства: после импорта профиля выполните
+HTTPS-запросы и одновременно наблюдайте UDP-трафик на ноде. Обычный `ping` не
+является проверкой VPN и может не работать даже при исправном туннеле:
 
 ```bash
-/root/run_standalone_amneziawg_node.sh --status
+# на клиенте, при активном профиле AmneziaWG
+curl --fail --show-error --max-time 15 https://api.ipify.org
+curl --fail --show-error --max-time 15 https://example.com/ -o /dev/null
+# параллельно на ноде
 tcpdump -ni any udp port 51820
 ```
+
+Первый запрос должен вернуть публичный адрес ноды, второй — завершиться с кодом
+`0`, а в `tcpdump` должны быть UDP-пакеты клиента. Если пакетов нет, проверяйте
+cloud/firewalld; если пакеты есть, но внешний адрес не меняется, проверяйте
+импорт конфигурации, TUN-режим и маршрутизацию клиента. `--status` требует
+запущенного runner-контейнера; для нового измерения запустите runner заново.
 
 После теста удалите runtime-интерфейс и правила командой `--remove`. Никакая
 криптографическая библиотека или VPN-протокол не может гарантировать работу с
 вероятностью 100% во всех ОС и сетях; эта проверка нужна именно для независимого
 сравнения UDP AmneziaWG с TCP Reality.
+
+Если в выводе снова появляются `ALREADY_ENABLED` или `--status` сообщает
+`no container with name ...`, на ноде запущена старая копия runner. Файлы в
+checkout обновляются только на backend-сервере и автоматически на ноду не
+попадают. Повторите копирование с backend, затем удалите остатки и запустите
+тест заново:
+
+```bash
+# выполнять на сервере с Git/checkout
+NODE_SSH=root@203.0.113.10 ./scripts/copy_amneziawg_node_test.sh
+ssh root@203.0.113.10 '/root/run_standalone_amneziawg_node.sh --remove'
+ssh root@203.0.113.10 'PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 /root/run_standalone_amneziawg_node.sh'
+ssh root@203.0.113.10 '/root/run_standalone_amneziawg_node.sh --status'
+```
+
+Сообщение `tcpdump ... 0 packets captured` означает только, что за время
+наблюдения клиент не отправлял UDP-трафик; сначала активируйте импортированный
+профиль AmneziaVPN и повторите захват.
 
 Путь назначения можно заменить через `REMOTE_PATH`. Скрипт копирования ничего не
 запускает на ноде и не меняет firewall; он только создаёт каталог, копирует файл и
