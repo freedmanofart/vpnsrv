@@ -273,10 +273,6 @@ non-443 ports` для диагностического `8443` также не я
 /root/run_standalone_xray_node.sh --diagnose
 ```
 
-Команда должна присутствовать в строке ровно один раз. Строка вида
-`--diagnose/root/run_standalone_xray_node.sh --diagnose` — это две команды,
-склеенные без перевода строки; она не запускает диагностику. Счётчик принятых
-внешних запросов отделён от loopback-запроса встроенного эталонного клиента.
 
 Если одновременно присутствуют `accepted ... [vless-reality >> direct]` от
 внешнего IP и `failed to read client hello`/`handshake did not complete`, это не
