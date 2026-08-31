@@ -91,6 +91,21 @@ ssh -N -L 2223:127.0.0.1:60628 root@159.223.22.59
 
 Затем проверить Nodes/Probe из master и состояние панели child в браузере.
 
+## Firewall новой 3x-ui ноды
+
+`configure_3xui_node_firewall.sh` включает минимальные правила для SSH и доступа
+master к панели child через Tailscale. Перед применением он запускает systemd
+timer: если оператор не выполнит `confirm`, правила автоматически откатятся.
+
+```bash
+sudo scripts/configure_3xui_node_firewall.sh apply \
+  --master-ip 100.102.21.123 --port 60628 --timeout 180
+```
+
+Не подтверждайте изменения, пока не проверены новая SSH-сессия и соединение
+master → child. Полная процедура, ручной откат и восстановление через консоль
+описаны в [`new-node-firewall.md`](new-node-firewall.md).
+
 ## AmneziaWG
 
 Скрипты `run_standalone_amneziawg_node.sh`,
