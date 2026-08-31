@@ -1,97 +1,75 @@
 # Обновление control plane на сервере
 
-Эта инструкция описывает обновление production-каталога
-`/home/freedman/vpn-service` из ветки `origin/main`, применение миграций и
-проверку сервисов. Команды ниже выполняются из root-shell: репозиторий и Git
-metadata должны принадлежать одному оператору. Не чередуйте `git` от `root` и
-`freedman`, иначе `.git/FETCH_HEAD` и новые объекты снова получат несовместимые
-права.
+Инструкция предназначена для перехода и последующих обновлений ветки
+`newnode`. В этой ветке Compose не запускает Xray и node-agent: их функции
+выполняет установленная отдельно 3x-ui master.
 
 ## Предварительные условия
 
-- рабочая версия запущена через Docker Compose;
-- remote `origin` указывает на production-репозиторий;
-- `.env` заполнен, не отслеживается Git и имеет права `0600`;
-- оператор находится в каталоге проекта и не использует shell tracing
-  (`set -x` раскрывает секреты).
+- 3x-ui master работает и имеет настроенный VLESS Reality inbound;
+- для VPN API создан `node-sync` token;
+- `.env` содержит `THREEXUI_API_TOKEN` и `THREEXUI_VERIFY_TLS=true`;
+- `.env` не отслеживается Git и имеет права `0600`;
+- создана резервная копия PostgreSQL и конфигурации;
+- отдельно создан backup БД master-панели 3x-ui.
 
-Откройте root-shell и проверьте исходное состояние:
+## Получение версии
 
 ```bash
 sudo -i
 cd /home/freedman/vpn-service
 
-git remote -v
-git branch --show-current
 git status --short --branch
-docker compose ps
-```
-
-Production-ветка должна быть `main`. Если `git status --short` показывает
-изменения, сначала перейдите к разделу
-[«Грязное рабочее дерево»](#грязное-рабочее-дерево).
-
-## Обычное обновление
-
-### 1. Создать резервную копию
-
-Перед получением кода сохраните БД и конфигурацию:
-
-```bash
 VPN_PROJECT_DIR="$PWD" scripts/backup.sh
-```
-
-Успешный скрипт выводит пути `database=...` и `config=...`. Убедитесь, что оба
-файла существуют, и регулярно копируйте их с сервера во внешнее зашифрованное
-хранилище. Не продолжайте обновление, если backup завершился с ошибкой.
-
-### 2. Получить изменения
-
-```bash
 git fetch --all --prune
-git status --short --branch
-git log --oneline --decorate HEAD..origin/main
-git pull --ff-only origin main
+git log --oneline --decorate HEAD..origin/newnode
+git pull --ff-only origin newnode
 ```
 
-`--ff-only` не создаёт merge-коммит на сервере и останавливает обновление, если
-локальная ветка разошлась с `origin/main`. После получения кода рабочее дерево
-должно быть чистым:
+Если рабочее дерево грязное, не выполняйте reset. Сначала сохраните diff и
+определите владельца локальных изменений.
 
-```bash
-git status --short --branch
+## Обновление `.env`
+
+Удалите устаревшие параметры при удобном плановом обслуживании:
+
+- `XRAY_API_ADDRESS`;
+- `XRAY_INBOUND_TAG`;
+- `XRAY_MANAGEMENT_MODE`;
+- `NODE_AGENT_TOKEN`;
+- `NODE_AGENT_NODE_ID`;
+- `NODE_AGENT_INTERVAL_SECONDS`;
+- `CONTROL_PLANE_URL`.
+
+Добавьте:
+
+```dotenv
+THREEXUI_API_TOKEN=<token-master-со-scope-node-sync>
+THREEXUI_VERIFY_TLS=true
 ```
 
-### 3. Проверить конфигурацию
+Проверка:
 
 ```bash
-test -f .env || { echo '.env не найден, обновление остановлено' >&2; exit 1; }
 chmod 600 .env
 python3 scripts/configctl.py validate
 docker compose config --quiet
 ```
 
-Если в новой `.env.example` появились обязательные параметры, добавьте их в
-`.env` через `scripts/configctl.py`; не заменяйте production `.env` шаблоном и
-не выводите секреты в журнал терминала.
-
-### 4. Собрать образы и применить миграции
+## Сборка и миграции
 
 ```bash
-docker compose build api worker bot node-agent
+docker compose build api worker bot
 docker compose up -d postgres redis
-docker compose stop api worker bot node-agent
+docker compose stop api worker bot
 docker compose run --rm api alembic upgrade head
 docker compose run --rm api alembic current
 ```
 
-`alembic current` должен показать ревизию с отметкой `(head)`. Миграции
-выполняются при остановленных сервисах, которые могут читать или изменять
-прикладные данные. Если миграция завершилась с ошибкой, не запускайте приложение
-со старым кодом поверх частично изменённой схемы: сохраните вывод команды и
-перейдите к разделу [«Диагностика и откат»](#диагностика-и-откат).
+Миграция `b91c7d23e640` удаляет таблицу старых credentials node-agent. Перед её
+применением сохраните backup. Эти credentials после перехода на 3x-ui не нужны.
 
-### 5. Пересоздать и проверить сервисы
+## Запуск
 
 ```bash
 docker compose up -d --remove-orphans
@@ -100,110 +78,38 @@ curl -fsS http://127.0.0.1:8000/health
 docker compose logs --since=10m api worker bot
 ```
 
-Если на этом же сервере намеренно включён Compose-профиль `node-agent`, примените
-его явно и проверьте журнал агента:
+`--remove-orphans` удалит старые Compose-контейнеры `vpn-xray` и
+`vpn-node-agent`, если они были созданы прежней версией проекта. Это не
+останавливает системный сервис `x-ui`.
+
+## Проверка после обновления
+
+1. Открыть VPN Admin через SSH-туннель.
+2. Привязать логическую ноду к числовому inbound ID master.
+3. Выполнить Health — ожидается `online`.
+4. Выполнить Reconcile — ожидается `errors=0`.
+5. Создать тестового клиента и проверить его появление в 3x-ui.
+6. Импортировать VLESS URI и проверить выходной IP.
+7. Отозвать клиента и убедиться, что он удалён из inbound.
+
+## Откат
+
+Откат к старому commit после применения миграции требует восстановления таблицы
+node-agent credentials либо downgrade Alembic. Предпочтительный путь:
+
+1. остановить `api`, `worker`, `bot`;
+2. восстановить PostgreSQL из backup, созданного перед обновлением;
+3. вернуть прежний commit и `.env`;
+4. пересобрать прежние Compose-сервисы;
+5. проверить состояние до открытия пользовательского трафика.
+
+БД 3x-ui обновляется и восстанавливается отдельно от PostgreSQL control plane.
+
+## Настройка child
+
+Процедура регистрации VPS `159.223.22.59`, API token и TLS описана в
+[`3x-ui-master.md`](3x-ui-master.md). Для ручного доступа к панели child:
 
 ```bash
-docker compose --profile node-agent up -d --remove-orphans
-docker compose logs --since=10m node-agent
-```
-
-Все ожидаемые сервисы должны быть в состоянии `Up`/`healthy`, health endpoint
-должен завершиться с кодом 0, а в свежих журналах не должно быть циклических
-перезапусков, ошибок подключения к БД или неприменённых миграций.
-
-## Грязное рабочее дерево
-
-Не выполняйте `git pull`, `git reset --hard` или `git clean -fd`, пока не
-определено происхождение строк `M` и `??` в `git status`. Сначала сохраните
-полную копию файлов вне каталога проекта:
-
-```bash
-cp -a .env "/root/vpn-service.env.$(date -u +%Y%m%dT%H%M%SZ).backup"
-tar --exclude='./.git' --exclude='./.venv' \
-  -czf "/root/vpn-service-files-$(date -u +%Y%m%dT%H%M%SZ).tar.gz" .
-```
-
-Затем получите remote без изменения рабочего дерева и проверьте ситуацию:
-
-```bash
-git fetch --all --prune
-git branch -vv
-git status --short --branch
-git log --oneline --decorate -5
-git clean -nd
-```
-
-Если `origin/main` является единственным эталоном, локальные изменения не нужны,
-backup проверен, а предварительный вывод `git clean -nd` не содержит уникальных
-ключей или конфигурации, синхронизируйте каталог:
-
-```bash
-git show origin/main:.gitignore | sed -n '/^\.env$/p'
-git check-ignore -v .env
-git reset --hard origin/main
-git clean -nd
-git clean -fd
-test -f .env || cp -a "$(ls -1t /root/vpn-service.env.*.backup | head -1)" .env
-chmod 600 .env
-git status --short --branch
-```
-
-Обе проверки перед `reset` должны подтверждать, что `.env` исключён из Git.
-Повторный `git clean -nd` после `reset` показывает только оставшиеся untracked
-пути: изучите этот вывод и запускайте `git clean -fd`, только если в нём нет
-уникальных данных. Команда не удаляет ignored-файлы, однако отдельная копия
-`.env` всё равно обязательна. После синхронизации продолжите с шага
-[«Проверить конфигурацию»](#3-проверить-конфигурацию).
-
-Если локальные изменения уникальны или их происхождение неизвестно, не
-сбрасывайте их: перенесите архив на отдельную машину и сравните содержимое с
-`origin/main`.
-
-## Ошибка доступа к `.git/FETCH_HEAD`
-
-Ошибка `Permission denied` означает, что Git metadata создавались другим
-пользователем. Проверьте владельца:
-
-```bash
-id
-stat -c '%U:%G %a %n' . .git .git/FETCH_HEAD 2>/dev/null
-find .git -maxdepth 2 ! -user root -printf '%u:%g %m %p\n' | head -50
-```
-
-Если принято обслуживать проект только из root-shell, нормализуйте владение и
-продолжайте запускать все Git-команды от `root`:
-
-```bash
-chown -R root:root /home/freedman/vpn-service
-chmod 600 /home/freedman/vpn-service/.env
-```
-
-Не используйте попеременно `sudo git ...` и обычный `git ...` от
-`freedman`.
-
-## Диагностика и откат
-
-При неуспешном запуске сначала соберите состояние и журналы:
-
-```bash
-docker compose ps
-docker compose logs --tail=200 api
-docker compose logs --tail=200 worker
-docker compose logs --tail=200 bot
-docker compose logs --tail=200 postgres
-```
-
-Не откатывайте миграции вслепую: новый код мог уже изменить данные. Сначала
-остановите пишущие сервисы и сохраните аварийный дамп. Для полного отката
-используйте проверенные DB/config backup и предыдущий Git-коммит, а процедуру
-восстановления сначала репетируйте на изолированном узле.
-
-После устранения причины повторите:
-
-```bash
-python3 scripts/configctl.py validate
-docker compose run --rm api alembic upgrade head
-docker compose up -d --remove-orphans
-curl -fsS http://127.0.0.1:8000/health
+ssh -N -L 2223:127.0.0.1:60628 root@159.223.22.59
 ```

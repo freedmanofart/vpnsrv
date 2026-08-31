@@ -151,4 +151,4 @@ cd /home/freedman/vpn-service
 sudo docker compose logs --since=10m bot api
 ```
 
-Кнопки под QR-картинками должны открывать новый текстовый экран через `show_screen`. Перевыпуск на production-нодах не подключается к удалённому gRPC напрямую: API меняет desired state в PostgreSQL, а node-agent применяет его локально.
+Кнопки под QR-картинками должны открывать новый текстовый экран через `show_screen`. Перевыпуск ключа выполняется через встроенный REST API 3x-ui master; master сам применяет изменение к локальному Xray или нужной child-ноде.

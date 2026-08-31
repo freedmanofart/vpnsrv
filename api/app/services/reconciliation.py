@@ -8,11 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
-from app.services.xray import (
-    XrayClient,
-    XrayError,
-    XrayUserAlreadyExists,
-    XrayUserNotFound,
+from app.services.threexui import (
+    ThreeXUIClient,
+    ThreeXUIError,
+    ThreeXUIClientAlreadyExists,
+    ThreeXUIClientNotFound,
 )
 
 
@@ -33,7 +33,7 @@ async def reconcile_node(
     db: AsyncSession,
     node_id: int,
     *,
-    xray_factory: Callable[..., XrayClient] = XrayClient,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> ReconciliationReport:
     node = await db.get(VPNNode, node_id)
     if node is None:
@@ -64,7 +64,7 @@ async def reconcile_node(
     report = ReconciliationReport(node_id=node_id, expected=len(expected))
 
     inbound_tag = config.config.get("inbound_tag", "vless-reality")
-    xray = xray_factory(address=api_address)
+    xray = panel_factory(address=api_address)
     users = await xray.get_users(inbound_tag)
     actual = {user.email for user in users if user.email}
     report.present = len(set(expected) & actual)
@@ -80,9 +80,9 @@ async def reconcile_node(
                 flow=client.flow,
             )
             report.restored += 1
-        except XrayUserAlreadyExists:
+        except ThreeXUIClientAlreadyExists:
             report.present += 1
-        except XrayError:
+        except ThreeXUIError:
             report.errors += 1
 
     for email in actual:
@@ -91,9 +91,9 @@ async def reconcile_node(
         try:
             await xray.remove_vless_user(inbound_tag=inbound_tag, email=email)
             report.removed += 1
-        except XrayUserNotFound:
+        except ThreeXUIClientNotFound:
             pass
-        except XrayError:
+        except ThreeXUIError:
             report.errors += 1
 
     return report
@@ -102,7 +102,7 @@ async def reconcile_node(
 async def reconcile_all_nodes(
     db: AsyncSession,
     *,
-    xray_factory: Callable[..., XrayClient] = XrayClient,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> list[ReconciliationReport]:
     result = await db.execute(
         select(VPNNode.id).where(VPNNode.status.in_(("active", "draining")))
@@ -111,8 +111,8 @@ async def reconcile_all_nodes(
     for node_id in result.scalars():
         try:
             reports.append(
-                await reconcile_node(db, node_id, xray_factory=xray_factory)
+                await reconcile_node(db, node_id, panel_factory=panel_factory)
             )
-        except (ValueError, XrayError):
+        except (ValueError, ThreeXUIError):
             reports.append(ReconciliationReport(node_id=node_id, errors=1))
     return reports

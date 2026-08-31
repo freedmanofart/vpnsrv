@@ -120,36 +120,6 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         main_module.AsyncSessionLocal = self.original_audit_factory
         await self.engine.dispose()
 
-    async def test_node_agent_credential_state_and_status(self) -> None:
-        credential = await self.client.post(
-            f"/agent/v1/credentials/{self.node_id}/rotate",
-            auth=self.admin_auth,
-        )
-        self.assertEqual(200, credential.status_code, credential.text)
-        token = credential.json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-        state = await self.client.get("/agent/v1/state", headers=headers)
-        self.assertEqual(200, state.status_code, state.text)
-        self.assertEqual("vpn-1", state.json()["clients"][0]["email"])
-        report = await self.client.post(
-            "/agent/v1/status",
-            headers=headers,
-            json={
-                "status": "online",
-                "latency_ms": 12.5,
-                "xray_users": 1,
-                "active_connections": 1,
-                "restored": 0,
-                "removed": 0,
-                "errors": [],
-            },
-        )
-        self.assertEqual(200, report.status_code, report.text)
-        async with self.session_factory() as db:
-            node = await db.get(VPNNode, self.node_id)
-            self.assertEqual("online", node.health_status)
-            self.assertEqual(12.5, node.latency_ms)
-
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:
             subscription = (

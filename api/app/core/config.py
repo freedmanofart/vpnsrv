@@ -16,9 +16,8 @@ class Settings(BaseSettings):
     lifecycle_interval_seconds: int = 60
     lifecycle_advisory_lock_key: int = 846_202_608
     worker_run_once: bool = False
-    xray_management_mode: str = "direct"
-    xray_api_address: str = "172.18.0.1:10085"
-    xray_inbound_tag: str = "vless-reality"
+    threexui_api_token: str = ""
+    threexui_verify_tls: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",

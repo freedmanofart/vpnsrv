@@ -209,7 +209,7 @@ async def client_profile(
                 name=node.name,
                 region=node.region,
                 available=node_accepts_clients(
-                    node, management_mode=settings.xray_management_mode
+                    node, management_mode="threexui"
                 ),
                 latency_ms=node.latency_ms,
                 protocol=client.protocol,

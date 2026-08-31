@@ -13,7 +13,7 @@ from app.db.models.user import User
 from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
-from app.services.xray import XrayClient, XrayError, XrayUserNotFound
+from app.services.threexui import ThreeXUIClient, ThreeXUIError, ThreeXUIClientNotFound
 from app.core.config import settings
 
 
@@ -33,7 +33,7 @@ class ProvisioningInvalid(ProvisioningError):
     pass
 
 
-class ProvisioningXrayError(ProvisioningError):
+class ProvisioningThreeXUIError(ProvisioningError):
     pass
 
 
@@ -41,7 +41,7 @@ class ProvisioningXrayError(ProvisioningError):
 class ProvisioningResult:
     subscription: Subscription
     client: VPNClient
-    xray: XrayClient | None
+    xray: ThreeXUIClient | None
     inbound_tag: str
 
     async def compensate(self) -> None:
@@ -52,7 +52,7 @@ class ProvisioningResult:
                 inbound_tag=self.inbound_tag,
                 email=f"vpn-{self.client.id}",
             )
-        except (XrayError, XrayUserNotFound):
+        except (ThreeXUIError, ThreeXUIClientNotFound):
             pass
 
 
@@ -74,7 +74,7 @@ async def provision_subscription(
     client_type: str,
     flow: str,
     fingerprint: str,
-    xray_factory: Callable[..., XrayClient] = XrayClient,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> ProvisioningResult:
     _validate_profile(client_type, flow, fingerprint)
     now = datetime.now(timezone.utc)
@@ -156,19 +156,17 @@ async def provision_subscription(
         ) from exc
 
     inbound_tag = node_config.config.get("inbound_tag", "vless-reality")
-    xray = None
-    if settings.xray_management_mode == "direct":
-        xray = xray_factory(address=api_address)
-        try:
-            await xray.add_vless_user(
-                inbound_tag=inbound_tag,
-                client_uuid=client.client_uuid,
-                email=f"vpn-{client.id}",
-                flow=client.flow,
-            )
-        except XrayError as exc:
-            await db.rollback()
-            raise ProvisioningXrayError(f"Failed to add VPN client to Xray: {exc}") from exc
+    xray = panel_factory(address=api_address)
+    try:
+        await xray.add_vless_user(
+            inbound_tag=inbound_tag,
+            client_uuid=client.client_uuid,
+            email=f"vpn-{client.id}",
+            flow=client.flow,
+        )
+    except ThreeXUIError as exc:
+        await db.rollback()
+        raise ProvisioningThreeXUIError(f"Failed to add VPN client to 3x-ui: {exc}") from exc
 
     return ProvisioningResult(
         subscription=subscription,

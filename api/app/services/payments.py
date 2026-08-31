@@ -19,11 +19,11 @@ from app.services.provisioning import (
     ProvisioningInvalid,
     ProvisioningNotFound,
     ProvisioningResult,
-    ProvisioningXrayError,
+    ProvisioningThreeXUIError,
     commit_provisioning,
     provision_subscription,
 )
-from app.services.xray import XrayClient
+from app.services.threexui import ThreeXUIClient
 from app.services.payment_providers import get_payment_provider
 from app.services.vpn_expiration import revoke_vpn_client
 
@@ -144,7 +144,7 @@ async def process_payment_event(
     target_status: str,
     payload: dict,
     occurred_at: datetime | None = None,
-    xray_factory: Callable[..., XrayClient] = XrayClient,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> Payment:
     target_status = STATUS_ALIASES.get(target_status.lower(), target_status.lower())
     if target_status not in ALLOWED_TRANSITIONS:
@@ -223,7 +223,7 @@ async def process_payment_event(
                 client_type=payment.client_type,
                 flow=payment.flow,
                 fingerprint=payment.fingerprint,
-                xray_factory=xray_factory,
+                panel_factory=panel_factory,
             )
         except ProvisioningNotFound as exc:
             await db.rollback()
@@ -231,7 +231,7 @@ async def process_payment_event(
         except (ProvisioningConflict, ProvisioningInvalid) as exc:
             await db.rollback()
             raise PaymentInvalidTransition(str(exc)) from exc
-        except ProvisioningXrayError as exc:
+        except ProvisioningThreeXUIError as exc:
             await db.rollback()
             raise PaymentProvisioningError(str(exc)) from exc
         except ProvisioningError as exc:
@@ -249,23 +249,18 @@ async def process_payment_event(
                 )
             )
             clients = client_result.scalars().all()
-            if settings.xray_management_mode == "agent":
-                for client in clients:
-                    client.status = "revoked"
-                    client.revoked_at = now
-            else:
-                for client in clients:
-                    revoked = await revoke_vpn_client(
-                        db,
-                        client,
-                        now,
-                        xray_factory=xray_factory,
+            for client in clients:
+                revoked = await revoke_vpn_client(
+                    db,
+                    client,
+                    now,
+                    panel_factory=panel_factory,
+                )
+                if not revoked:
+                    await db.rollback()
+                    raise PaymentProvisioningError(
+                        f"Could not revoke VPN client {client.id} for refund"
                     )
-                    if not revoked:
-                        await db.rollback()
-                        raise PaymentProvisioningError(
-                            f"Could not revoke VPN client {client.id} for refund"
-                        )
             subscription.status = "cancelled"
 
     payment.status = target_status

@@ -11,7 +11,6 @@ from app.db.models.audit import (
     AuditLog,
     ClientDevice,
     DebugSession,
-    NodeAgentCredential,
 )
 
 __all__ = [
@@ -28,5 +27,4 @@ __all__ = [
     "AuditLog",
     "ClientDevice",
     "DebugSession",
-    "NodeAgentCredential",
 ]

@@ -29,8 +29,6 @@ VARIABLES: dict[str, Variable] = {
     "DATABASE_URL": Variable(secret=True, required=True),
     "REDIS_URL": Variable(required=True),
     "LOG_LEVEL": Variable(),
-    "XRAY_API_ADDRESS": Variable(required=True),
-    "XRAY_INBOUND_TAG": Variable(required=True),
     "BOT_TOKEN": Variable(secret=True, required=True),
     "TELEGRAM_CHANNEL_URL": Variable(),
     "SUPPORT_URL": Variable(),
@@ -46,11 +44,8 @@ VARIABLES: dict[str, Variable] = {
     "LIFECYCLE_INTERVAL_SECONDS": Variable(),
     "LIFECYCLE_ADVISORY_LOCK_KEY": Variable(),
     "WORKER_RUN_ONCE": Variable(),
-    "XRAY_MANAGEMENT_MODE": Variable(required=True),
-    "NODE_AGENT_TOKEN": Variable(secret=True),
-    "NODE_AGENT_NODE_ID": Variable(),
-    "NODE_AGENT_INTERVAL_SECONDS": Variable(),
-    "CONTROL_PLANE_URL": Variable(),
+    "THREEXUI_API_TOKEN": Variable(secret=True, required=True, generated_bytes=36),
+    "THREEXUI_VERIFY_TLS": Variable(required=True),
     "GRAFANA_ADMIN_USER": Variable(required=True),
     "GRAFANA_ADMIN_PASSWORD": Variable(secret=True, required=True, generated_bytes=24),
 }
@@ -118,8 +113,6 @@ def validate(values: dict[str, str]) -> list[str]:
         "PAYMENT_AUTO_CONFIRM", "false"
     ).lower() == "true":
         errors.append("PAYMENT_AUTO_CONFIRM must be false for a non-mock provider")
-    if values.get("XRAY_MANAGEMENT_MODE") not in {"direct", "agent"}:
-        errors.append("XRAY_MANAGEMENT_MODE must be direct or agent")
     return errors
 
 

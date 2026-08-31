@@ -41,14 +41,14 @@ from app.services.payments import (
 from app.services.provisioning import commit_provisioning, provision_subscription
 from app.services.reconciliation import reconcile_node
 from app.services.vpn_expiration import expire_desired_state, expire_subscriptions
-from app.services.xray import (
-    XrayError,
-    XrayUserAlreadyExists,
-    XrayUserNotFound,
+from app.services.threexui import (
+    ThreeXUIError,
+    ThreeXUIClientAlreadyExists,
+    ThreeXUIClientNotFound,
 )
 
 
-class FakeXray:
+class FakePanel:
     users: dict[str, dict[str, SimpleNamespace]] = {}
     fail_add = False
     fail_remove: set[str] = set()
@@ -73,10 +73,10 @@ class FakeXray:
         flow: str = "",
     ) -> None:
         if self.fail_add:
-            raise XrayError("simulated add failure")
+            raise ThreeXUIError("simulated add failure")
         users = self.users[self.address]
         if email in users:
-            raise XrayUserAlreadyExists(email)
+            raise ThreeXUIClientAlreadyExists(email)
         users[email] = SimpleNamespace(
             email=email,
             inbound_tag=inbound_tag,
@@ -88,10 +88,10 @@ class FakeXray:
     async def remove_vless_user(self, inbound_tag: str, email: str) -> None:
         if email in self.fail_remove:
             self.fail_remove.remove(email)
-            raise XrayError("simulated remove failure")
+            raise ThreeXUIError("simulated remove failure")
         users = self.users[self.address]
         if email not in users:
-            raise XrayUserNotFound(email)
+            raise ThreeXUIClientNotFound(email)
         del users[email]
 
     async def get_users(self, inbound_tag: str) -> list[SimpleNamespace]:
@@ -100,7 +100,7 @@ class FakeXray:
 
 class VPNLifecycleTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        FakeXray.reset()
+        FakePanel.reset()
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         self.session_factory = async_sessionmaker(
             self.engine,
@@ -139,7 +139,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                     node_id=node.id,
                     protocol="vless",
                     config={
-                        "api_address": "node-grpc:10085",
+                        "api_address": "https://master.example/base",
                         "inbound_tag": "vless-reality",
                         "host": "vpn.example.test",
                         "port": 443,
@@ -180,7 +180,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             client_type="amnezia",
             flow="xtls-rprx-vision",
             fingerprint="chrome",
-            xray_factory=FakeXray,
+            panel_factory=FakePanel,
         )
         await commit_provisioning(db, result)
         return result
@@ -206,7 +206,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 provider_payment_id=payment.provider_payment_id,
                 target_status="paid",
                 payload={"details": {"source": "test"}},
-                xray_factory=FakeXray,
+                panel_factory=FakePanel,
             )
             duplicate = await process_payment_event(
                 db,
@@ -215,7 +215,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 provider_payment_id=payment.provider_payment_id,
                 target_status="paid",
                 payload={"details": {"source": "test"}},
-                xray_factory=FakeXray,
+                panel_factory=FakePanel,
             )
 
             self.assertEqual("paid", duplicate.status)
@@ -229,7 +229,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             ).scalar_one()
             self.assertEqual("amnezia", client.client_type)
             self.assertEqual("xtls-rprx-vision", client.flow)
-            self.assertIn(f"vpn-{client.id}", FakeXray.users["node-grpc:10085"])
+            self.assertIn(f"vpn-{client.id}", FakePanel.users["https://master.example/base"])
             self.assertEqual(
                 1,
                 await db.scalar(select(func.count()).select_from(PaymentEvent)),
@@ -267,7 +267,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                     provider_payment_id=payment.provider_payment_id,
                     target_status="paid",
                     payload={},
-                    xray_factory=FakeXray,
+                    panel_factory=FakePanel,
                 )
 
             stored = await db.get(Payment, payment_id)
@@ -277,7 +277,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 await db.scalar(select(func.count()).select_from(PaymentEvent)),
             )
 
-    async def test_refund_revokes_subscription_and_xray_access(self) -> None:
+    async def test_refund_revokes_subscription_and_panel_access(self) -> None:
         async with self.session_factory() as db:
             payment = await create_payment(
                 db,
@@ -291,7 +291,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 provider_payment_id=payment.provider_payment_id,
                 target_status="paid",
                 payload={},
-                xray_factory=FakeXray,
+                panel_factory=FakePanel,
             )
             refunded = await process_payment_event(
                 db,
@@ -300,7 +300,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 provider_payment_id=payment.provider_payment_id,
                 target_status="refunded",
                 payload={},
-                xray_factory=FakeXray,
+                panel_factory=FakePanel,
             )
 
             subscription = await db.get(Subscription, paid.subscription_id)
@@ -315,10 +315,10 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             self.assertEqual("cancelled", subscription.status)
             self.assertEqual("revoked", client.status)
             self.assertNotIn(
-                f"vpn-{client.id}", FakeXray.users["node-grpc:10085"]
+                f"vpn-{client.id}", FakePanel.users["https://master.example/base"]
             )
 
-    async def test_xray_add_failure_rolls_back_paid_provisioning(self) -> None:
+    async def test_panel_add_failure_rolls_back_paid_provisioning(self) -> None:
         async with self.session_factory() as db:
             payment = await create_payment(
                 db,
@@ -326,7 +326,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 provider="mock",
             )
             payment_id = payment.id
-            FakeXray.fail_add = True
+            FakePanel.fail_add = True
             with self.assertRaises(PaymentProvisioningError):
                 await process_payment_event(
                     db,
@@ -335,7 +335,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                     provider_payment_id=payment.provider_payment_id,
                     target_status="paid",
                     payload={},
-                    xray_factory=FakeXray,
+                    panel_factory=FakePanel,
                 )
 
             stored = await db.get(Payment, payment_id)
@@ -359,7 +359,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             old_client_id = initial.client.id
             old_expiry = initial.subscription.expires_at
 
-            with patch("app.api.routes.subscriptions.XrayClient", FakeXray):
+            with patch("app.api.routes.subscriptions.ThreeXUIClient", FakePanel):
                 renewed = await renew_subscription(initial.subscription.id, db)
 
             clients = (
@@ -376,18 +376,18 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 (old_expiry + timedelta(days=30)).replace(tzinfo=None),
                 renewed.expires_at.replace(tzinfo=None),
             )
-            users = FakeXray.users["node-grpc:10085"]
+            users = FakePanel.users["https://master.example/base"]
             self.assertNotIn(f"vpn-{old_client_id}", users)
             self.assertIn(f"vpn-{clients[1].id}", users)
 
-    async def test_renew_compensates_when_old_xray_user_cannot_be_removed(self) -> None:
+    async def test_renew_compensates_when_old_panel_client_cannot_be_removed(self) -> None:
         async with self.session_factory() as db:
             initial = await self.provision(db)
             subscription_id = initial.subscription.id
             old_email = f"vpn-{initial.client.id}"
-            FakeXray.fail_remove.add(old_email)
+            FakePanel.fail_remove.add(old_email)
 
-            with patch("app.api.routes.subscriptions.XrayClient", FakeXray):
+            with patch("app.api.routes.subscriptions.ThreeXUIClient", FakePanel):
                 with self.assertRaises(HTTPException) as raised:
                     await renew_subscription(subscription_id, db)
             self.assertEqual(502, raised.exception.status_code)
@@ -401,32 +401,9 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             ).scalars().all()
             self.assertEqual(1, len(clients))
             self.assertEqual("active", clients[0].status)
-            self.assertEqual({old_email}, set(FakeXray.users["node-grpc:10085"]))
+            self.assertEqual({old_email}, set(FakePanel.users["https://master.example/base"]))
 
-    async def test_agent_rotation_only_updates_desired_state(self) -> None:
-        async with self.session_factory() as db:
-            initial = await self.provision(db)
-            old_client_id = initial.client.id
-            payload = VPNClientRotate(
-                node_id=self.node_id,
-                client_type="amnezia",
-                flow="xtls-rprx-vision",
-                fingerprint="chrome",
-            )
-
-            with patch("app.api.routes.subscriptions.settings.xray_management_mode", "agent"):
-                rotated = await rotate_subscription_client(
-                    initial.subscription.id,
-                    payload,
-                    db,
-                )
-
-            await db.refresh(initial.client)
-            self.assertEqual("revoked", initial.client.status)
-            self.assertEqual("active", rotated.status)
-            self.assertNotEqual(old_client_id, rotated.id)
-
-    async def test_expiration_revokes_xray_and_database_client(self) -> None:
+    async def test_expiration_revokes_panel_and_database_client(self) -> None:
         async with self.session_factory() as db:
             initial = await self.provision(db)
             expired_at = datetime.now(timezone.utc) - timedelta(minutes=1)
@@ -434,7 +411,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             initial.client.expires_at = expired_at
             await db.commit()
 
-            count = await expire_subscriptions(db, xray_factory=FakeXray)
+            count = await expire_subscriptions(db, panel_factory=FakePanel)
             self.assertEqual(1, count)
             await db.refresh(initial.subscription)
             await db.refresh(initial.client)
@@ -442,10 +419,10 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             self.assertEqual("revoked", initial.client.status)
             self.assertNotIn(
                 f"vpn-{initial.client.id}",
-                FakeXray.users["node-grpc:10085"],
+                FakePanel.users["https://master.example/base"],
             )
 
-    async def test_agent_expiration_updates_desired_state_without_direct_xray(self) -> None:
+    async def test_expiration_updates_master_and_database(self) -> None:
         async with self.session_factory() as db:
             initial = await self.provision(db)
             email = f"vpn-{initial.client.id}"
@@ -461,12 +438,12 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             await db.refresh(initial.client)
             self.assertEqual("expired", initial.subscription.status)
             self.assertEqual("revoked", initial.client.status)
-            self.assertIn(email, FakeXray.users["node-grpc:10085"])
+            self.assertIn(email, FakePanel.users["https://master.example/base"])
 
-    async def test_reconciliation_restores_after_xray_restart_and_removes_orphan(self) -> None:
+    async def test_reconciliation_restores_missing_and_removes_orphan(self) -> None:
         async with self.session_factory() as db:
             initial = await self.provision(db)
-            users = FakeXray.users["node-grpc:10085"]
+            users = FakePanel.users["https://master.example/base"]
             users.clear()
             users["vpn-9999"] = SimpleNamespace(email="vpn-9999")
             users["vpn-test"] = SimpleNamespace(email="vpn-test")
@@ -474,7 +451,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             report = await reconcile_node(
                 db,
                 self.node_id,
-                xray_factory=FakeXray,
+                panel_factory=FakePanel,
             )
 
             self.assertEqual(1, report.restored)

@@ -81,7 +81,6 @@ def main() -> None:
 
     # Allow-list задан явно, чтобы новые переменные окружения не попадали
     # незаметно в чувствительный снимок без проверки кода.
-    xray_config = json.loads((args.project / "xray/config.json").read_text())
     secret_names = {
         "BOT_TOKEN",
         "POSTGRES_PASSWORD",
@@ -89,7 +88,7 @@ def main() -> None:
         "SERVICE_API_TOKEN",
         "PAYMENT_WEBHOOK_SECRET",
         "DATABASE_URL",
-        "NODE_AGENT_TOKEN",
+        "THREEXUI_API_TOKEN",
         "GRAFANA_ADMIN_PASSWORD",
     }
     snapshot = {
@@ -98,7 +97,9 @@ def main() -> None:
             key: env.get(key) for key in sorted(secret_names) if env.get(key)
         },
         "authorization_headers": [basic, bearer],
-        "reality_private_keys": find_private_keys(xray_config),
+        # Reality private keys are owned by 3x-ui and are intentionally not
+        # copied into this control plane's debug snapshot.
+        "reality_private_keys": [],
         "vpn_uris": client_keys,
         "client_key_contents": client_keys,
     }

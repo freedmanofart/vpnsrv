@@ -15,7 +15,6 @@ from app.api.routes.vpn import router as vpn_router
 from app.api.routes.subscriptions import router as subscriptions_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.payments import router as payments_router
-from app.api.routes.agent import router as agent_router
 from app.api.routes.client import router as client_router
 
 from app.db.session import get_db, AsyncSessionLocal
@@ -190,7 +189,6 @@ app.include_router(subscriptions_router)
 app.include_router(vpn_router)
 app.include_router(admin_router)
 app.include_router(payments_router)
-app.include_router(agent_router)
 app.include_router(client_router)
 
 

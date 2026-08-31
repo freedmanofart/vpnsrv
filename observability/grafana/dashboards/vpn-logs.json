@@ -20,7 +20,7 @@
       "type": "logs",
       "title": "API / bot / worker logs",
       "datasource": {"type": "loki", "uid": "loki"},
-      "targets": [{"expr": "{service_name=~\"vpn-api|vpn-bot|vpn-worker|vpn-node-agent\"}", "refId": "A"}],
+      "targets": [{"expr": "{service_name=~\"vpn-api|vpn-bot|vpn-worker\"}", "refId": "A"}],
       "gridPos": {"h": 13, "w": 24, "x": 0, "y": 8}
     }
   ],
