@@ -747,6 +747,7 @@ async def get_vpn_client_config(
         "alpn",
         "path",
         "serviceName",
+        "mode",
     ):
         value = config.get(key)
 
@@ -758,8 +759,9 @@ async def get_vpn_client_config(
         params["flow"] = client.flow
 
     # HTTP Host для транспорта, если он отдельно задан
-    if config.get("host_header"):
-        params["host"] = config["host_header"]
+    transport_host = config.get("xhttp_host") or config.get("host_header")
+    if transport_host:
+        params["host"] = transport_host
 
     query = urlencode(params)
 

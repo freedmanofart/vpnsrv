@@ -165,7 +165,7 @@ Tailscale-интерфейс.
 
 ```bash
 curl -v --max-time 10 \
-  http://100.89.228.2:60628/panel/api/server/status
+  http://100.89.228.2:60628/panel/panel/api/server/status
 ```
 
 Коды `401`, `403` или `404` означают, что TCP-соединение уже работает и дальше
@@ -182,8 +182,24 @@ port: 60628
 basePath: /panel/
 ```
 
-Значение `basePath` должно совпадать с настройкой child. `/panel/` приведён как
-пример; при другом закрытом пути необходимо указать фактическое значение.
+Значение `basePath` должно совпадать с web base path child. В текущей
+конфигурации child он равен `/panel/`. 3x-ui master автоматически добавляет к
+нему системный маршрут `panel/api/...`, поэтому итоговый URL содержит два
+сегмента `panel`:
+
+```text
+http://100.89.228.2:60628/panel/panel/api/server/status
+```
+
+Это ожидаемое поведение, а не опечатка. Проверенный запрос с Bearer token scope
+`node-sync` возвращает HTTP `200`. Если master обращается к
+`/panel/api/server/status` и получает `404`, значит поле `basePath` в записи
+Nodes пустое. Ноду следует создать или изменить с `basePath: /panel/`.
+
+Порт `2096`, который журнал x-ui показывает как `Sub server`, не используется
+для связи master → child. Это отдельный сервер выдачи подписок. Управление
+нодой, Probe, heartbeat и синхронизация inbound выполняются через web/API порт
+`60628`.
 
 ## Вариант 2: открытый публичный порт
 
@@ -392,6 +408,19 @@ sudo firewall-cmd --reload
 - `enable`: включено;
 - `inboundSyncMode`: `all` либо `selected`.
 
+Для текущей тестовой child-ноды рабочий пример:
+
+```text
+scheme: http
+address: 100.89.228.2
+port: 60628
+basePath: /panel/
+```
+
+Master сформирует URL
+`http://100.89.228.2:60628/panel/panel/api/server/status`. Порт subscription
+server `2096` в настройках Nodes не используется.
+
 Запустить Test/Probe. Нода должна перейти в `online`, а master должен показать
 версию панели и состояние Xray. После этого создать или импортировать VLESS
 Reality inbound и назначить его child-ноде.
@@ -414,6 +443,41 @@ python3 scripts/configctl.py apply --services api worker
 
 Файл `.env` должен иметь права `0600`. Токен нельзя помещать в конфигурацию
 логической ноды, PostgreSQL, README, логи или скриншоты.
+
+### Доступ API-контейнера к loopback master
+
+Если x-ui master слушает только `127.0.0.1:41026`, контейнер `vpn-api` не может
+обращаться к нему напрямую. На основном сервере используется локальный socat
+proxy, доступный только на Docker bridge:
+
+```text
+172.18.0.1:41026 → 127.0.0.1:41026
+```
+
+Unit хранится в
+[`deploy/systemd/vpn-threexui-proxy.service`](../deploy/systemd/vpn-threexui-proxy.service).
+Перед установкой проверить фактический gateway сети контейнера:
+
+```bash
+docker inspect vpn-api \
+  --format '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}'
+```
+
+Если адрес отличается от `172.18.0.1`, изменить `bind=` в unit и
+`api_address` логических нод. Установка:
+
+```bash
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/vpn-threexui-proxy.service \
+  /etc/systemd/system/vpn-threexui-proxy.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now vpn-threexui-proxy.service
+sudo systemctl status vpn-threexui-proxy.service --no-pager
+```
+
+В production `api_address` логической ноды указывает на
+`http://172.18.0.1:41026/<закрытый-web-base-path-master>`. Порт `41026` не
+следует публиковать на внешнем интерфейсе.
 
 ## Привязка логической ноды VPN Admin
 

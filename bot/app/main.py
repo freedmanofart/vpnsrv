@@ -8,7 +8,13 @@ from urllib.parse import urlencode
 import httpx
 import qrcode
 from app.content import CONTENT, link as content_link, platform as get_platform, text as content_text
-from app.domain import country_label, profile_flow, rotation_payload, subscription_payload
+from app.domain import (
+    country_label,
+    profile_flow,
+    rotation_payload,
+    subscription_payload,
+    supports_threexui,
+)
 from app.logging_config import configure_logging
 from aiogram.exceptions import TelegramBadRequest
 from aiogram import Bot, Dispatcher, Router, F
@@ -403,13 +409,24 @@ async def create_access_grant(
 
 
 async def available_nodes() -> list[dict]:
-    return [
+    candidates = [
         node
         for node in await get_nodes()
         if node.get("status") == "active"
         and node.get("health_status") != "offline"
         and node.get("active_connections", 0) < node.get("capacity", 0)
         and country_label(node.get("region"))
+    ]
+    if not candidates:
+        return []
+    config_results = await asyncio.gather(
+        *(get_node_configs(node["id"]) for node in candidates),
+        return_exceptions=True,
+    )
+    return [
+        node
+        for node, configs in zip(candidates, config_results, strict=True)
+        if not isinstance(configs, Exception) and supports_threexui(configs)
     ]
 
 
@@ -892,6 +909,12 @@ async def vpn_reissue_handler(callback: CallbackQuery):
             await callback.answer("Активная подписка не найдена", show_alert=True)
             return
         nodes = await available_nodes()
+        if not nodes:
+            await callback.answer(
+                "Нет доступных нод 3x-ui для выпуска ключа",
+                show_alert=True,
+            )
+            return
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=country_label(n["region"]), callback_data=f"rotate_country:{subscription['id']}:{n['id']}")]
             for n in nodes
@@ -923,7 +946,13 @@ async def rotate_client_handler(callback: CallbackQuery):
         [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"rotate_confirm:{subscription_id}:{node_id}:{client_type}:vision")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rotate_country:{subscription_id}:{node_id}")],
     ])
-    await callback.message.edit_text("🔐 <b>Выберите профиль</b>\n\nСтарый ключ будет отозван.", reply_markup=keyboard, parse_mode="HTML")
+    await callback.message.edit_text(
+        "🔐 <b>Выберите профиль</b>\n\n"
+        "Новый ключ будет создан в inbound выбранной ноды через 3x-ui master. "
+        "Старый ключ будет отозван только после успешного создания нового.",
+        reply_markup=keyboard,
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
@@ -934,11 +963,22 @@ async def rotate_confirm_handler(callback: CallbackQuery):
         client = await rotate_vpn_client(int(subscription_id), int(node_id), client_type, profile_flow(profile))
         await show_screen(
             callback,
-            "✅ Ключ перевыпущен. Старый ключ отозван.",
+            "✅ Новый ключ создан на выбранной ноде 3x-ui. Старый ключ отозван.",
             vpn_ready_keyboard(),
         )
         await send_key_message(callback.message, client["id"], client_type)
         await callback.answer("Ключ обновлён")
+    except httpx.HTTPStatusError as exc:
+        logging.exception("3x-ui rejected VPN key rotation")
+        detail = ""
+        try:
+            detail = str(exc.response.json().get("detail", ""))
+        except ValueError:
+            pass
+        await callback.answer(
+            f"Не удалось создать ключ в 3x-ui{': ' + detail if detail else ''}",
+            show_alert=True,
+        )
     except Exception:
         logging.exception("Failed to rotate VPN key")
         await callback.answer("Не удалось перевыпустить ключ", show_alert=True)
@@ -1174,13 +1214,7 @@ async def buy_plan_handler(callback: CallbackQuery):
                 )
                 return
 
-        nodes = [
-            node
-            for node in await get_nodes()
-            if node.get("status") == "active"
-            and node.get("health_status") != "offline"
-            and node.get("active_connections", 0) < node.get("capacity", 0)
-        ]
+        nodes = await available_nodes()
         buttons = []
         for node in nodes:
             label = country_label(node.get("region"))
@@ -1476,8 +1510,8 @@ async def pay_qr_handler(
 
         elif status == 502:
             message = (
-                "❌ Не удалось добавить VPN "
-                "клиента на Xray."
+                "❌ Не удалось создать VPN-ключ "
+                "в 3x-ui."
             )
 
         else:

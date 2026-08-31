@@ -61,11 +61,12 @@ def _client_link(client: VPNClient, node: VPNNode, config: VPNNodeConfig) -> str
         "encryption": "none",
         "fp": client.fingerprint or data.get("fp", "chrome"),
     }
-    for key in ("sni", "pbk", "sid", "alpn", "path", "serviceName"):
+    for key in ("sni", "pbk", "sid", "alpn", "path", "serviceName", "mode"):
         if data.get(key) is not None:
             params[key] = data[key]
-    if data.get("host_header"):
-        params["host"] = data["host_header"]
+    transport_host = data.get("xhttp_host") or data.get("host_header")
+    if transport_host:
+        params["host"] = transport_host
     if client.flow:
         params["flow"] = client.flow
     return (

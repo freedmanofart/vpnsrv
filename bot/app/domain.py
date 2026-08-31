@@ -55,3 +55,19 @@ def rotation_payload(node_id: int, client_type: str, profile: str) -> dict:
         "flow": profile_flow(profile),
         "fingerprint": "chrome",
     }
+
+
+def supports_threexui(configs: list[dict]) -> bool:
+    """Return whether a logical node can provision VLESS through 3x-ui."""
+    for item in configs:
+        if item.get("protocol") != "vless":
+            continue
+        config = item.get("config")
+        if not isinstance(config, dict):
+            continue
+        address = str(config.get("api_address", ""))
+        inbound_id = str(config.get("inbound_tag", ""))
+        if address.startswith(("http://", "https://")) and inbound_id.isdigit():
+            if int(inbound_id) > 0:
+                return True
+    return False

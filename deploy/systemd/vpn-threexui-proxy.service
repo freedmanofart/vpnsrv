@@ -1,0 +1,18 @@
+[Unit]
+Description=Proxy 3x-ui loopback API to VPN Docker bridge
+After=network-online.target x-ui.service docker.service
+Wants=network-online.target
+Requires=x-ui.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP4-LISTEN:41026,bind=172.18.0.1,reuseaddr,fork TCP4:127.0.0.1:41026
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

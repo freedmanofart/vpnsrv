@@ -4,7 +4,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from bot.app.content import load_content
-from bot.app.domain import country_label, profile_flow, rotation_payload, subscription_payload
+from bot.app.domain import (
+    country_label,
+    profile_flow,
+    rotation_payload,
+    subscription_payload,
+    supports_threexui,
+)
 
 
 class CountryTests(unittest.TestCase):
@@ -50,6 +56,34 @@ class ProfileTests(unittest.TestCase):
                 "flow": "xtls-rprx-vision",
                 "fingerprint": "chrome",
             },
+        )
+
+    def test_only_http_master_and_numeric_inbound_are_eligible(self):
+        self.assertTrue(
+            supports_threexui(
+                [
+                    {
+                        "protocol": "vless",
+                        "config": {
+                            "api_address": "http://master.internal/prefix",
+                            "inbound_tag": "3",
+                        },
+                    }
+                ]
+            )
+        )
+        self.assertFalse(
+            supports_threexui(
+                [
+                    {
+                        "protocol": "vless",
+                        "config": {
+                            "api_address": "127.0.0.1:10085",
+                            "inbound_tag": "vless-reality",
+                        },
+                    }
+                ]
+            )
         )
 
 
