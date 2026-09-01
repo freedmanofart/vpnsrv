@@ -50,7 +50,7 @@ class AdminUserRotate(BaseModel):
     node_id: int
     client_type: str = "universal"
     flow: str = ""
-    fingerprint: str = "chrome"
+    fingerprint: str = "firefox"
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ def _client_link(client: VPNClient, node: VPNNode, config: VPNNodeConfig) -> str
     data = config.config
     host = data.get("host") or node.hostname or node.ip_address
     link_config = dict(data)
-    link_config["fp"] = client.fingerprint or data.get("fp", "chrome")
+    link_config["fp"] = data.get("fp") or client.fingerprint or "firefox"
     if client.flow:
         link_config["flow"] = client.flow
     return build_vless_url(

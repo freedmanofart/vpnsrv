@@ -154,7 +154,7 @@ async def activate_device(data: DeviceActivate, db: AsyncSession = Depends(get_d
 def build_client_uri(client: VPNClient, node: VPNNode, config: dict) -> str:
     host = config.get("host") or node.hostname or node.ip_address
     link_config = dict(config)
-    link_config["fp"] = client.fingerprint or config.get("fp", "chrome")
+    link_config["fp"] = config.get("fp") or client.fingerprint or "firefox"
     if client.flow:
         link_config["flow"] = client.flow
     return build_vless_url(

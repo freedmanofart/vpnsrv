@@ -361,7 +361,7 @@ async def create_access_grant(
                 "node_id": node_id,
                 "client_type": "universal",
                 "flow": "",
-                "fingerprint": "chrome",
+                "fingerprint": "firefox",
             },
         )
         response.raise_for_status()

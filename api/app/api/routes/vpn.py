@@ -746,7 +746,7 @@ async def get_vpn_client_config(
     port = config.get("port", 443)
 
     link_config = dict(config)
-    link_config["fp"] = client.fingerprint or config.get("fp", "chrome")
+    link_config["fp"] = config.get("fp") or client.fingerprint or "firefox"
     if client.flow:
         link_config["flow"] = client.flow
 

@@ -618,7 +618,7 @@ async def renew_subscription(
         protocol=protocol,
         client_type=(previous_client.client_type if previous_client else "universal"),
         flow=(previous_client.flow if previous_client else ""),
-        fingerprint=(previous_client.fingerprint if previous_client else "chrome"),
+        fingerprint=(previous_client.fingerprint if previous_client else "firefox"),
         client_uuid=new_uuid,
         status="provisioning",
         expires_at=new_expires_at,

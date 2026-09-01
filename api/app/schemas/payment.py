@@ -11,7 +11,7 @@ class PaymentCreate(BaseModel):
     node_id: int
     client_type: str = "universal"
     flow: str = ""
-    fingerprint: str = "chrome"
+    fingerprint: str = "firefox"
     idempotency_key: str = Field(min_length=8, max_length=255)
 
 
