@@ -17,11 +17,9 @@
 | Swagger | `http://localhost:8000/docs` | HTTP Basic или service token |
 | API health | `http://localhost:8000/health` | без авторизации |
 | DB health | `http://localhost:8000/db-health` | авторизация |
-| Grafana | `http://localhost:3000` | учётная запись Grafana |
 
 ```bash
 ssh -N -L 8000:127.0.0.1:8000 codex@192.168.10.60
-ssh -N -L 3000:127.0.0.1:3000 codex@192.168.10.60
 ```
 
 Откройте `http://localhost:8000/admin` в браузере. Логин и пароль задаются
@@ -55,7 +53,6 @@ ssh -N -L 2223:127.0.0.1:60628 root@159.223.22.59
 | Telegram | `BOT_TOKEN`, `TELEGRAM_CHANNEL_URL`, `SUPPORT_URL` | бот и ссылки |
 | Оплата | `PAYMENT_PROVIDER`, `PAYMENT_WEBHOOK_SECRET`, `YOOMONEY_*` | платежи |
 | PostgreSQL | `DATABASE_URL`, `POSTGRES_*` | прикладная БД |
-| Grafana | `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` | вход в Grafana |
 
 Переменные `XRAY_API_ADDRESS`, `XRAY_INBOUND_TAG`, `XRAY_MANAGEMENT_MODE`,
 `NODE_AGENT_TOKEN`, `NODE_AGENT_NODE_ID` и `CONTROL_PLANE_URL` удалены.

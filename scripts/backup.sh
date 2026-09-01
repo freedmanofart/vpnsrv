@@ -32,8 +32,7 @@ docker exec vpn-postgres pg_dump \
 # 3x-ui master, поэтому требует такой же защиты, как пароль.
 tar -C "$project_directory" -czf "$config_path" \
   .env \
-  docker-compose.yml \
-  observability
+  docker-compose.yml
 
 # Выявляем обрезанный или повреждённый дамп до удаления старой точки восстановления.
 # Сначала используем pg_restore хоста, а при его отсутствии — бинарник контейнера.

@@ -13,7 +13,6 @@ Telegram -> aiogram bot -> FastAPI -> PostgreSQL
                                       |-> локальный Xray
                                       +-> child-панели -> удалённый Xray
 
-Docker logs -> Grafana Alloy -> Loki -> Grafana
 ```
 
 Основной сервер запускает 3x-ui в роли master. Удалённые VPS регистрируются в
@@ -27,7 +26,6 @@ Docker logs -> Grafana Alloy -> Loki -> Grafana
 | `postgres` | Пользователи, тарифы, подписки, платежи и логические VPN-клиенты |
 | `worker` | Истечение доступа и reconciliation с 3x-ui master |
 | `3x-ui master` | Inbound-конфигурации, физические ноды, Xray и трафик |
-| `alloy`, `loki`, `grafana` | Сбор и просмотр логов control plane |
 
 ## Интеграция с 3x-ui
 
@@ -100,7 +98,7 @@ webhook, требуют service Bearer token или HTTP Basic админист�
 cp .env.example .env
 python3 scripts/configctl.py validate
 
-docker compose up -d postgres redis
+docker compose up -d postgres
 docker compose run --rm api alembic upgrade head
 docker compose up -d
 ```

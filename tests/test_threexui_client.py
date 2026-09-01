@@ -10,7 +10,6 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 from app.services.threexui import ThreeXUIClient
 

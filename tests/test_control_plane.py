@@ -13,7 +13,6 @@ from unittest import IsolatedAsyncioTestCase
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
 import app.main as main_module

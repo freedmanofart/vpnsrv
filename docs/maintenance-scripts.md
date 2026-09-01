@@ -32,7 +32,7 @@ python3 scripts/configctl.py apply --services api worker
 Создаёт:
 
 1. `vpn-db-<UTC>.dump` — PostgreSQL custom-format dump;
-2. `vpn-config-<UTC>.tar.gz` — `.env`, Compose и observability config.
+2. `vpn-config-<UTC>.tar.gz` — `.env` и Compose-конфигурация.
 
 ```bash
 sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/mnt/secure/vpn \

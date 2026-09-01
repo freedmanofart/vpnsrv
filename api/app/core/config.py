@@ -3,7 +3,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str
-    redis_url: str
     log_level: str = "INFO"
     admin_username: str = "admin"
     admin_password: str = "change_me"

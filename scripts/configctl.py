@@ -27,7 +27,6 @@ VARIABLES: dict[str, Variable] = {
     "POSTGRES_USER": Variable(required=True),
     "POSTGRES_PASSWORD": Variable(secret=True, required=True, generated_bytes=24),
     "DATABASE_URL": Variable(secret=True, required=True),
-    "REDIS_URL": Variable(required=True),
     "LOG_LEVEL": Variable(),
     "BOT_TOKEN": Variable(secret=True, required=True),
     "TELEGRAM_CHANNEL_URL": Variable(),
@@ -46,8 +45,6 @@ VARIABLES: dict[str, Variable] = {
     "WORKER_RUN_ONCE": Variable(),
     "THREEXUI_API_TOKEN": Variable(secret=True, required=True, generated_bytes=36),
     "THREEXUI_VERIFY_TLS": Variable(required=True),
-    "GRAFANA_ADMIN_USER": Variable(required=True),
-    "GRAFANA_ADMIN_PASSWORD": Variable(secret=True, required=True, generated_bytes=24),
 }
 
 

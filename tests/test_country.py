@@ -8,7 +8,6 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 from app.services.country import country_from_ip
 
