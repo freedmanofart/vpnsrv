@@ -94,9 +94,17 @@ async def attach_payment_receipt(
     payment = await db.get(Payment, payment_id)
     if payment is None or payment.user_id != data.user_id:
         raise HTTPException(status_code=404, detail="Payment not found")
-    if payment.provider != "manual_bank" or payment.status not in {"pending", "processing"}:
+    is_legacy_backfill = bool(
+        payment.provider == "manual_bank"
+        and payment.receipt_data is None
+        and (payment.details or {}).get("receipt")
+    )
+    if payment.provider != "manual_bank" or (
+        payment.status not in {"pending", "processing"} and not is_legacy_backfill
+    ):
         raise HTTPException(status_code=409, detail="Payment does not accept a receipt")
-    payment.status = "processing"
+    if payment.status == "pending":
+        payment.status = "processing"
     try:
         receipt_data = base64.b64decode(data.data_base64, validate=True)
     except (binascii.Error, ValueError) as exc:
