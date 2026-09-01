@@ -10,6 +10,7 @@ from app.content import CONTENT, link as content_link, platform as get_platform,
 from app.domain import (
     country_label,
     rotation_payload,
+    select_public_plans,
     subscription_payload,
     supports_threexui,
 )
@@ -43,7 +44,7 @@ YOOMONEY_PAYMENT_URL = content_link("payment")
 TRY_PAYMENT_URL = content_link("try_payment")
 PUBLIC_PLAN_CODES = tuple(
     item.strip()
-    for item in os.getenv("BOT_PLAN_CODES", "vpn_14d,vpn_30d,vpn_90d").split(",")
+    for item in os.getenv("BOT_PLAN_CODES", "").split(",")
     if item.strip()
 )
 
@@ -335,12 +336,7 @@ async def get_plans() -> list[dict]:
 
         response.raise_for_status()
 
-        plans = response.json()
-        selected = [plan for plan in plans if plan.get("code") in PUBLIC_PLAN_CODES]
-        if not selected:
-            return plans
-        order = {code: index for index, code in enumerate(PUBLIC_PLAN_CODES)}
-        return sorted(selected, key=lambda plan: order.get(plan.get("code"), 999))
+        return select_public_plans(response.json(), PUBLIC_PLAN_CODES)
 
 
 async def get_nodes() -> list[dict]:

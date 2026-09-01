@@ -39,6 +39,15 @@ def rotation_payload(node_id: int) -> dict:
     }
 
 
+def select_public_plans(plans: list[dict], configured_codes: tuple[str, ...]) -> list[dict]:
+    """Show every public API plan unless an explicit allowlist is configured."""
+    if not configured_codes:
+        return plans
+    selected = [plan for plan in plans if plan.get("code") in configured_codes]
+    order = {code: index for index, code in enumerate(configured_codes)}
+    return sorted(selected, key=lambda plan: order.get(plan.get("code"), 999))
+
+
 def supports_threexui(configs: list[dict]) -> bool:
     """Return whether a logical node can provision VLESS through 3x-ui."""
     for item in configs:

@@ -7,6 +7,7 @@ from bot.app.content import load_content
 from bot.app.domain import (
     country_label,
     rotation_payload,
+    select_public_plans,
     subscription_payload,
     supports_threexui,
 )
@@ -34,6 +35,19 @@ class KeyTests(unittest.TestCase):
                 "flow": "",
                 "fingerprint": "firefox",
             },
+        )
+
+
+class PlanSelectionTests(unittest.TestCase):
+    def test_empty_allowlist_shows_new_api_plans(self):
+        plans = [{"code": "old"}, {"code": "new-three-devices"}]
+        self.assertEqual(plans, select_public_plans(plans, ()))
+
+    def test_explicit_allowlist_filters_and_orders(self):
+        plans = [{"code": "one"}, {"code": "three"}, {"code": "unlimited"}]
+        self.assertEqual(
+            [{"code": "unlimited"}, {"code": "one"}],
+            select_public_plans(plans, ("unlimited", "one")),
         )
 
     def test_rotation_payload_has_one_key_variant(self):
