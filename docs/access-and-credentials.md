@@ -62,7 +62,9 @@ DATABASE_URL=postgresql+asyncpg://<user>:<password>@host.docker.internal:6432/vp
 `SERVICE_API_TOKEN` является общим высокопривилегированным секретом: его
 держат API, бот и операторские скрипты. Он не идентифицирует конечного Telegram-
 пользователя и не имеет срока действия; при компрометации сгенерируйте новый и
-одновременно пересоздайте все использующие его контейнеры.
+одновременно пересоздайте все использующие его контейнеры. Для этого используйте
+единую команду `configctl rotate --all-internal`; она также меняет
+`ADMIN_PASSWORD`, не печатает значения и перезапускает `api`, `bot` и `worker`.
 
 Redis, Grafana, Loki, Alloy, собственный Xray и node-agent удалены. Их
 переменные больше не используются.
@@ -73,14 +75,15 @@ Redis, Grafana, Loki, Alloy, собственный Xray и node-agent удал�
 cd /home/freedman/vpn-service
 python3 scripts/configctl.py validate
 python3 scripts/configctl.py get ADMIN_USERNAME
-python3 scripts/configctl.py get ADMIN_PASSWORD
-python3 scripts/configctl.py get ADMIN_PASSWORD --show-secret
-python3 scripts/configctl.py set ADMIN_PASSWORD '<new-password>'
-python3 scripts/configctl.py apply --services api
+python3 scripts/configctl.py rotate --all-internal --dry-run
+python3 scripts/configctl.py rotate --all-internal
 ```
 
-Обычный `get` маскирует секреты. `--show-secret` используйте только в
-защищённой SSH-сессии.
+Обычный `get` маскирует секреты. Ротация `PAYMENT_WEBHOOK_SECRET` требует
+отдельного обновления у платёжного провайдера: внесите выданное им значение
+через `configctl set`, затем выполните `configctl apply --services api worker`.
+См. полный порядок и границы автоматической ротации в
+[maintenance-scripts.md](maintenance-scripts.md#ротация-секретов).
 
 Проверка:
 
