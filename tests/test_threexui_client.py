@@ -83,3 +83,16 @@ class ThreeXUIClientTests(IsolatedAsyncioTestCase):
             users = await ThreeXUIClient("https://master.example/base").get_users("17")
         self.assertEqual(["vpn-42"], [user.email for user in users])
         self.assertTrue(FakeAsyncClient.requests[0][1].endswith("/panel/api/inbounds/list"))
+
+    async def test_get_client_traffic_uses_email_endpoint(self):
+        FakeAsyncClient.responses = [{
+            "success": True,
+            "obj": {"up": 1024, "down": 2048, "total": 4096},
+        }]
+        with (
+            patch("app.services.threexui.settings.threexui_api_token", "node-token"),
+            patch("app.services.threexui.httpx.AsyncClient", FakeAsyncClient),
+        ):
+            traffic = await ThreeXUIClient("https://master.example/base").get_client_traffic("vpn-42")
+        self.assertEqual(3072, traffic["up"] + traffic["down"])
+        self.assertTrue(FakeAsyncClient.requests[0][1].endswith("/panel/api/clients/traffic/vpn-42"))

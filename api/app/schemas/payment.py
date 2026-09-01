@@ -24,6 +24,9 @@ class PaymentReceiptCreate(BaseModel):
     telegram_file_id: str = Field(min_length=5, max_length=1024)
     telegram_file_unique_id: str | None = Field(default=None, max_length=255)
     media_type: str = Field(pattern=r"^(photo|document)$")
+    filename: str = Field(min_length=1, max_length=255)
+    mime_type: str = Field(max_length=128)
+    data_base64: str = Field(min_length=4, max_length=12_000_000)
 
 
 class PaymentWebhook(BaseModel):

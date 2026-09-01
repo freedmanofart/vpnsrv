@@ -253,6 +253,9 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
                 "telegram_file_id": "telegram-file-id",
                 "telegram_file_unique_id": "unique-id",
                 "media_type": "photo",
+                "filename": "receipt.jpg",
+                "mime_type": "image/jpeg",
+                "data_base64": base64.b64encode(b"fake-receipt").decode(),
             },
         )
         self.assertEqual(200, receipt.status_code, receipt.text)
@@ -261,6 +264,11 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             "telegram-file-id",
             receipt.json()["details"]["receipt"]["telegram_file_id"],
         )
+        downloaded = await self.client.get(
+            f"/admin/payments/{payment_id}/receipt", auth=self.admin_auth
+        )
+        self.assertEqual(200, downloaded.status_code, downloaded.text)
+        self.assertEqual(b"fake-receipt", downloaded.content)
 
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:

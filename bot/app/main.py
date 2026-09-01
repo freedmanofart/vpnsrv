@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import math
 import html
 from io import BytesIO
@@ -234,7 +235,6 @@ def vpn_ready_keyboard() -> InlineKeyboardMarkup:
 def active_vpn_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔑 Показать ключ и QR", callback_data="vpn_key")],
-        [InlineKeyboardButton(text="🔄 Перевыпустить / сменить страну", callback_data="vpn_reissue")],
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
     ])
 
@@ -256,10 +256,16 @@ def subscription_text(data: dict) -> str:
     expires_at = (subscription.get("expires_at") or "—").replace("T", " ").replace("+00:00", "")
     connections = client.get("max_connections", 0) if client else 0
     connection_text = "без ограничений" if connections == 0 else str(connections)
-    if client and client.get("traffic_limit_gb", 0) == 0:
+    traffic_limit_gb = client.get("traffic_limit_gb", 0) if client else 0
+    traffic_remaining = client.get("traffic_remaining_bytes") if client else None
+    if client and traffic_limit_gb == 0:
         traffic_text = "без ограничений"
+    elif traffic_remaining is not None:
+        traffic_text = human_traffic(traffic_remaining)
+    elif traffic_limit_gb:
+        traffic_text = f"{traffic_limit_gb} ГБ по тарифу"
     else:
-        traffic_text = human_traffic(client.get("traffic_remaining_bytes") if client else None)
+        traffic_text = "данные временно недоступны"
     return (
         "👤 <b>Управление подпиской</b>\n\n"
         f"Статус: {'🟢 Активна' if active else '🔴 Истекла'}\n"
@@ -874,7 +880,7 @@ async def device_handler(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"⬇️ Скачать {item['client']}", url=item["url"])],
-            [InlineKeyboardButton(text="💳 Оплатить VPN", callback_data=f"purchase_device:{platform_id}")],
+            [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data=f"purchase_device:{platform_id}")],
             [InlineKeyboardButton(text="⬅️ К устройствам", callback_data="devices")],
         ]
     )
@@ -1021,48 +1027,7 @@ async def vpn_status_handler(callback: CallbackQuery):
         subscription = data.get("subscription")
         vpn_client = data.get("vpn_client")
 
-        if not subscription:
-            text = (
-                "📡 <b>Мой VPN</b>\n\n"
-                "У вас пока нет активной подписки.\n\n"
-                "Выберите действие:"
-            )
-
-        else:
-            if subscription["status"] == "active":
-                subscription_status = "🟢 Активна"
-            else:
-                subscription_status = "🔴 Истекла"
-
-            expires_at = subscription.get("expires_at")
-
-            if expires_at:
-                expires_at = (
-                    expires_at
-                    .replace("T", " ")
-                    .replace("+00:00", "")
-                )
-            else:
-                expires_at = "—"
-
-            if vpn_client:
-                vpn_status = "🟢 Подключён"
-                protocol = vpn_client.get(
-                    "protocol",
-                    "unknown",
-                )
-            else:
-                vpn_status = "🔴 Не настроен"
-                protocol = "—"
-
-            text = (
-                "📡 <b>Мой VPN</b>\n\n"
-                f"Подписка: {subscription_status}\n"
-                f"VPN: {vpn_status}\n"
-                f"Протокол: <code>{protocol}</code>\n"
-                f"Действует до: "
-                f"<code>{expires_at} UTC</code>"
-            )
+        text = subscription_text(data)
 
         await show_screen(
             callback,
@@ -1361,9 +1326,19 @@ async def manual_payment_receipt_handler(message: Message, state: FSMContext, bo
     if message.photo:
         media = message.photo[-1]
         media_type = "photo"
+        filename = "receipt.jpg"
+        mime_type = "image/jpeg"
     else:
         media = message.document
         media_type = "document"
+        filename = media.file_name or "receipt"
+        mime_type = media.mime_type or "application/octet-stream"
+    receipt_buffer = BytesIO()
+    await bot.download(media, destination=receipt_buffer)
+    receipt_bytes = receipt_buffer.getvalue()
+    if len(receipt_bytes) > 8_000_000:
+        await message.answer("Файл чека слишком большой. Максимальный размер — 8 МБ.")
+        return
     await attach_payment_receipt(
         data["payment_id"],
         {
@@ -1371,6 +1346,9 @@ async def manual_payment_receipt_handler(message: Message, state: FSMContext, bo
             "telegram_file_id": media.file_id,
             "telegram_file_unique_id": media.file_unique_id,
             "media_type": media_type,
+            "filename": filename,
+            "mime_type": mime_type,
+            "data_base64": base64.b64encode(receipt_bytes).decode(),
         },
     )
     if BOT_ADMIN_CHAT_ID:
@@ -1649,7 +1627,7 @@ async def main():
         [
             BotCommand(command="start", description="Запустить бота"),
             BotCommand(command="menu", description="Главное меню"),
-            BotCommand(command="vpn", description="Мой VPN"),
+            BotCommand(command="vpn", description="Управление подпиской"),
             BotCommand(command="buy", description="Купить VPN"),
             BotCommand(command="help", description="Инструкция"),
         ]

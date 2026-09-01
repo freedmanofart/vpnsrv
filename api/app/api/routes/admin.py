@@ -5,7 +5,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Literal
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response as FastAPIResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -158,7 +158,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "nodes": [{"id": x.id, "name": x.name, "provider": x.provider, "region": x.region, "ip": x.ip_address, "status": x.status, "health": x.health_status, "latency_ms": x.latency_ms, "last_seen_at": x.last_seen_at, "capacity": x.capacity, "connections": x.active_connections} for x in nodes if x.status != "disabled"],
         "subscriptions": [{"id": x.id, "user_id": x.user_id, "plan_id": x.plan_id, "status": x.status, "expires_at": x.expires_at} for x in subscriptions],
         "clients": [{"id": x.id, "user_id": x.user_id, "subscription_id": x.subscription_id, "node_id": x.node_id, "client_type": x.client_type, "flow": x.flow, "max_connections": x.max_connections, "status": x.status, "expires_at": x.expires_at, "last_connected_at": x.last_connected_at, "last_ip": x.last_ip, "link_overridden": bool(x.config_override)} for x in clients],
-        "payments": [{"id": x.id, "user_id": x.user_id, "provider": x.provider, "amount": str(x.amount), "currency": x.currency, "status": x.status, "subscription_id": x.subscription_id, "details": x.details, "created_at": x.created_at} for x in payments],
+        "payments": [{"id": x.id, "user_id": x.user_id, "provider": x.provider, "amount": str(x.amount), "currency": x.currency, "status": x.status, "subscription_id": x.subscription_id, "has_receipt": x.receipt_data is not None, "details": x.details, "created_at": x.created_at} for x in payments],
         "payment_methods": [{"id": x.id, "code": x.code, "name": x.name, "url": x.url, "sort_order": x.sort_order, "is_active": x.is_active, "has_image": x.image_data is not None} for x in sorted(payment_methods, key=lambda item: (item.sort_order, item.id))],
         "devices": [{"id": x.id, "user_id": x.user_id, "name": x.name, "platform": x.platform, "status": x.status, "last_seen_at": x.last_seen_at, "expires_at": x.expires_at} for x in devices],
         "debug": [{"id": x.id, "created_by": x.created_by, "reason": x.reason, "status": x.status, "expires_at": x.expires_at} for x in debug_sessions],
@@ -564,6 +564,18 @@ async def update_payment_status(
     return {"id": payment.id, "status": payment.status}
 
 
+@router.get("/payments/{payment_id}/receipt", dependencies=[Depends(require_admin)])
+async def get_payment_receipt(payment_id: int, db: AsyncSession = Depends(get_db)):
+    payment = await db.get(Payment, payment_id)
+    if payment is None or payment.receipt_data is None:
+        raise HTTPException(status_code=404, detail="Payment receipt not found")
+    return FastAPIResponse(
+        content=payment.receipt_data,
+        media_type=payment.receipt_mime_type or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{payment.receipt_filename or "receipt"}"'},
+    )
+
+
 ADMIN_HTML = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VPN Admin</title><style>
@@ -588,7 +600,7 @@ function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return Stri
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id))}
 function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
-function paymentActions(p){if(['pending','processing'].includes(p.status))return `<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return `<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return ''}
+function paymentActions(p){let receipt=p.has_receipt?`<button onclick="window.open('/admin/payments/${p.id}/receipt','_blank')">Открыть чек</button> `:'';if(['pending','processing'].includes(p.status))return receipt+`<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return receipt+`<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return receipt}
 async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';document.getElementById('metrics').innerHTML=sections.map(x=>`<div class="card"><div>${x}</div><div class="metric">${state[x].length}</div></div>`).join('');table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button onclick="show('${x}')">${x}</button>`).join('');
 async function sendForm(e,url,map){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));for(let k of ['duration_days','max_connections','traffic_limit_gb','price','capacity','node_id','port'])if(k in f)f[k]=Number(f[k]);if(map)f=map(f);try{await request(url(f),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await load()}catch(err){alert(err.message)}}

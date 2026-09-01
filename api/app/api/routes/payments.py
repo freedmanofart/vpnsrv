@@ -1,6 +1,8 @@
 import hashlib
 import hmac
 import json
+import base64
+import binascii
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import ValidationError
@@ -95,6 +97,15 @@ async def attach_payment_receipt(
     if payment.provider != "manual_bank" or payment.status not in {"pending", "processing"}:
         raise HTTPException(status_code=409, detail="Payment does not accept a receipt")
     payment.status = "processing"
+    try:
+        receipt_data = base64.b64decode(data.data_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid receipt data") from exc
+    if not receipt_data or len(receipt_data) > 8_000_000:
+        raise HTTPException(status_code=413, detail="Receipt must be between 1 byte and 8 MB")
+    payment.receipt_data = receipt_data
+    payment.receipt_mime_type = data.mime_type
+    payment.receipt_filename = data.filename
     payment.details = {
         **(payment.details or {}),
         "receipt": {
