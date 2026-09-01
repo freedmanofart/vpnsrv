@@ -1,4 +1,5 @@
 import os
+import base64
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -202,6 +203,22 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(200, created.status_code, created.text)
         method_id = created.json()["id"]
+        image = await self.client.put(
+            f"/payment-methods/{method_id}/image",
+            auth=self.admin_auth,
+            json={
+                "filename": "qr.png",
+                "mime_type": "image/png",
+                "data_base64": base64.b64encode(b"fake-png").decode(),
+            },
+        )
+        self.assertEqual(200, image.status_code, image.text)
+        self.assertTrue(image.json()["has_image"])
+        downloaded = await self.client.get(
+            f"/payment-methods/{method_id}/image", headers=self.service_headers
+        )
+        self.assertEqual(b"fake-png", downloaded.content)
+        self.assertEqual("image/png", downloaded.headers["content-type"])
         visible = await self.client.get("/payment-methods", headers=self.service_headers)
         self.assertEqual(["sbp"], [item["code"] for item in visible.json()])
         disabled = await self.client.patch(

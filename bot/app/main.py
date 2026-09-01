@@ -378,6 +378,15 @@ async def get_payment_methods() -> list[dict]:
         return response.json()
 
 
+async def get_payment_method_image(method_id: int) -> bytes | None:
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.get(f"/payment-methods/{method_id}/image")
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.content
+
+
 async def get_node_configs(node_id: int) -> list[dict]:
     async with api_client(
         base_url=API_URL,
@@ -1298,6 +1307,13 @@ async def payment_method_handler(callback: CallbackQuery, state: FSMContext):
             amount=payment["amount"], currency=payment["currency"],
         )
         requisites = method.get("url") or "Реквизиты ещё не заполнены оператором в VPN Admin."
+        if method.get("has_image"):
+            image = await get_payment_method_image(method["id"])
+            if image:
+                await callback.message.answer_photo(
+                    BufferedInputFile(image, filename=f"{method['code']}-qr.png"),
+                    caption=f"QR для оплаты: {html.escape(method['name'])}",
+                )
         await callback.message.answer(
             f"🏦 <b>{html.escape(method['name'])}</b>\n\n"
             f"Сумма: <b>{payment['amount']} {payment['currency']}</b>\n"
