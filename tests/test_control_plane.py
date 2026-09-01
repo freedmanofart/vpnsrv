@@ -202,6 +202,23 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(401, unauthenticated.status_code)
 
+    async def test_temporary_registration_opens_cabinet_without_email(self) -> None:
+        from app.core.config import settings
+
+        previous = settings.cabinet_allow_temporary_registration
+        settings.cabinet_allow_temporary_registration = True
+        try:
+            response = await self.client.post(
+                "/web/temporary-register", follow_redirects=False
+            )
+            self.assertEqual(303, response.status_code, response.text)
+            self.assertEqual("/cabinet", response.headers["location"])
+            cabinet = await self.client.get("/cabinet")
+            self.assertEqual(200, cabinet.status_code, cabinet.text)
+            self.assertIn("Приобрести или продлить", cabinet.text)
+        finally:
+            settings.cabinet_allow_temporary_registration = previous
+
     async def test_plan_delete_rejects_used_and_removes_unused(self) -> None:
         used = await self.client.delete("/plans/1", headers=self.service_headers)
         self.assertEqual(409, used.status_code, used.text)

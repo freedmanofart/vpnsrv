@@ -75,6 +75,12 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _temporary_registration_button() -> str:
+    if not settings.cabinet_allow_temporary_registration:
+        return ""
+    return '<form method="post" action="/web/temporary-register" class="actions"><button class="button primary" type="submit">Зарегистрироваться без email</button></form><p class="muted">Временный вход действует только в этом браузере. Добавьте email позже, чтобы не потерять доступ.</p>'
+
+
 async def _plans(db: AsyncSession) -> list[Plan]:
     result = await db.execute(
         select(Plan).where(Plan.is_active.is_(True), Plan.is_public.is_(True)).order_by(Plan.price, Plan.duration_days)
@@ -108,7 +114,7 @@ def _shell(content: str, *, title: str = "Freedom VPN") -> str:
 async def landing(db: AsyncSession = Depends(get_db)):
     plans = await _plans(db)
     body = f"""<div class=\"wrap\"><nav><a class=\"brand\" href=\"/\"><img src=\"/static/freedom-vpn-logo.png\" alt=\"\">Freedom <i>VPN</i></a><div class=\"links\"><a href=\"#advantages\">Возможности</a><a href=\"#plans\">Тарифы</a><a class=\"button\" href=\"/cabinet\">Войти</a></div></nav></div>
-<header class=\"hero\"><div class=\"wrap hero-grid\"><div><div class=\"eyebrow\">Доступ к интернету без зависимости от Telegram</div><h1>Свобода подключения на всех устройствах</h1><p class=\"lead\">Оформляйте подписку и сохраняйте резервный доступ к VPN в защищённом веб-кабинете.</p><div class=\"actions\"><a class=\"button primary\" href=\"#plans\">Выбрать тариф</a><a class=\"button\" href=\"/cabinet\">Управление подпиской</a></div></div><div class=\"preview\"><img class=\"preview-logo\" src=\"/static/freedom-vpn-logo.png\" alt=\"Freedom VPN\"><p class=\"status\">● Защищённое подключение</p><div class=\"key\"><span class=\"muted\">Ключ доступа</span><code>vless://••••••••••••••••••••</code></div><div class=\"stats\"><div class=\"stat\"><small class=\"muted\">Локация</small><br><b>Вы выбираете</b></div><div class=\"stat\"><small class=\"muted\">Устройства</small><br><b>По тарифу</b></div><div class=\"stat\"><small class=\"muted\">Доступ</small><br><b>24/7</b></div></div></div></div></header>
+<header class=\"hero\"><div class=\"wrap hero-grid\"><div><div class=\"eyebrow\">Доступ к интернету без зависимости от Telegram</div><h1>Свобода подключения на всех устройствах</h1><p class=\"lead\">Оформляйте подписку и сохраняйте резервный доступ к VPN в защищённом веб-кабинете.</p><div class=\"actions\"><a class=\"button primary\" href=\"#plans\">Выбрать тариф</a><a class=\"button\" href=\"/cabinet\">Управление подпиской</a></div>{_temporary_registration_button()}</div><div class=\"preview\"><img class=\"preview-logo\" src=\"/static/freedom-vpn-logo.png\" alt=\"Freedom VPN\"><p class=\"status\">● Защищённое подключение</p><div class=\"key\"><span class=\"muted\">Ключ доступа</span><code>vless://••••••••••••••••••••</code></div><div class=\"stats\"><div class=\"stat\"><small class=\"muted\">Локация</small><br><b>Вы выбираете</b></div><div class=\"stat\"><small class=\"muted\">Устройства</small><br><b>По тарифу</b></div><div class=\"stat\"><small class=\"muted\">Доступ</small><br><b>24/7</b></div></div></div></div></header>
 <main><section id=\"plans\"><div class=\"wrap\"><div class=\"eyebrow\">Тарифы из административной панели</div><h2>Выберите свой формат</h2><p class=\"muted\">Цена, срок, трафик и число подключений синхронизированы с VPN API.</p><div class=\"plans\">{_plan_cards(plans)}</div></div></section><section id=\"advantages\" class=\"alt\"><div class=\"wrap features\"><article class=\"feature\"><h3>Резервный вход</h3><p class=\"muted\">Персональная ссылка приходит на почту и работает независимо от Telegram.</p></article><article class=\"feature\"><h3>Один источник данных</h3><p class=\"muted\">Подписка, лимиты и VPN-ключ берутся из общей базы и 3x-ui.</p></article><article class=\"feature\"><h3>Для всех устройств</h3><p class=\"muted\">iOS, Android, Windows, macOS и роутеры.</p></article></div></section></main><footer><div class=\"wrap\">Freedom VPN · Управление подпиской даже при недоступности Telegram</div></footer>
 <div class=\"modal\" id=\"register\"><div class=\"modal-card\"><h3>Создать веб-кабинет</h3><p class=\"muted\">Ссылка для входа будет отправлена на указанную почту.</p><input id=\"email\" type=\"email\" autocomplete=\"email\" placeholder=\"you@example.com\"><input id=\"plan\" type=\"hidden\"><p id=\"result\"></p><div class=\"actions\"><button class=\"button\" onclick=\"closeModal()\">Отмена</button><button class=\"button primary\" onclick=\"register()\">Отправить ссылку</button></div></div></div>
 <script>const modal=document.getElementById('register');document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>{{document.getElementById('plan').value=b.dataset.plan;modal.classList.add('open')}});function closeModal(){{modal.classList.remove('open')}}async function register(){{const out=document.getElementById('result');out.className='';out.textContent='Отправляем…';const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('email').value,plan_id:Number(document.getElementById('plan').value)||null}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка регистрации')}};</script>"""
@@ -171,6 +177,34 @@ async def telegram_cabinet_link(data: TelegramCabinetLink, db: AsyncSession = De
     return {"message": "Ссылка для входа отправлена на почту", "expires_at": expires}
 
 
+@router.post("/web/temporary-register")
+async def temporary_register(db: AsyncSession = Depends(get_db)):
+    if not settings.cabinet_allow_temporary_registration:
+        raise HTTPException(status_code=404, detail="Временная регистрация отключена")
+    user = User(
+        telegram_id=-secrets.randbelow(9_000_000_000_000_000) - 1,
+        status="active",
+    )
+    db.add(user)
+    await db.flush()
+    raw = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc) + timedelta(days=settings.cabinet_token_ttl_days)
+    db.add(CabinetAccessToken(user_id=user.id, token_hash=_digest(raw), expires_at=expires))
+    await db.commit()
+    response = RedirectResponse("/cabinet", status_code=303, headers=_headers())
+    secure = urlparse(settings.public_base_url).scheme == "https"
+    response.set_cookie(
+        COOKIE,
+        raw,
+        max_age=settings.cabinet_token_ttl_days * 86400,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
 async def _access(raw: str | None, db: AsyncSession) -> tuple[User, CabinetAccessToken] | None:
     if not raw:
         return None
@@ -207,7 +241,7 @@ async def cabinet_access(token: str, db: AsyncSession = Depends(get_db)):
 async def cabinet(cabinet_token: str | None = Cookie(default=None, alias=COOKIE), db: AsyncSession = Depends(get_db)):
     found = await _access(cabinet_token, db)
     if found is None:
-        body = '<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo.png" alt="">Freedom <i>VPN</i></a></nav><main class="cabinet"><div class="panel"><h2>Вход в кабинет</h2><p class="muted">Откройте персональную ссылку из письма. Если ссылки ещё нет, выберите тариф и зарегистрируйтесь.</p><a class="button primary" href="/#plans">Получить ссылку</a></div></main></div>'
+        body = f'<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo.png" alt="">Freedom <i>VPN</i></a></nav><main class="cabinet"><div class="panel"><h2>Вход в кабинет</h2><p class="muted">Откройте персональную ссылку из письма. Если ссылки ещё нет, выберите тариф и зарегистрируйтесь.</p><a class="button" href="/#plans">Получить ссылку по email</a>{_temporary_registration_button()}</div></main></div>'
         return HTMLResponse(_shell(body, title="Вход — Freedom VPN"), status_code=401, headers=_headers())
     user, access = found
     access.last_used_at = datetime.now(timezone.utc)

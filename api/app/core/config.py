@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     threexui_verify_tls: bool = True
     public_base_url: str = "http://localhost:8000"
     cabinet_token_ttl_days: int = 365
+    cabinet_allow_temporary_registration: bool = False
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""

@@ -53,6 +53,9 @@ SUPPORT_URL = content_link("support")
 YOOMONEY_PAYMENT_URL = content_link("payment")
 TRY_PAYMENT_URL = content_link("try_payment")
 WEB_CABINET_URL = os.getenv("WEB_CABINET_URL", "").strip()
+WEB_SITE_URL = os.getenv("WEB_SITE_URL", "").strip()
+if not WEB_SITE_URL and WEB_CABINET_URL:
+    WEB_SITE_URL = WEB_CABINET_URL.removesuffix("/cabinet").rstrip("/") + "/"
 WELCOME_LOGO = Path(__file__).resolve().parent / "static" / "freedom-vpn-logo.png"
 PUBLIC_PLAN_CODES = tuple(
     item.strip()
@@ -143,17 +146,14 @@ def popup_menu() -> ReplyKeyboardMarkup:
     )
 
 
-def welcome_keyboard() -> ReplyKeyboardMarkup:
+def welcome_keyboard() -> InlineKeyboardMarkup:
     site = (
-        KeyboardButton(text="🌐 Сайт", web_app=WebAppInfo(url=WEB_CABINET_URL))
-        if WEB_CABINET_URL.startswith("https://")
-        else KeyboardButton(text="🌐 Сайт")
+        InlineKeyboardButton(text="🌐 Сайт", url=WEB_SITE_URL)
+        if WEB_SITE_URL
+        else InlineKeyboardButton(text="🌐 Сайт", callback_data="site_missing")
     )
-    return ReplyKeyboardMarkup(
-        keyboard=[[site, KeyboardButton(text="✉️ Email")]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-        input_field_placeholder="Выберите способ входа",
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[site, InlineKeyboardButton(text="✉️ Email", callback_data="cabinet_email")]],
     )
 
 
@@ -633,6 +633,10 @@ async def start_handler(message: Message):
             reply_markup=welcome_keyboard(),
             parse_mode="HTML",
         )
+        await message.answer(
+            "Меню доступно по кнопке справа от поля ввода.",
+            reply_markup=popup_menu(),
+        )
 
     except httpx.HTTPError:
         logging.exception(
@@ -713,28 +717,19 @@ async def popup_vpn_handler(message: Message):
     await vpn_command_handler(message)
 
 
-@router.message(F.text == "🌐 Сайт")
-async def welcome_site_handler(message: Message):
-    if WEB_CABINET_URL:
-        await message.answer(
-            f'🌐 <a href="{html.escape(WEB_CABINET_URL)}">Открыть веб-кабинет Freedom VPN</a>',
-            parse_mode="HTML",
-            reply_markup=popup_menu(),
-        )
-    else:
-        await message.answer(
-            "Веб-кабинет пока не настроен.",
-            reply_markup=popup_menu(),
-        )
+@router.callback_query(F.data == "site_missing")
+async def site_missing_handler(callback: CallbackQuery):
+    await callback.answer("Ссылка на сайт пока не настроена", show_alert=True)
 
 
-@router.message(F.text == "✉️ Email")
-async def welcome_email_handler(message: Message, state: FSMContext):
+@router.callback_query(F.data == "cabinet_email")
+async def welcome_email_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EmailCabinetFlow.waiting_email)
-    await message.answer(
+    await callback.message.answer(
         "✉️ Введите email. На него будет отправлена персональная ссылка на web-кабинет с вашей текущей подпиской.",
         reply_markup=popup_menu(),
     )
+    await callback.answer()
 
 
 @router.message(EmailCabinetFlow.waiting_email)
