@@ -620,6 +620,7 @@ async def renew_subscription(
         flow=(previous_client.flow if previous_client else ""),
         fingerprint=(previous_client.fingerprint if previous_client else "firefox"),
         max_connections=plan.max_connections,
+        traffic_limit_gb=plan.traffic_limit_gb,
         client_uuid=new_uuid,
         status="provisioning",
         expires_at=new_expires_at,
@@ -653,6 +654,7 @@ async def renew_subscription(
             expiry_time=int(new_expires_at.timestamp() * 1000),
             telegram_id=user.telegram_id,
             limit_ip=new_client.max_connections,
+            total_gb=new_client.traffic_limit_gb * 1024 * 1024 * 1024,
         )
 
     except ThreeXUIError as exc:
@@ -789,6 +791,7 @@ async def rotate_subscription_client(
         flow=data.flow,
         fingerprint=data.fingerprint,
         max_connections=plan.max_connections,
+        traffic_limit_gb=plan.traffic_limit_gb,
         client_uuid=str(uuid4()),
         status="provisioning",
         expires_at=subscription.expires_at,
@@ -808,6 +811,7 @@ async def rotate_subscription_client(
             expiry_time=int(subscription.expires_at.timestamp() * 1000),
             telegram_id=user.telegram_id,
             limit_ip=new_client.max_connections,
+            total_gb=new_client.traffic_limit_gb * 1024 * 1024 * 1024,
         )
     except ThreeXUIError as exc:
         await db.rollback()

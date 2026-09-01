@@ -74,6 +74,7 @@ class FakePanel:
         telegram_id: int = 0,
         limit_ip: int = 0,
         limit_hwid: int = 0,
+        total_gb: int = 0,
     ) -> None:
         if self.fail_add:
             raise ThreeXUIError("simulated add failure")
@@ -90,6 +91,7 @@ class FakePanel:
             telegram_id=telegram_id,
             limit_ip=limit_ip,
             limit_hwid=limit_hwid,
+            total_gb=total_gb,
         )
 
     async def remove_vless_user(self, inbound_tag: str, email: str) -> None:

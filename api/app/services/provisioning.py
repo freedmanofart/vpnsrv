@@ -143,6 +143,7 @@ async def provision_subscription(
         flow=flow,
         fingerprint=fingerprint,
         max_connections=plan.max_connections,
+        traffic_limit_gb=plan.traffic_limit_gb,
         client_uuid=str(uuid4()),
         status="active",
         expires_at=expires_at,
@@ -167,6 +168,7 @@ async def provision_subscription(
             expiry_time=int(subscription.expires_at.timestamp() * 1000),
             telegram_id=user.telegram_id,
             limit_ip=client.max_connections,
+            total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
         )
     except ThreeXUIError as exc:
         await db.rollback()

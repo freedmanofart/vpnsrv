@@ -141,12 +141,14 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
                 "name": "Unused",
                 "duration_days": 5,
                 "max_connections": 3,
+                "traffic_limit_gb": 250,
                 "price": "2.00",
                 "currency": "USD",
             },
         )
         self.assertEqual(200, created.status_code, created.text)
         self.assertEqual(3, created.json()["max_connections"])
+        self.assertEqual(250, created.json()["traffic_limit_gb"])
         plan_id = created.json()["id"]
         deleted = await self.client.delete(
             f"/plans/{plan_id}", headers=self.service_headers
@@ -191,6 +193,25 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             json={"status": "deleted"},
         )
         self.assertEqual(422, invalid.status_code, invalid.text)
+
+    async def test_admin_manages_public_payment_methods(self) -> None:
+        created = await self.client.post(
+            "/payment-methods",
+            auth=self.admin_auth,
+            json={"code": "sbp", "name": "СБП, QR (рубли)", "sort_order": 10},
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        method_id = created.json()["id"]
+        visible = await self.client.get("/payment-methods", headers=self.service_headers)
+        self.assertEqual(["sbp"], [item["code"] for item in visible.json()])
+        disabled = await self.client.patch(
+            f"/payment-methods/{method_id}",
+            auth=self.admin_auth,
+            json={"is_active": False},
+        )
+        self.assertEqual(200, disabled.status_code, disabled.text)
+        visible = await self.client.get("/payment-methods", headers=self.service_headers)
+        self.assertEqual([], visible.json())
 
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:

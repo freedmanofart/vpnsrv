@@ -5,8 +5,11 @@ from tempfile import TemporaryDirectory
 
 from bot.app.content import load_content
 from bot.app.domain import (
+    PLAN_TIERS,
     country_label,
     rotation_payload,
+    plan_tier,
+    plans_by_tier,
     select_public_plans,
     subscription_payload,
     supports_threexui,
@@ -49,6 +52,17 @@ class PlanSelectionTests(unittest.TestCase):
             [{"code": "unlimited"}, {"code": "one"}],
             select_public_plans(plans, ("unlimited", "one")),
         )
+
+    def test_plans_are_grouped_by_connection_tier(self):
+        plans = [
+            {"code": "lite_1m", "max_connections": 5},
+            {"code": "standard_1m", "max_connections": 15},
+            {"code": "ultra_1m", "max_connections": 30},
+        ]
+        grouped = plans_by_tier(plans)
+        self.assertEqual(["lite", "standard", "ultra"], list(grouped))
+        self.assertEqual("standard", plan_tier(plans[1]))
+        self.assertEqual(30, PLAN_TIERS["ultra"]["connections"])
 
     def test_rotation_payload_has_one_key_variant(self):
         self.assertEqual(

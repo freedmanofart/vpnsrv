@@ -51,6 +51,7 @@ class ThreeXUIClientTests(IsolatedAsyncioTestCase):
             await client.add_vless_user(
                 "17", "uuid-1", "vpn-42", flow="xtls-rprx-vision",
                 expiry_time=1893456000000, telegram_id=12345, limit_ip=3,
+                total_gb=250 * 1024 * 1024 * 1024,
             )
             await client.remove_vless_user("17", "vpn-42")
 
@@ -61,6 +62,7 @@ class ThreeXUIClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(1893456000000, add[2]["json"]["client"]["expiryTime"])
         self.assertEqual(12345, add[2]["json"]["client"]["tgId"])
         self.assertEqual(3, add[2]["json"]["client"]["limitIp"])
+        self.assertEqual(250 * 1024 * 1024 * 1024, add[2]["json"]["client"]["totalGB"])
         self.assertEqual("Bearer node-token", add[2]["headers"]["Authorization"])
         self.assertIn("clients/del/vpn-42?keepTraffic=1", FakeAsyncClient.requests[1][1])
 

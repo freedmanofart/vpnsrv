@@ -494,6 +494,7 @@ async def create_vpn_client(
         flow="",
         fingerprint="chrome",
         max_connections=plan.max_connections,
+        traffic_limit_gb=plan.traffic_limit_gb,
         client_uuid=str(uuid4()),
         status="active",
         expires_at=subscription.expires_at,
@@ -522,6 +523,7 @@ async def create_vpn_client(
                 expiry_time=int(subscription.expires_at.timestamp() * 1000),
                 telegram_id=user.telegram_id,
                 limit_ip=client.max_connections,
+                total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
             )
         except ThreeXUIError:
             await db.rollback()

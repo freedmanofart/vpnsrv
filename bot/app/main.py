@@ -8,7 +8,10 @@ import httpx
 import qrcode
 from app.content import CONTENT, link as content_link, platform as get_platform, text as content_text
 from app.domain import (
+    PLAN_TIERS,
     country_label,
+    plan_tier,
+    plans_by_tier,
     rotation_payload,
     select_public_plans,
     subscription_payload,
@@ -56,6 +59,7 @@ class PromoFlow(StatesGroup):
 class PurchaseFlow(StatesGroup):
     waiting_device = State()
     waiting_country = State()
+    waiting_tier = State()
     waiting_plan = State()
 
 
@@ -144,6 +148,16 @@ def purchase_plans_keyboard(plans: list[dict]) -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Выберите тариф",
+    )
+
+
+def purchase_tiers_keyboard(tiers: dict[str, list[dict]]) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=PLAN_TIERS[key]["label"])] for key in tiers]
+        + [[KeyboardButton(text="⬅️ Главное меню")]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите количество подключений",
     )
     support_button = (
         InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)
@@ -349,6 +363,13 @@ async def get_nodes() -> list[dict]:
 
         response.raise_for_status()
 
+        return response.json()
+
+
+async def get_payment_methods() -> list[dict]:
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.get("/payment-methods")
+        response.raise_for_status()
         return response.json()
 
 
@@ -648,22 +669,26 @@ async def popup_home_handler(message: Message, state: FSMContext):
     await message.answer(content_text("main_menu"), parse_mode="HTML", reply_markup=popup_menu())
 
 
-async def show_reply_plans(message: Message, state: FSMContext, node: dict) -> None:
+async def show_reply_tiers(message: Message, state: FSMContext, node: dict) -> None:
     plans = await get_plans()
     if not plans:
         await state.clear()
         await message.answer("Сейчас нет доступных тарифов.", reply_markup=popup_menu())
         return
-    await state.update_data(
-        node_id=node["id"],
-        plans={plan_button_label(plan): plan for plan in plans},
-    )
-    await state.set_state(PurchaseFlow.waiting_plan)
+    tiers = plans_by_tier(plans)
+    if not tiers:
+        await state.clear()
+        await message.answer("Тарифные пакеты временно не настроены.", reply_markup=popup_menu())
+        return
+    await state.update_data(node_id=node["id"], all_plans=plans, tiers=tiers)
+    await state.set_state(PurchaseFlow.waiting_tier)
     await message.answer(
-        "💳 <b>Тарифы</b>\n\n"
-        "Выберите срок доступа. Цена и срок берутся из актуального тарифа VPN API.",
+        "💳 <b>Выберите пакет</b>\n\n"
+        "🛴 <b>Лайт</b> — до 5 подключений, 250 ГБ\n"
+        "🔥 <b>Стандарт</b> — до 15 подключений, 650 ГБ\n"
+        "🚀 <b>Ультра</b> — до 30 подключений, 3 ТБ",
         parse_mode="HTML",
-        reply_markup=purchase_plans_keyboard(plans),
+        reply_markup=purchase_tiers_keyboard(tiers),
     )
 
 
@@ -683,7 +708,7 @@ async def reply_device_handler(message: Message, state: FSMContext):
         return
     await state.update_data(platform_id=item["id"])
     if len(nodes) == 1:
-        await show_reply_plans(message, state, nodes[0])
+        await show_reply_tiers(message, state, nodes[0])
         return
     await state.update_data(nodes={country_label(node["region"]): node for node in nodes})
     await state.set_state(PurchaseFlow.waiting_country)
@@ -701,7 +726,28 @@ async def reply_country_handler(message: Message, state: FSMContext):
     if not node:
         await message.answer("Выберите страну кнопкой ниже.")
         return
-    await show_reply_plans(message, state, node)
+    await show_reply_tiers(message, state, node)
+
+
+@router.message(PurchaseFlow.waiting_tier)
+async def reply_tier_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    tier = next(
+        (key for key in data.get("tiers", {}) if PLAN_TIERS[key]["label"] == message.text),
+        None,
+    )
+    plans = data.get("tiers", {}).get(tier, []) if tier else []
+    if not plans:
+        await message.answer("Выберите пакет кнопкой ниже.")
+        return
+    await state.update_data(plans={plan_button_label(plan): plan for plan in plans})
+    await state.set_state(PurchaseFlow.waiting_plan)
+    details = PLAN_TIERS[tier]
+    await message.answer(
+        f"{details['label']}\n\nДо {details['connections']} подключений · {details['traffic']}\n"
+        f"{details['summary']}\n\nВыберите срок:",
+        reply_markup=purchase_plans_keyboard(plans),
+    )
 
 
 @router.message(PurchaseFlow.waiting_plan)
@@ -718,17 +764,21 @@ async def reply_plan_handler(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("Выбранный сервер больше недоступен.", reply_markup=popup_menu())
         return
-    payment_url = payment_url_for_plan(plan)
-    rows = []
-    if payment_url:
-        rows.extend([
-            [InlineKeyboardButton(text="💳 Перейти к оплате", url=payment_url)],
-            [InlineKeyboardButton(text="📷 QR оплаты", callback_data=f"payment_qr:{plan['id']}:{node_id}")],
-        ])
-    rows.append([InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan['id']}:{node_id}")])
+    methods = await get_payment_methods()
+    buttons = [
+        InlineKeyboardButton(
+            text=method["name"],
+            **({"url": method["url"]} if method.get("url") else {
+                "callback_data": f"payment_method:{method['id']}:{plan['id']}:{node_id}"
+            }),
+        )
+        for method in methods
+    ]
+    rows = [buttons[:2]] if len(buttons) >= 2 else []
+    rows.extend([[button] for button in (buttons[2:] if len(buttons) >= 2 else buttons)])
     await state.clear()
     await message.answer(
-        "💳 <b>Оплата</b>\n\n"
+        "Выбери способ оплаты:\n\n"
         f"Устройство: <b>{html.escape(str(data.get('platform_id', '—')))}</b>\n"
         f"Страна: <b>{country_label(node.get('region')) or html.escape(node['name'])}</b>\n"
         f"Тариф: <b>{html.escape(plan['name'])}</b>\n"
@@ -1105,21 +1155,49 @@ async def purchase_country_handler(callback: CallbackQuery):
     if not plans:
         await callback.answer("Сейчас нет доступных тарифов", show_alert=True)
         return
+    tiers = plans_by_tier(plans)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{plan['name']} — {plan['price']} {plan['currency']}",
-                    callback_data=f"purchase_plan:{plan['id']}:{node_id}",
+                    text=f"{PLAN_TIERS[tier]['label']} · до {PLAN_TIERS[tier]['connections']} подключений",
+                    callback_data=f"purchase_tier:{tier}:{node_id}",
                 )
             ]
-            for plan in plans
+            for tier in tiers
         ]
         + [[InlineKeyboardButton(text="⬅️ К странам", callback_data="buy_vpn")]]
     )
     await show_screen(
         callback,
-        "🗓 <b>Выберите срок</b>\n\nТариф выбирается последним шагом перед оплатой.",
+        "💳 <b>Выберите пакет</b>\n\nСначала количество одновременных подключений, затем срок.",
+        keyboard,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("purchase_tier:"))
+async def purchase_tier_handler(callback: CallbackQuery):
+    _, tier, raw_node_id = callback.data.split(":")
+    node_id = int(raw_node_id)
+    plans = plans_by_tier(await get_plans()).get(tier, [])
+    if not plans or tier not in PLAN_TIERS:
+        await callback.answer("Пакет недоступен", show_alert=True)
+        return
+    details = PLAN_TIERS[tier]
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{plan['name']} | {plan['price']} {plan['currency']}",
+                callback_data=f"purchase_plan:{plan['id']}:{node_id}",
+            )]
+            for plan in plans
+        ] + [[InlineKeyboardButton(text="⬅️ К пакетам", callback_data=f"purchase_country:{node_id}")]]
+    )
+    await show_screen(
+        callback,
+        f"{details['label']}\n\nДо {details['connections']} подключений · {details['traffic']}\n"
+        f"{details['summary']}\n\n🗓 <b>Выберите срок</b>",
         keyboard,
     )
     await callback.answer()
@@ -1137,35 +1215,51 @@ async def purchase_plan_handler(callback: CallbackQuery):
     if not plan or not node:
         await callback.answer("Тариф или сервер недоступен", show_alert=True)
         return
-    payment_url = payment_url_for_plan(plan)
-    rows = []
-    if payment_url:
-        rows.extend(
-            [
-                [InlineKeyboardButton(text="💳 Перейти в ЮMoney", url=payment_url)],
-                [InlineKeyboardButton(text="📷 Показать QR оплаты", callback_data=f"payment_qr:{plan_id}:{node_id}")],
-            ]
+    methods = await get_payment_methods()
+    buttons = [
+        InlineKeyboardButton(
+            text=method["name"],
+            **({"url": method["url"]} if method.get("url") else {
+                "callback_data": f"payment_method:{method['id']}:{plan_id}:{node_id}"
+            }),
         )
-    rows.extend(
-        [
-            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan_id}:{node_id}")],
-            [InlineKeyboardButton(text="⬅️ К тарифам", callback_data=f"purchase_country:{node_id}")],
-        ]
-    )
+        for method in methods
+    ]
+    rows = []
+    if len(buttons) >= 2:
+        rows.append(buttons[:2])
+        buttons = buttons[2:]
+    rows.extend([[button] for button in buttons])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"purchase_tier:{plan_tier(plan)}:{node_id}")])
     await show_screen(
         callback,
-        "💳 <b>Оплата</b>\n\n"
+        "Выбери способ оплаты:\n\n"
         f"Страна: <b>{country_label(node.get('region')) or node['name']}</b>\n"
-        "Ключ: <b>VLESS Reality xHTTP</b>\n"
         f"Тариф: <b>{plan['name']}</b>\n"
-        f"Стоимость: <b>{plan['price']} {plan['currency']}</b>\n\n"
-        "Оплатите через ЮMoney, затем нажмите «Проверить оплату».",
+        f"Стоимость: <b>{plan['price']} {plan['currency']}</b>",
         InlineKeyboardMarkup(inline_keyboard=rows),
     )
-    if payment_url:
-        await callback.answer()
-    else:
-        await callback.answer("Ссылка ЮMoney пока не настроена", show_alert=True)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payment_method:"))
+async def payment_method_handler(callback: CallbackQuery):
+    _, raw_method_id, raw_plan_id, raw_node_id = callback.data.split(":")
+    methods = await get_payment_methods()
+    method = next((item for item in methods if item["id"] == int(raw_method_id)), None)
+    if not method:
+        await callback.answer("Способ оплаты недоступен", show_alert=True)
+        return
+    if method["code"] == "payment_safety":
+        await callback.answer(
+            "Платёжная страница не получает ваш VPN-ключ. Доступ выдаётся только после подтверждения платежа VPN API.",
+            show_alert=True,
+        )
+        return
+    if method["code"] == "telegram_stars":
+        await callback.answer("Цена в Telegram Stars ещё не настроена для этого тарифа.", show_alert=True)
+        return
+    await callback.answer("Добавьте ссылку этого способа оплаты в VPN Admin.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("payment_qr:"))

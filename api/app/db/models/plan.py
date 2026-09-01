@@ -44,6 +44,10 @@ class Plan(Base):
         server_default="1",
     )
 
+    traffic_limit_gb: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     price: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),
         nullable=False,

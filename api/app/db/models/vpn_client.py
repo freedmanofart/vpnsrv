@@ -64,6 +64,10 @@ class VPNClient(Base):
         server_default="1",
     )
 
+    traffic_limit_gb: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     client_uuid: Mapped[str] = mapped_column(
         String(36),
         unique=True,

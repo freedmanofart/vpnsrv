@@ -1,6 +1,28 @@
 from __future__ import annotations
 
 
+PLAN_TIERS = {
+    "lite": {
+        "label": "🛴 Лайт",
+        "connections": 5,
+        "traffic": "250 ГБ трафика",
+        "summary": "Для одного человека",
+    },
+    "standard": {
+        "label": "🔥 Стандарт",
+        "connections": 15,
+        "traffic": "650 ГБ трафика",
+        "summary": "Идеально для всей семьи",
+    },
+    "ultra": {
+        "label": "🚀 Ультра",
+        "connections": 30,
+        "traffic": "3 ТБ трафика",
+        "summary": "Для стриминга, игр и загрузок",
+    },
+}
+
+
 def country_label(region: str | None) -> str | None:
     raw = (region or "").strip()
     if not raw:
@@ -46,6 +68,27 @@ def select_public_plans(plans: list[dict], configured_codes: tuple[str, ...]) ->
     selected = [plan for plan in plans if plan.get("code") in configured_codes]
     order = {code: index for index, code in enumerate(configured_codes)}
     return sorted(selected, key=lambda plan: order.get(plan.get("code"), 999))
+
+
+def plan_tier(plan: dict) -> str | None:
+    code = str(plan.get("code", ""))
+    prefix = code.partition("_")[0]
+    if prefix in PLAN_TIERS:
+        return prefix
+    connections = plan.get("max_connections")
+    return next(
+        (key for key, value in PLAN_TIERS.items() if value["connections"] == connections),
+        None,
+    )
+
+
+def plans_by_tier(plans: list[dict]) -> dict[str, list[dict]]:
+    result = {key: [] for key in PLAN_TIERS}
+    for plan in plans:
+        tier = plan_tier(plan)
+        if tier:
+            result[tier].append(plan)
+    return {key: value for key, value in result.items() if value}
 
 
 def supports_threexui(configs: list[dict]) -> bool:
