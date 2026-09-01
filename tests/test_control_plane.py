@@ -128,6 +128,30 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         authenticated = await self.client.get("/admin", auth=self.admin_auth)
         self.assertEqual(200, authenticated.status_code)
 
+    async def test_plan_delete_rejects_used_and_removes_unused(self) -> None:
+        used = await self.client.delete("/plans/1", headers=self.service_headers)
+        self.assertEqual(409, used.status_code, used.text)
+
+        created = await self.client.post(
+            "/plans",
+            headers=self.service_headers,
+            json={
+                "code": "unused-plan",
+                "name": "Unused",
+                "duration_days": 5,
+                "price": "2.00",
+                "currency": "USD",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        plan_id = created.json()["id"]
+        deleted = await self.client.delete(
+            f"/plans/{plan_id}", headers=self.service_headers
+        )
+        self.assertEqual(204, deleted.status_code, deleted.text)
+        async with self.session_factory() as db:
+            self.assertIsNone(await db.get(Plan, plan_id))
+
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:
             subscription = (

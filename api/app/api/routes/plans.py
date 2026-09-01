@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.plan import Plan
+from app.db.models.payment import Payment
+from app.db.models.subscription import Subscription
 from app.db.session import get_db
 from app.schemas.plan import PlanCreate, PlanResponse, PlanUpdate
 from app.core.security import require_api_access
@@ -79,3 +81,29 @@ async def update_plan(plan_id: int, data: PlanUpdate, db: AsyncSession = Depends
     await db.commit()
     await db.refresh(plan)
     return plan
+
+
+@router.delete("/{plan_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_plan(plan_id: int, db: AsyncSession = Depends(get_db)):
+    plan = await db.get(Plan, plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    subscriptions = await db.scalar(
+        select(func.count(Subscription.id)).where(Subscription.plan_id == plan_id)
+    )
+    payments = await db.scalar(
+        select(func.count(Payment.id)).where(Payment.plan_id == plan_id)
+    )
+    if subscriptions or payments:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Тариф уже используется в подписках или платежах. "
+                "Отключите его через «Изменить», чтобы сохранить историю."
+            ),
+        )
+
+    await db.delete(plan)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
