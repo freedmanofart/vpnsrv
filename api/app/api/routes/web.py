@@ -31,6 +31,7 @@ from app.db.session import get_db
 from app.services.email import EmailDeliveryError, send_cabinet_link
 from app.services.payments import PaymentError, create_payment
 from app.schemas.payment import PaymentCreate
+from app.core.security import require_api_access
 
 
 router = APIRouter(tags=["Web cabinet"])
@@ -41,6 +42,11 @@ COOKIE = "freedom_cabinet"
 class Registration(BaseModel):
     email: str = Field(min_length=5, max_length=320)
     plan_id: int | None = None
+
+
+class TelegramCabinetLink(BaseModel):
+    telegram_id: int
+    email: str = Field(min_length=5, max_length=320)
 
 
 class WebOrder(BaseModel):
@@ -109,28 +115,7 @@ async def landing(db: AsyncSession = Depends(get_db)):
     return HTMLResponse(_shell(body), headers=_headers())
 
 
-@router.post("/web/register")
-async def register(data: Registration, db: AsyncSession = Depends(get_db)):
-    email_address = data.email.strip().lower()
-    if not EMAIL_RE.fullmatch(email_address):
-        raise HTTPException(status_code=422, detail="Укажите корректный email")
-    if data.plan_id is not None:
-        plan = await db.get(Plan, data.plan_id)
-        if plan is None or not plan.is_active or not plan.is_public:
-            raise HTTPException(status_code=404, detail="Тариф не найден")
-    user = await db.scalar(select(User).where(User.email == email_address))
-    if user is None:
-        # Telegram IDs are positive. A random negative service identifier keeps the
-        # existing 3x-ui provisioning contract compatible for web-only accounts.
-        user = User(telegram_id=-secrets.randbelow(9_000_000_000_000_000) - 1, email=email_address, status="active")
-        db.add(user)
-        try:
-            await db.flush()
-        except IntegrityError:
-            await db.rollback()
-            user = await db.scalar(select(User).where(User.email == email_address))
-            if user is None:
-                raise HTTPException(status_code=409, detail="Не удалось создать пользователя")
+async def _issue_link(user: User, email_address: str, db: AsyncSession) -> datetime:
     raw = secrets.token_urlsafe(32)
     expires = datetime.now(timezone.utc) + timedelta(days=settings.cabinet_token_ttl_days)
     access = CabinetAccessToken(user_id=user.id, token_hash=_digest(raw), expires_at=expires)
@@ -143,6 +128,46 @@ async def register(data: Registration, db: AsyncSession = Depends(get_db)):
         await db.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     await db.commit()
+    return expires
+
+
+@router.post("/web/register")
+async def register(data: Registration, db: AsyncSession = Depends(get_db)):
+    email_address = data.email.strip().lower()
+    if not EMAIL_RE.fullmatch(email_address):
+        raise HTTPException(status_code=422, detail="Укажите корректный email")
+    if data.plan_id is not None:
+        plan = await db.get(Plan, data.plan_id)
+        if plan is None or not plan.is_active or not plan.is_public:
+            raise HTTPException(status_code=404, detail="Тариф не найден")
+    user = await db.scalar(select(User).where(User.email == email_address))
+    if user is None:
+        user = User(telegram_id=-secrets.randbelow(9_000_000_000_000_000) - 1, email=email_address, status="active")
+        db.add(user)
+        try:
+            await db.flush()
+        except IntegrityError:
+            await db.rollback()
+            user = await db.scalar(select(User).where(User.email == email_address))
+            if user is None:
+                raise HTTPException(status_code=409, detail="Не удалось создать пользователя")
+    expires = await _issue_link(user, email_address, db)
+    return {"message": "Ссылка для входа отправлена на почту", "expires_at": expires}
+
+
+@router.post("/web/telegram-cabinet-link", dependencies=[Depends(require_api_access)])
+async def telegram_cabinet_link(data: TelegramCabinetLink, db: AsyncSession = Depends(get_db)):
+    email_address = data.email.strip().lower()
+    if not EMAIL_RE.fullmatch(email_address):
+        raise HTTPException(status_code=422, detail="Укажите корректный email")
+    user = await db.scalar(select(User).where(User.telegram_id == data.telegram_id))
+    if user is None:
+        raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+    owner = await db.scalar(select(User).where(User.email == email_address, User.id != user.id))
+    if owner is not None:
+        raise HTTPException(status_code=409, detail="Этот email уже связан с другим аккаунтом")
+    user.email = email_address
+    expires = await _issue_link(user, email_address, db)
     return {"message": "Ссылка для входа отправлена на почту", "expires_at": expires}
 
 

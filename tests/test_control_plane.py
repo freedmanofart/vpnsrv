@@ -183,6 +183,25 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, receipt.status_code, receipt.text)
         self.assertEqual("processing", receipt.json()["status"])
 
+    async def test_bot_can_link_existing_telegram_user_to_email(self) -> None:
+        with patch("app.api.routes.web.send_cabinet_link", new=AsyncMock()) as send:
+            response = await self.client.post(
+                "/web/telegram-cabinet-link",
+                headers=self.service_headers,
+                json={"telegram_id": self.telegram_id, "email": "owner@example.com"},
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("owner@example.com", send.await_args.args[0])
+        async with self.session_factory() as db:
+            user = await db.get(User, self.user_id)
+            self.assertEqual("owner@example.com", user.email)
+
+        unauthenticated = await self.client.post(
+            "/web/telegram-cabinet-link",
+            json={"telegram_id": self.telegram_id, "email": "other@example.com"},
+        )
+        self.assertEqual(401, unauthenticated.status_code)
+
     async def test_plan_delete_rejects_used_and_removes_unused(self) -> None:
         used = await self.client.delete("/plans/1", headers=self.service_headers)
         self.assertEqual(409, used.status_code, used.text)

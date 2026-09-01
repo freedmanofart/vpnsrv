@@ -36,6 +36,7 @@ from aiogram.types import (
     BufferedInputFile,
     BotCommand,
     MenuButtonCommands,
+    MenuButtonWebApp,
     WebAppInfo,
     FSInputFile,
 )
@@ -75,6 +76,10 @@ class ManualPaymentFlow(StatesGroup):
     waiting_receipt = State()
 
 
+class EmailCabinetFlow(StatesGroup):
+    waiting_email = State()
+
+
 def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=base_url,
@@ -100,16 +105,13 @@ def main_menu() -> InlineKeyboardMarkup:
         if SUPPORT_URL
         else InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
     )
-    rows = []
-    if WEB_CABINET_URL:
-        rows.append([InlineKeyboardButton(text="🌐 Кабинет", url=WEB_CABINET_URL)])
-    rows.extend([
+    rows = [
         [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn")],
         [InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
         [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
         [InlineKeyboardButton(text="📖 Инструкции", callback_data="instructions"), support_button],
         [channel_button],
-    ])
+    ]
     rows.extend(
         [InlineKeyboardButton(text=item["text"], url=item["url"])]
         for item in CONTENT.get("main_url_buttons", [])
@@ -120,14 +122,8 @@ def main_menu() -> InlineKeyboardMarkup:
 
 def popup_menu() -> ReplyKeyboardMarkup:
     """Постоянное раскрывающееся меню рядом с полем ввода Telegram."""
-    cabinet_button = (
-        KeyboardButton(text="🌐 Кабинет", web_app=WebAppInfo(url=WEB_CABINET_URL))
-        if WEB_CABINET_URL.startswith("https://")
-        else KeyboardButton(text="🌐 Кабинет")
-    )
     return ReplyKeyboardMarkup(
         keyboard=[
-            [cabinet_button],
             [
                 KeyboardButton(text="💳 Приобрести подписку"),
                 KeyboardButton(text="👤 Управление подпиской"),
@@ -144,6 +140,20 @@ def popup_menu() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Выберите действие",
+    )
+
+
+def welcome_keyboard() -> ReplyKeyboardMarkup:
+    site = (
+        KeyboardButton(text="🌐 Сайт", web_app=WebAppInfo(url=WEB_CABINET_URL))
+        if WEB_CABINET_URL.startswith("https://")
+        else KeyboardButton(text="🌐 Сайт")
+    )
+    return ReplyKeyboardMarkup(
+        keyboard=[[site, KeyboardButton(text="✉️ Email")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Выберите способ входа",
     )
 
 
@@ -384,6 +394,16 @@ async def get_vpn_status(telegram_id: int) -> dict:
         return response.json()
 
 
+async def send_cabinet_link_to_email(telegram_id: int, email_address: str) -> dict:
+    async with api_client(base_url=API_URL, timeout=20.0) as client:
+        response = await client.post(
+            "/web/telegram-cabinet-link",
+            json={"telegram_id": telegram_id, "email": email_address},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 async def get_plans() -> list[dict]:
     async with api_client(
         base_url=API_URL,
@@ -610,7 +630,7 @@ async def start_handler(message: Message):
         await message.answer_photo(
             photo=FSInputFile(WELCOME_LOGO),
             caption=content_text("welcome"),
-            reply_markup=popup_menu(),
+            reply_markup=welcome_keyboard(),
             parse_mode="HTML",
         )
 
@@ -693,8 +713,8 @@ async def popup_vpn_handler(message: Message):
     await vpn_command_handler(message)
 
 
-@router.message(F.text == "🌐 Кабинет")
-async def popup_cabinet_handler(message: Message):
+@router.message(F.text == "🌐 Сайт")
+async def welcome_site_handler(message: Message):
     if WEB_CABINET_URL:
         await message.answer(
             f'🌐 <a href="{html.escape(WEB_CABINET_URL)}">Открыть веб-кабинет Freedom VPN</a>',
@@ -706,6 +726,40 @@ async def popup_cabinet_handler(message: Message):
             "Веб-кабинет пока не настроен.",
             reply_markup=popup_menu(),
         )
+
+
+@router.message(F.text == "✉️ Email")
+async def welcome_email_handler(message: Message, state: FSMContext):
+    await state.set_state(EmailCabinetFlow.waiting_email)
+    await message.answer(
+        "✉️ Введите email. На него будет отправлена персональная ссылка на web-кабинет с вашей текущей подпиской.",
+        reply_markup=popup_menu(),
+    )
+
+
+@router.message(EmailCabinetFlow.waiting_email)
+async def cabinet_email_handler(message: Message, state: FSMContext):
+    email_address = (message.text or "").strip().lower()
+    if not email_address or "@" not in email_address or len(email_address) > 320:
+        await message.answer("Введите корректный email, например name@example.com.")
+        return
+    try:
+        await send_cabinet_link_to_email(message.from_user.id, email_address)
+        await state.clear()
+        await message.answer(
+            "✅ Ссылка на web-кабинет отправлена на почту. Проверьте также папку «Спам».",
+            reply_markup=popup_menu(),
+        )
+    except httpx.HTTPStatusError as exc:
+        detail = "Не удалось отправить ссылку. Проверьте email или попробуйте позже."
+        try:
+            detail = exc.response.json().get("detail") or detail
+        except ValueError:
+            pass
+        await message.answer(f"❌ {html.escape(detail)}", reply_markup=popup_menu())
+    except httpx.HTTPError:
+        logging.exception("Failed to send cabinet email")
+        await message.answer("❌ Не удалось связаться с сервером.", reply_markup=popup_menu())
 
 
 @router.message(F.text == "📖 Инструкции")
@@ -1648,7 +1702,15 @@ async def main():
             BotCommand(command="help", description="Инструкция"),
         ]
     )
-    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    if WEB_CABINET_URL.startswith("https://"):
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Web кабинет",
+                web_app=WebAppInfo(url=WEB_CABINET_URL),
+            )
+        )
+    else:
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
     dp = Dispatcher()
 
