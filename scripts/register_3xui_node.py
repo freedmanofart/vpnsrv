@@ -7,6 +7,7 @@ import os
 import ssl
 import sys
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -42,6 +43,21 @@ def panel_call(method, master, token, path, payload, verify_tls):
     if not result.get("success"):
         raise RuntimeError(result.get("msg") or "3x-ui отклонил запрос")
     return result.get("obj")
+
+
+def country_from_ip(address):
+    url = (
+        f"https://ipwho.is/{quote(address, safe='')}"
+        "?lang=ru&fields=success,country,country_code,message"
+    )
+    try:
+        with urlopen(url, timeout=8, context=ssl.create_default_context()) as response:
+            data = json.load(response)
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise RuntimeError("Не удалось определить страну публичного IP") from exc
+    if not data.get("success") or not data.get("country_code"):
+        raise RuntimeError(data.get("message") or "Страна IP не определена")
+    return f"{data['country_code'].upper()}|{data.get('country') or data['country_code']}"
 
 
 def main():
@@ -86,12 +102,15 @@ def main():
         return
     api_url = env("VPN_API_URL", "http://127.0.0.1:8000").rstrip("/")
     service_token = env("SERVICE_API_TOKEN", required=True)
+    public_host = env("VPN_PUBLIC_HOST", env("THREEXUI_CHILD_ADDRESS"))
+    public_ip = env("VPN_NODE_IP", env("THREEXUI_CHILD_ADDRESS"))
+    region = env("VPN_NODE_REGION") or country_from_ip(public_ip)
     app_node = {
         "name": name,
         "provider": env("VPN_NODE_PROVIDER", "3x-ui"),
-        "region": env("VPN_NODE_REGION", ""),
-        "hostname": env("VPN_PUBLIC_HOST", env("THREEXUI_CHILD_ADDRESS")),
-        "ip_address": env("VPN_PUBLIC_HOST", env("THREEXUI_CHILD_ADDRESS")),
+        "region": region,
+        "hostname": public_host,
+        "ip_address": public_ip,
         "capacity": int(env("VPN_NODE_CAPACITY", "100")),
     }
     nodes = request("GET", f"{api_url}/vpn/nodes", service_token)

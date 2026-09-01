@@ -1,58 +1,40 @@
 from __future__ import annotations
 
 
-COUNTRY_LABELS = {
-    "us": "🇺🇸 США",
-    "usa": "🇺🇸 США",
-    "united states": "🇺🇸 США",
-    "сша": "🇺🇸 США",
-    "nl": "🇳🇱 Нидерланды",
-    "netherlands": "🇳🇱 Нидерланды",
-    "нидерланды": "🇳🇱 Нидерланды",
-    "de": "🇩🇪 Германия",
-    "germany": "🇩🇪 Германия",
-    "германия": "🇩🇪 Германия",
-}
-
-
 def country_label(region: str | None) -> str | None:
-    return COUNTRY_LABELS.get((region or "").strip().lower())
-
-
-def profile_flow(profile: str) -> str:
-    if profile == "standard":
-        return ""
-    if profile == "vision":
-        return "xtls-rprx-vision"
-    raise ValueError("Unsupported VLESS profile")
+    raw = (region or "").strip()
+    if not raw:
+        return None
+    code, separator, name = raw.partition("|")
+    code = code.strip().upper()
+    aliases = {"USA": "US", "GERMANY": "DE", "NETHERLANDS": "NL"}
+    code = aliases.get(code, code)
+    if len(code) != 2 or not code.isalpha():
+        return raw
+    flag = "".join(chr(127397 + ord(char)) for char in code)
+    return f"{flag} {(name if separator and name else code).strip()}"
 
 
 def subscription_payload(
     user_id: int,
     plan_id: int,
     node_id: int,
-    client_type: str,
-    profile: str,
 ) -> dict:
-    if client_type not in {"amnezia", "universal"}:
-        raise ValueError("Unsupported client type")
     return {
         "user_id": user_id,
         "plan_id": plan_id,
         "node_id": node_id,
-        "client_type": client_type,
-        "flow": profile_flow(profile),
+        "client_type": "universal",
+        "flow": "",
         "fingerprint": "chrome",
     }
 
 
-def rotation_payload(node_id: int, client_type: str, profile: str) -> dict:
-    if client_type not in {"amnezia", "universal"}:
-        raise ValueError("Unsupported client type")
+def rotation_payload(node_id: int) -> dict:
     return {
         "node_id": node_id,
-        "client_type": client_type,
-        "flow": profile_flow(profile),
+        "client_type": "universal",
+        "flow": "",
         "fingerprint": "chrome",
     }
 

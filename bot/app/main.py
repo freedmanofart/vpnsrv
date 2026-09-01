@@ -10,7 +10,6 @@ import qrcode
 from app.content import CONTENT, link as content_link, platform as get_platform, text as content_text
 from app.domain import (
     country_label,
-    profile_flow,
     rotation_payload,
     subscription_payload,
     supports_threexui,
@@ -337,17 +336,12 @@ async def create_payment(
     user_id: int,
     plan_id: int,
     node_id: int,
-    client_type: str,
-    flow: str,
     idempotency_key: str,
 ) -> dict:
-    profile = "vision" if flow == "xtls-rprx-vision" else "standard"
     payload = subscription_payload(
         user_id=user_id,
         plan_id=plan_id,
         node_id=node_id,
-        client_type=client_type,
-        profile=profile,
     )
     payload["idempotency_key"] = idempotency_key
     async with api_client(
@@ -372,12 +366,11 @@ async def get_vpn_client_config(client_id: int) -> dict:
         return response.json()
 
 
-async def rotate_vpn_client(subscription_id: int, node_id: int, client_type: str, flow: str) -> dict:
-    profile = "vision" if flow == "xtls-rprx-vision" else "standard"
+async def rotate_vpn_client(subscription_id: int, node_id: int) -> dict:
     async with api_client(base_url=API_URL, timeout=15.0) as client:
         response = await client.post(
             f"/subscriptions/{subscription_id}/rotate",
-            json=rotation_payload(node_id, client_type, profile),
+            json=rotation_payload(node_id),
         )
         response.raise_for_status()
         return response.json()
@@ -387,8 +380,6 @@ async def create_access_grant(
     telegram_id: int,
     kind: str,
     node_id: int,
-    client_type: str,
-    flow: str,
     code: str | None = None,
 ) -> dict:
     async with api_client(base_url=API_URL, timeout=15.0) as client:
@@ -399,8 +390,8 @@ async def create_access_grant(
                 "kind": kind,
                 "code": code,
                 "node_id": node_id,
-                "client_type": client_type,
-                "flow": flow,
+                "client_type": "universal",
+                "flow": "",
                 "fingerprint": "chrome",
             },
         )
@@ -437,14 +428,10 @@ def qr_file(value: str) -> BufferedInputFile:
     return BufferedInputFile(output.getvalue(), filename="vpn-key.png")
 
 
-async def send_key_message(message: Message, client_id: int, client_type: str = "universal") -> None:
+async def send_key_message(message: Message, client_id: int) -> None:
     data = await get_vpn_client_config(client_id)
     value = data["config"]
-    instruction = (
-        "AmneziaVPN → Добавить → Вставить ключ из буфера."
-        if client_type == "amnezia"
-        else "Импортируйте ссылку или QR-код в совместимое VLESS-приложение."
-    )
+    instruction = "Импортируйте ссылку или QR-код в совместимое VLESS-приложение."
     await message.answer_photo(
         photo=qr_file(value),
         caption=f"🔑 <b>Ваш VPN-ключ</b>\n\n<code>{html.escape(value)}</code>\n\n{instruction}",
@@ -640,16 +627,12 @@ async def finish_access_grant(
     *,
     kind: str,
     node_id: int,
-    client_type: str,
-    profile: str,
     code: str | None = None,
 ) -> None:
     subscription = await create_access_grant(
         callback.from_user.id,
         kind,
         node_id,
-        client_type,
-        profile_flow(profile),
         code,
     )
     status = await get_vpn_status(callback.from_user.id)
@@ -662,7 +645,7 @@ async def finish_access_grant(
         reply_markup=vpn_ready_keyboard(),
     )
     if client:
-        await send_key_message(callback.message, client["id"], client.get("client_type", client_type))
+        await send_key_message(callback.message, client["id"])
     await callback.answer("VPN активирован")
 
 
@@ -682,38 +665,12 @@ async def trial_start_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("trial_country:"))
 async def trial_country_handler(callback: CallbackQuery):
-    node_id = int(callback.data.split(":")[1])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 AmneziaVPN", callback_data=f"trial_client:{node_id}:amnezia")],
-        [InlineKeyboardButton(text="🔗 Универсальный VLESS", callback_data=f"trial_client:{node_id}:universal")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="trial_start")],
-    ])
-    await callback.message.edit_text("📱 <b>Выберите VPN-клиент</b>", parse_mode="HTML", reply_markup=keyboard)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("trial_client:"))
-async def trial_client_handler(callback: CallbackQuery):
-    _, node_id, client_type = callback.data.split(":")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡 Reality", callback_data=f"trial_confirm:{node_id}:{client_type}:standard")],
-        [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"trial_confirm:{node_id}:{client_type}:vision")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"trial_country:{node_id}")],
-    ])
-    await callback.message.edit_text("🔐 <b>Выберите профиль VLESS</b>", parse_mode="HTML", reply_markup=keyboard)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("trial_confirm:"))
-async def trial_confirm_handler(callback: CallbackQuery):
     try:
-        _, node_id, client_type, profile = callback.data.split(":")
+        node_id = int(callback.data.split(":")[1])
         await finish_access_grant(
             callback,
             kind="trial",
-            node_id=int(node_id),
-            client_type=client_type,
-            profile=profile,
+            node_id=node_id,
         )
     except httpx.HTTPStatusError as exc:
         message = "Тест уже использован или у вас была подписка" if exc.response.status_code == 409 else "Не удалось выдать тестовый доступ"
@@ -750,44 +707,18 @@ async def promo_code_handler(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("promo_country:"))
-async def promo_country_handler(callback: CallbackQuery):
-    node_id = int(callback.data.split(":")[1])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 AmneziaVPN", callback_data=f"promo_client:{node_id}:amnezia")],
-        [InlineKeyboardButton(text="🔗 Универсальный VLESS", callback_data=f"promo_client:{node_id}:universal")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="promo_start")],
-    ])
-    await callback.message.edit_text("📱 <b>Выберите VPN-клиент</b>", parse_mode="HTML", reply_markup=keyboard)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("promo_client:"))
-async def promo_client_handler(callback: CallbackQuery):
-    _, node_id, client_type = callback.data.split(":")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡 Reality", callback_data=f"promo_confirm:{node_id}:{client_type}:standard")],
-        [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"promo_confirm:{node_id}:{client_type}:vision")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"promo_country:{node_id}")],
-    ])
-    await callback.message.edit_text("🔐 <b>Выберите профиль VLESS</b>", parse_mode="HTML", reply_markup=keyboard)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("promo_confirm:"))
-async def promo_confirm_handler(callback: CallbackQuery, state: FSMContext):
+async def promo_country_handler(callback: CallbackQuery, state: FSMContext):
     try:
         data = await state.get_data()
         code = data.get("code")
         if not code:
             await callback.answer("Сначала введите промокод", show_alert=True)
             return
-        _, node_id, client_type, profile = callback.data.split(":")
+        node_id = int(callback.data.split(":")[1])
         await finish_access_grant(
             callback,
             kind="promo",
-            node_id=int(node_id),
-            client_type=client_type,
-            profile=profile,
+            node_id=node_id,
             code=code,
         )
         await state.clear()
@@ -893,7 +824,7 @@ async def vpn_key_handler(callback: CallbackQuery):
         if not client:
             await callback.answer("Активный ключ не найден", show_alert=True)
             return
-        await send_key_message(callback.message, client["id"], client.get("client_type", "universal"))
+        await send_key_message(callback.message, client["id"])
         await callback.answer()
     except Exception:
         logging.exception("Failed to show VPN key")
@@ -928,45 +859,15 @@ async def vpn_reissue_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("rotate_country:"))
 async def rotate_country_handler(callback: CallbackQuery):
-    _, subscription_id, node_id = callback.data.split(":")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 AmneziaVPN", callback_data=f"rotate_client:{subscription_id}:{node_id}:amnezia")],
-        [InlineKeyboardButton(text="🔗 Универсальный VLESS", callback_data=f"rotate_client:{subscription_id}:{node_id}:universal")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="vpn_reissue")],
-    ])
-    await callback.message.edit_text("📱 <b>Выберите приложение</b>", reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("rotate_client:"))
-async def rotate_client_handler(callback: CallbackQuery):
-    _, subscription_id, node_id, client_type = callback.data.split(":")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡 Reality", callback_data=f"rotate_confirm:{subscription_id}:{node_id}:{client_type}:standard")],
-        [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"rotate_confirm:{subscription_id}:{node_id}:{client_type}:vision")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"rotate_country:{subscription_id}:{node_id}")],
-    ])
-    await callback.message.edit_text(
-        "🔐 <b>Выберите профиль</b>\n\n"
-        "Новый ключ будет создан в inbound выбранной ноды через 3x-ui master. "
-        "Старый ключ будет отозван только после успешного создания нового.",
-        reply_markup=keyboard,
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("rotate_confirm:"))
-async def rotate_confirm_handler(callback: CallbackQuery):
     try:
-        _, subscription_id, node_id, client_type, profile = callback.data.split(":")
-        client = await rotate_vpn_client(int(subscription_id), int(node_id), client_type, profile_flow(profile))
+        _, subscription_id, node_id = callback.data.split(":")
+        client = await rotate_vpn_client(int(subscription_id), int(node_id))
         await show_screen(
             callback,
             "✅ Новый ключ создан на выбранной ноде 3x-ui. Старый ключ отозван.",
             vpn_ready_keyboard(),
         )
-        await send_key_message(callback.message, client["id"], client_type)
+        await send_key_message(callback.message, client["id"])
         await callback.answer("Ключ обновлён")
     except httpx.HTTPStatusError as exc:
         logging.exception("3x-ui rejected VPN key rotation")
@@ -1033,25 +934,6 @@ async def purchase_device_handler(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("purchase_country:"))
 async def purchase_country_handler(callback: CallbackQuery):
     node_id = int(callback.data.split(":", 1)[1])
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🛡 VLESS Reality", callback_data=f"purchase_profile:{node_id}:standard")],
-            [InlineKeyboardButton(text="⚡ VLESS + XTLS Vision", callback_data=f"purchase_profile:{node_id}:vision")],
-            [InlineKeyboardButton(text="⬅️ К устройствам", callback_data="buy_vpn")],
-        ]
-    )
-    await show_screen(
-        callback,
-        "🔐 <b>Выберите конфигурацию ключа</b>\n\n"
-        "Reality совместим с большинством клиентов. Vision может быть быстрее, но требует поддержки XTLS.",
-        keyboard,
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("purchase_profile:"))
-async def purchase_profile_handler(callback: CallbackQuery):
-    _, node_id, profile = callback.data.split(":")
     plans = await get_plans()
     if not plans:
         await callback.answer("Сейчас нет доступных тарифов", show_alert=True)
@@ -1061,12 +943,12 @@ async def purchase_profile_handler(callback: CallbackQuery):
             [
                 InlineKeyboardButton(
                     text=f"{plan['name']} — {plan['price']} {plan['currency']}",
-                    callback_data=f"purchase_plan:{plan['id']}:{node_id}:{profile}",
+                    callback_data=f"purchase_plan:{plan['id']}:{node_id}",
                 )
             ]
             for plan in plans
         ]
-        + [[InlineKeyboardButton(text="⬅️ К конфигурациям", callback_data=f"purchase_country:{node_id}")]]
+        + [[InlineKeyboardButton(text="⬅️ К странам", callback_data="buy_vpn")]]
     )
     await show_screen(
         callback,
@@ -1078,7 +960,7 @@ async def purchase_profile_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("purchase_plan:"))
 async def purchase_plan_handler(callback: CallbackQuery):
-    _, raw_plan_id, raw_node_id, profile = callback.data.split(":")
+    _, raw_plan_id, raw_node_id = callback.data.split(":")
     plan_id = int(raw_plan_id)
     node_id = int(raw_node_id)
     plans = await get_plans()
@@ -1094,20 +976,20 @@ async def purchase_plan_handler(callback: CallbackQuery):
         rows.extend(
             [
                 [InlineKeyboardButton(text="💳 Перейти в ЮMoney", url=payment_url)],
-                [InlineKeyboardButton(text="📷 Показать QR оплаты", callback_data=f"payment_qr:{plan_id}:{node_id}:{profile}")],
+                [InlineKeyboardButton(text="📷 Показать QR оплаты", callback_data=f"payment_qr:{plan_id}:{node_id}")],
             ]
         )
     rows.extend(
         [
-            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan_id}:{node_id}:amnezia:{profile}")],
-            [InlineKeyboardButton(text="⬅️ К тарифам", callback_data=f"purchase_profile:{node_id}:{profile}")],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan_id}:{node_id}")],
+            [InlineKeyboardButton(text="⬅️ К тарифам", callback_data=f"purchase_country:{node_id}")],
         ]
     )
     await show_screen(
         callback,
         "💳 <b>Оплата</b>\n\n"
         f"Страна: <b>{country_label(node.get('region')) or node['name']}</b>\n"
-        f"Конфигурация: <b>{'XTLS Vision' if profile == 'vision' else 'VLESS Reality'}</b>\n"
+        "Ключ: <b>VLESS Reality xHTTP</b>\n"
         f"Тариф: <b>{plan['name']}</b>\n"
         f"Стоимость: <b>{plan['price']} {plan['currency']}</b>\n\n"
         "Оплатите через ЮMoney, затем нажмите «Проверить оплату».",
@@ -1121,7 +1003,7 @@ async def purchase_plan_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("payment_qr:"))
 async def payment_qr_handler(callback: CallbackQuery):
-    _, raw_plan_id, raw_node_id, profile = callback.data.split(":")
+    _, raw_plan_id, raw_node_id = callback.data.split(":")
     plan_id = int(raw_plan_id)
     plans = await get_plans()
     plan = next((item for item in plans if item["id"] == plan_id), None)
@@ -1132,8 +1014,8 @@ async def payment_qr_handler(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💳 Открыть ЮMoney", url=payment_url)],
-            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan_id}:{raw_node_id}:amnezia:{profile}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"purchase_plan:{plan_id}:{raw_node_id}:{profile}")],
+            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan_id}:{raw_node_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"purchase_plan:{plan_id}:{raw_node_id}")],
         ]
     )
     await callback.message.answer_photo(
@@ -1267,33 +1149,9 @@ async def buy_plan_handler(callback: CallbackQuery):
 async def country_handler(callback: CallbackQuery):
     _, plan_id, node_id = callback.data.split(":")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 AmneziaVPN", callback_data=f"client:{plan_id}:{node_id}:amnezia")],
-        [InlineKeyboardButton(text="🔗 Универсальный VLESS", callback_data=f"client:{plan_id}:{node_id}:universal")],
+        [InlineKeyboardButton(text="✅ Активировать", callback_data=f"confirm_buy:{plan_id}:{node_id}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"buy_plan:{plan_id}")],
     ])
-    await callback.message.edit_text("📱 <b>Выберите VPN-клиент</b>", reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("client:"))
-async def client_handler(callback: CallbackQuery):
-    _, plan_id, node_id, client_type = callback.data.split(":")
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡 Reality (совместимый)", callback_data=f"profile:{plan_id}:{node_id}:{client_type}:standard")],
-        [InlineKeyboardButton(text="⚡ Reality + XTLS Vision", callback_data=f"profile:{plan_id}:{node_id}:{client_type}:vision")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"country:{plan_id}:{node_id}")],
-    ])
-    await callback.message.edit_text(
-        "🔐 <b>Выберите профиль VLESS</b>\n\n"
-        "Совместимый профиль подходит большинству клиентов. Vision обычно быстрее, но требует поддержки XTLS.",
-        reply_markup=keyboard, parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("profile:"))
-async def profile_handler(callback: CallbackQuery):
-    _, plan_id, node_id, client_type, profile = callback.data.split(":")
     plans = await get_plans()
     nodes = await get_nodes()
     plan = next((p for p in plans if p["id"] == int(plan_id)), None)
@@ -1301,16 +1159,10 @@ async def profile_handler(callback: CallbackQuery):
     if not plan or not node:
         await callback.answer("Тариф или сервер недоступен", show_alert=True)
         return
-    profile_name = "Reality + XTLS Vision" if profile == "vision" else "Reality"
-    client_name = "AmneziaVPN" if client_type == "amnezia" else "универсальный VLESS"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Активировать", callback_data=f"confirm_buy:{plan_id}:{node_id}:{client_type}:{profile}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"client:{plan_id}:{node_id}:{client_type}")],
-    ])
     await callback.message.edit_text(
         "💳 <b>Подтверждение</b>\n\n"
         f"Тариф: <b>{plan['name']}</b>\nСтрана: <b>{node.get('region') or node['name']}</b>\n"
-        f"Клиент: <b>{client_name}</b>\nПрофиль: <b>{profile_name}</b>\n"
+        "Ключ: <b>VLESS Reality xHTTP</b>\n"
         f"Стоимость: <b>{plan['price']} {plan['currency']}</b>",
         reply_markup=keyboard, parse_mode="HTML",
     )
@@ -1323,12 +1175,12 @@ async def profile_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("confirm_buy:"))
 async def confirm_buy_handler(callback: CallbackQuery):
-    _, plan_id, node_id, client_type, profile = callback.data.split(":")
+    _, plan_id, node_id = callback.data.split(":")
     payment_url = YOOMONEY_PAYMENT_URL
-    rows = [[InlineKeyboardButton(text="📷 Оплатить по QR", callback_data=f"pay_qr:{plan_id}:{node_id}:{client_type}:{profile}")]]
+    rows = [[InlineKeyboardButton(text="📷 Оплатить по QR", callback_data=f"pay_qr:{plan_id}:{node_id}")]]
     if payment_url:
         rows.append([InlineKeyboardButton(text="💳 Оплатить через ЮMoney", url=payment_url)])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"profile:{plan_id}:{node_id}:{client_type}:{profile}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"country:{plan_id}:{node_id}")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     await callback.message.edit_text(
         "💳 <b>Выберите способ оплаты</b>\n\n"
@@ -1346,7 +1198,7 @@ async def pay_qr_handler(
     try:
         telegram_id = callback.from_user.id
 
-        _, raw_plan_id, raw_node_id, client_type, profile = callback.data.split(":")
+        _, raw_plan_id, raw_node_id = callback.data.split(":")
         plan_id = int(raw_plan_id)
         node_id = int(raw_node_id)
 
@@ -1424,8 +1276,6 @@ async def pay_qr_handler(
             user_id=user_id,
             plan_id=plan_id,
             node_id=node_id,
-            client_type=client_type,
-            flow=profile_flow(profile),
             idempotency_key=f"telegram:{callback.id}",
         )
 
@@ -1478,22 +1328,19 @@ async def pay_qr_handler(
             f"<b>{plan['price']} {plan['currency']}</b>\n"
             f"📅 Действует до: "
             f"<b>{expires_at} UTC</b>\n\n"
-            f"🔐 <b>{'VLESS + XTLS Vision' if profile == 'vision' else 'VLESS Reality'}</b>\n\n"
-            "Скопируйте ссылку ниже и добавьте её в AmneziaVPN:"
+            "🔐 <b>VLESS Reality xHTTP</b>\n\n"
+            "Скопируйте ссылку ниже и импортируйте в VLESS-приложение:"
         )
 
         text += (
             f"\n\n<code>{html.escape(vless_url)}</code>"
         )
-        if client_type == "amnezia":
-            text += "\n\nОткройте AmneziaVPN → Добавить → Вставить ключ из буфера."
-
         await show_screen(callback, text, vpn_ready_keyboard())
 
         await callback.answer(
             "✅ VPN активирован!"
         )
-        await send_key_message(callback.message, client_data["id"], client_type)
+        await send_key_message(callback.message, client_data["id"])
 
     except httpx.HTTPStatusError as exc:
         logging.exception(

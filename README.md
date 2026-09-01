@@ -51,6 +51,10 @@ THREEXUI_VERIFY_TLS=true
 Inbound может работать на master или быть назначен child-ноде. Эту топологию
 хранит 3x-ui; приложение её не дублирует.
 
+Бот выдаёт только один вариант ключа: универсальный VLESS Reality xHTTP без
+выбора клиента и flow. При добавлении логической ноды страна автоматически
+определяется по публичному IP и используется в меню Telegram.
+
 Жизненный цикл клиента использует `/panel/api/clients/add`,
 `/clients/del/{email}` и `/inbounds/list`. Служебный email имеет формат
 `vpn-<client_id>`. Компенсационные операции сохранены: если транзакция БД
@@ -125,5 +129,4 @@ in-memory реализацию и не изменяют развёрнутую �
 - Перед перезапуском API и worker применяйте миграции Alembic.
 
 Операционные инструкции: [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md),
-доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md),
-обновление: [`docs/server-update.md`](docs/server-update.md).
+доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md).

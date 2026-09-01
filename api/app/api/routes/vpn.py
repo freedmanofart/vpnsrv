@@ -32,6 +32,7 @@ from app.schemas.vpn import (
 )
 from app.services.reconciliation import reconcile_node
 from app.services.node_health import effective_node_health, node_accepts_clients
+from app.services.country import country_from_ip
 
 router = APIRouter(
     prefix="/vpn",
@@ -91,10 +92,14 @@ async def create_node(
             detail="VPN node already exists",
         )
 
+    try:
+        region = data.region or await country_from_ip(data.ip_address)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     node = VPNNode(
         name=data.name,
         provider=data.provider,
-        region=data.region,
+        region=region,
         hostname=data.hostname,
         ip_address=data.ip_address,
         capacity=data.capacity,
@@ -116,6 +121,11 @@ async def update_node(node_id: int, data: VPNNodeUpdate, db: AsyncSession = Depe
     values = data.model_dump(exclude_unset=True)
     if "status" in values and values["status"] not in {"active", "offline", "maintenance", "draining", "disabled"}:
         raise HTTPException(status_code=400, detail="Unsupported node status")
+    if "ip_address" in values and "region" not in values:
+        try:
+            values["region"] = await country_from_ip(values["ip_address"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     for key, value in values.items():
         setattr(node, key, value)
     await db.commit()

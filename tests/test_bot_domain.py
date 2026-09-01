@@ -6,7 +6,6 @@ from tempfile import TemporaryDirectory
 from bot.app.content import load_content
 from bot.app.domain import (
     country_label,
-    profile_flow,
     rotation_payload,
     subscription_payload,
     supports_threexui,
@@ -14,46 +13,36 @@ from bot.app.domain import (
 
 
 class CountryTests(unittest.TestCase):
-    def test_supported_countries_and_aliases(self):
-        self.assertEqual(country_label("US"), "🇺🇸 США")
-        self.assertEqual(country_label("Нидерланды"), "🇳🇱 Нидерланды")
-        self.assertEqual(country_label(" germany "), "🇩🇪 Германия")
+    def test_country_code_and_detected_name(self):
+        self.assertEqual(country_label("US|США"), "🇺🇸 США")
+        self.assertEqual(country_label("NL|Нидерланды"), "🇳🇱 Нидерланды")
+        self.assertEqual(country_label("de"), "🇩🇪 DE")
 
-    def test_unknown_country_is_hidden(self):
-        self.assertIsNone(country_label("France"))
+    def test_any_detected_country_is_supported(self):
+        self.assertEqual(country_label("FR|Франция"), "🇫🇷 Франция")
 
 
-class ProfileTests(unittest.TestCase):
-    def test_profiles(self):
-        self.assertEqual(profile_flow("standard"), "")
-        self.assertEqual(profile_flow("vision"), "xtls-rprx-vision")
-
-    def test_purchase_payload_for_amnezia(self):
+class KeyTests(unittest.TestCase):
+    def test_purchase_payload_has_one_key_variant(self):
         self.assertEqual(
-            subscription_payload(1, 2, 3, "amnezia", "vision"),
+            subscription_payload(1, 2, 3),
             {
                 "user_id": 1,
                 "plan_id": 2,
                 "node_id": 3,
-                "client_type": "amnezia",
-                "flow": "xtls-rprx-vision",
+                "client_type": "universal",
+                "flow": "",
                 "fingerprint": "chrome",
             },
         )
 
-    def test_invalid_options(self):
-        with self.assertRaises(ValueError):
-            profile_flow("tls")
-        with self.assertRaises(ValueError):
-            subscription_payload(1, 2, 3, "unknown", "standard")
-
-    def test_rotation_payload_preserves_selected_profile(self):
+    def test_rotation_payload_has_one_key_variant(self):
         self.assertEqual(
-            rotation_payload(7, "amnezia", "vision"),
+            rotation_payload(7),
             {
                 "node_id": 7,
-                "client_type": "amnezia",
-                "flow": "xtls-rprx-vision",
+                "client_type": "universal",
+                "flow": "",
                 "fingerprint": "chrome",
             },
         )

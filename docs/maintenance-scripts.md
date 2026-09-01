@@ -106,13 +106,6 @@ sudo scripts/configure_3xui_node_firewall.sh apply \
 master → child. Полная процедура, ручной откат и восстановление через консоль
 описаны в [`new-node-firewall.md`](new-node-firewall.md).
 
-## AmneziaWG
-
-Скрипты `run_standalone_amneziawg_node.sh`,
-`copy_standalone_amneziawg_node.sh` и связанные тесты являются отдельным
-экспериментальным toolkit. Они не участвуют в основном VLESS-потоке 3x-ui и не
-должны использоваться для настройки master/child.
-
 ## Sensitive debug
 
 `capture_sensitive_debug.py` получает разрешение через debug-сессию VPN Admin и
@@ -121,17 +114,3 @@ master → child. Полная процедура, ручной откат и в
 
 После диагностики закройте debug-сессию и при необходимости ротируйте затронутые
 пароли и токены.
-
-## Удалённые компоненты
-
-В `newnode` отсутствуют и не должны восстанавливаться:
-
-- `scripts/deploy_vpn_node.sh`;
-- `scripts/run_standalone_xray_node.sh`;
-- `scripts/copy_standalone_xray_node.sh`;
-- `scripts/check_node_agent.sh`;
-- контейнеры `vpn-xray` и `vpn-node-agent`;
-- Xray gRPC/protobuf-клиент.
-
-Вместо них используйте встроенную multi-node модель 3x-ui по инструкции
-[`3x-ui-master.md`](3x-ui-master.md).

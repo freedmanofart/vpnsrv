@@ -45,8 +45,8 @@ THREEXUI_CHILD_INBOUND_SYNC_MODE=all
 VPN_API_URL=http://127.0.0.1:8000
 SERVICE_API_TOKEN=<service-token>
 VPN_NODE_PROVIDER=3x-ui
-VPN_NODE_REGION=sw
 VPN_NODE_CAPACITY=100
+VPN_NODE_IP=203.0.113.10
 THREEXUI_INBOUND_ID=8
 VPN_PUBLIC_HOST=child.example
 VPN_PUBLIC_PORT=2453
@@ -71,11 +71,16 @@ python3 scripts/register_3xui_node.py
 
 Повторный запуск обновляет записи по имени и VLESS-конфигурацию. Скрипт не
 печатает токены. `--panel-only` ограничивает работу регистрацией в 3x-ui.
+Страна определяется по `VPN_NODE_IP` через HTTPS API `ipwho.is` и
+сохраняется как ISO-код и название. При недоступности сервиса регистрация
+останавливается, чтобы в Telegram не появилась нода без страны. Для тестового
+адреса или ручной коррекции можно явно задать `VPN_NODE_REGION=DE|Германия`.
 
 ## Выпуск и перевыпуск ключа
 
 Откройте `http://localhost:8000`, выберите пользователя и нажмите
-«Перевыпустить», затем укажите ID логической ноды. Приложение создаёт UUID через
+«Перевыпустить», затем укажите ID логической ноды. Приложение создаёт один тип
+ключа — VLESS Reality xHTTP — через
 `/panel/api/clients/add`, переносит срок действия и Telegram ID, удаляет прежний
 управляемый клиент и формирует URI из конфигурации inbound. Старую gRPC-запись,
 которой уже нет в 3x-ui, приложение пропускает, что позволяет миграцию.
@@ -96,4 +101,4 @@ curl -H "Authorization: Bearer $SERVICE_API_TOKEN" http://127.0.0.1:8000/vpn/nod
 - UUID виден только в 3x-ui: он создан вручную и не управляется VPN Admin.
 
 Firewall намеренно вне этого скрипта. Его отдельная настройка и аварийный откат
-описаны в `docs/3x-ui-node-firewall.md`.
+описаны в `docs/new-node-firewall.md`.
