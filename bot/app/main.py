@@ -1,4 +1,5 @@
 import asyncio
+import math
 import html
 from io import BytesIO
 import logging
@@ -95,8 +96,8 @@ def popup_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="💳 Оплатить"),
-                KeyboardButton(text="👤 Личный кабинет"),
+                KeyboardButton(text="💳 Приобрести подписку"),
+                KeyboardButton(text="👤 Управление подпиской"),
             ],
             [
                 KeyboardButton(text="🏷 Промокод"),
@@ -173,12 +174,12 @@ def purchase_tiers_keyboard(tiers: dict[str, list[dict]]) -> ReplyKeyboardMarkup
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="💳 Оплатить",
+                    text="💳 Приобрести подписку",
                     callback_data="buy_vpn",
                 ),
             ],
             [
-                InlineKeyboardButton(text="👤 Личный кабинет", callback_data="vpn_status"),
+                InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status"),
             ],
             [
                 InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"),
@@ -216,7 +217,7 @@ def vpn_ready_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📡 Мой VPN",
+                    text="👤 Управление подпиской",
                     callback_data="vpn_status",
                 ),
             ],
@@ -236,6 +237,38 @@ def active_vpn_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔄 Перевыпустить / сменить страну", callback_data="vpn_reissue")],
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
     ])
+
+
+def human_traffic(value: int | None) -> str:
+    if value is None:
+        return "данные временно недоступны"
+    gib = value / (1024 ** 3)
+    return f"{gib:.1f} ГБ"
+
+
+def subscription_text(data: dict) -> str:
+    subscription = data.get("subscription")
+    client = data.get("vpn_client")
+    if not subscription:
+        return "👤 <b>Управление подпиской</b>\n\nУ вас пока нет активной подписки."
+    active = subscription.get("status") == "active"
+    days = math.ceil(float(subscription.get("days_remaining") or 0))
+    expires_at = (subscription.get("expires_at") or "—").replace("T", " ").replace("+00:00", "")
+    connections = client.get("max_connections", 0) if client else 0
+    connection_text = "без ограничений" if connections == 0 else str(connections)
+    if client and client.get("traffic_limit_gb", 0) == 0:
+        traffic_text = "без ограничений"
+    else:
+        traffic_text = human_traffic(client.get("traffic_remaining_bytes") if client else None)
+    return (
+        "👤 <b>Управление подпиской</b>\n\n"
+        f"Статус: {'🟢 Активна' if active else '🔴 Истекла'}\n"
+        f"Тариф: <b>{html.escape(str(subscription.get('plan_name') or '—'))}</b>\n"
+        f"Осталось дней: <b>{days}</b>\n"
+        f"Осталось трафика: <b>{traffic_text}</b>\n"
+        f"Одновременных подключений: <b>{connection_text}</b>\n"
+        f"Действует до: <code>{expires_at} UTC</code>"
+    )
 
 
 async def show_screen(
@@ -612,16 +645,11 @@ async def vpn_command_handler(message: Message):
         subscription = data.get("subscription")
         client = data.get("vpn_client")
         if not subscription:
-            text = "📡 <b>Мой VPN</b>\n\nУ вас пока нет активной подписки."
+            text = subscription_text(data)
             keyboard = main_menu()
         else:
             expires_at = (subscription.get("expires_at") or "—").replace("T", " ").replace("+00:00", "")
-            text = (
-                "📡 <b>Мой VPN</b>\n\n"
-                f"Подписка: {'🟢 Активна' if subscription.get('status') == 'active' else '🔴 Истекла'}\n"
-                f"VPN: {'🟢 Подключён' if client else '🔴 Не настроен'}\n"
-                f"Действует до: <code>{expires_at} UTC</code>"
-            )
+            text = subscription_text(data)
             keyboard = active_vpn_keyboard() if client else main_menu()
         await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     except Exception:
@@ -648,12 +676,12 @@ async def help_command_handler(message: Message):
     )
 
 
-@router.message(F.text == "💳 Оплатить")
+@router.message(F.text.in_({"💳 Приобрести подписку", "💳 Оплатить"}))
 async def popup_buy_handler(message: Message, state: FSMContext):
     await buy_command_handler(message, state)
 
 
-@router.message(F.text == "👤 Личный кабинет")
+@router.message(F.text.in_({"👤 Управление подпиской", "👤 Личный кабинет"}))
 async def popup_vpn_handler(message: Message):
     await vpn_command_handler(message)
 

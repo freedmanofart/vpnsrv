@@ -7,8 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.user import User
 from app.db.models.subscription import Subscription
 from app.db.models.vpn_client import VPNClient
+from app.db.models.plan import Plan
+from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.session import get_db
 from app.core.security import require_api_access
+from app.services.threexui import ThreeXUIClient, ThreeXUIError
 
 
 router = APIRouter(
@@ -78,6 +81,28 @@ async def get_vpn_status(
 
     client = result.scalars().first()
 
+    plan = await db.get(Plan, subscription.plan_id)
+    traffic_used_bytes = None
+    traffic_remaining_bytes = None
+    if client:
+        config_result = await db.execute(
+            select(VPNNodeConfig).where(
+                VPNNodeConfig.node_id == client.node_id,
+                VPNNodeConfig.protocol == "vless",
+            )
+        )
+        node_config = config_result.scalar_one_or_none()
+        if node_config:
+            try:
+                traffic = await ThreeXUIClient(node_config.config.get("api_address")).get_client_traffic(
+                    f"vpn-{client.id}"
+                )
+                traffic_used_bytes = int(traffic.get("up", 0)) + int(traffic.get("down", 0))
+                total_bytes = int(traffic.get("total", 0))
+                traffic_remaining_bytes = max(total_bytes - traffic_used_bytes, 0) if total_bytes else None
+            except (ThreeXUIError, TypeError, ValueError):
+                pass
+
     now = datetime.now(timezone.utc)
 
     subscription_active = (
@@ -97,6 +122,8 @@ async def get_vpn_status(
             ),
             "starts_at": subscription.starts_at,
             "expires_at": subscription.expires_at,
+            "plan_name": plan.name if plan else None,
+            "days_remaining": max((subscription.expires_at - now).total_seconds() / 86400, 0),
         },
         "vpn_client": (
             {
@@ -107,6 +134,10 @@ async def get_vpn_status(
                 "fingerprint": client.fingerprint,
                 "status": client.status,
                 "expires_at": client.expires_at,
+                "max_connections": client.max_connections,
+                "traffic_limit_gb": client.traffic_limit_gb,
+                "traffic_used_bytes": traffic_used_bytes,
+                "traffic_remaining_bytes": traffic_remaining_bytes,
             }
             if client
             else None

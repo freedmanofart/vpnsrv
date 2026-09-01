@@ -137,3 +137,9 @@ class ThreeXUIClient:
             for item in clients
             if isinstance(item, dict)
         ]
+
+    async def get_client_traffic(self, email: str) -> dict:
+        traffic = await self._request("GET", f"clients/traffic/{quote(email, safe='')}")
+        if not isinstance(traffic, dict):
+            raise ThreeXUIError("3x-ui returned invalid client traffic")
+        return traffic
