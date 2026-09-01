@@ -1,20 +1,31 @@
-# Обслуживающие скрипты
+# Обслуживание
 
-Документ относится к ветке `newnode`, где управление нодами выполняет 3x-ui
-master. Старые скрипты развёртывания Xray и собственного node-agent удалены.
+## Состав production
 
-## Общие правила
+```text
+postgres
+vpn-api
+vpn-bot
+vpn-worker
+3x-ui master (systemd)
+```
 
-- Запускайте команды из корня репозитория.
-- Не включайте `set -x`: параметры могут содержать секреты.
-- `.env`, резервные копии и `THREEXUI_API_TOKEN` являются секретами.
-- Перед изменениями запускайте `python3 scripts/configctl.py validate`.
-- Тесты реального платежного или VPN-потока изменяют данные.
+Redis и мониторинг отсутствуют. PostgreSQL — общий контейнер `postgres`, данные
+VPN находятся только в отдельной БД `vpn`.
 
-## `configctl.py`
+## Проверка состояния
 
-Скрипт атомарно изменяет `.env`, сохраняет комментарии, выставляет права `0600`
-и маскирует секреты.
+```bash
+cd /home/freedman/vpn-service
+docker compose ps
+curl -fsS http://127.0.0.1:8000/health
+docker compose logs --since=10m api bot worker
+systemctl status x-ui vpn-threexui-proxy.service --no-pager
+```
+
+Worker в норме пишет `xray_errors=0`.
+
+## Конфигурация
 
 ```bash
 python3 scripts/configctl.py validate
@@ -24,93 +35,53 @@ python3 scripts/configctl.py set THREEXUI_VERIFY_TLS true
 python3 scripts/configctl.py apply --services api worker
 ```
 
-Не генерируйте произвольное значение для `THREEXUI_API_TOKEN`: токен должен
-быть создан самой master-панелью 3x-ui. Открытое значение показывается один раз.
+`.env` должен иметь права `0600`. Не используйте `set -x`.
 
-## `backup.sh`
+## Backup
 
-Создаёт:
-
-1. `vpn-db-<UTC>.dump` — dump отдельной БД `vpn` из контейнера `postgres`;
-2. `vpn-config-<UTC>.tar.gz` — `.env` и Compose-конфигурация.
+`backup.sh` создаёт custom-format dump БД `vpn` из контейнера `postgres` и
+защищённый архив `.env`/Compose:
 
 ```bash
-sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/mnt/secure/vpn \
+sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/var/backups/vpn-service \
   scripts/backup.sh
 ```
 
-Архив содержит API token 3x-ui и должен храниться как секрет. Конфигурация и БД
-самой панели 3x-ui в этот backup не входят — для master и child необходимо
-настроить отдельные резервные копии средствами панели или ОС.
-
-## `verify_backup.sh`
-
-Разворачивает dump во временную PostgreSQL-БД, проверяет структуру и удаляет
-временную БД. Рабочую БД не изменяет.
+Проверка dump во временной БД того же PostgreSQL:
 
 ```bash
 sudo scripts/verify_backup.sh \
-  /var/backups/vpn-service/vpn-db-20260831T120000Z.dump
+  /var/backups/vpn-service/vpn-db-<timestamp>.dump
 ```
 
-## E2E-проверки control plane
+Backup не включает БД 3x-ui. Её резервируйте отдельно.
 
-Перед запуском необходимы тестовые пользователь, тариф и логическая нода,
-привязанная к тестовому inbound 3x-ui.
+## Обновление
 
 ```bash
-python3 scripts/e2e_payment_webhook.py
-python3 scripts/e2e_device_profile.py
+cd /home/freedman/vpn-service
+git pull --ff-only origin newnode
+python3 scripts/configctl.py validate
+docker compose build api bot worker
+docker compose run --rm api alembic upgrade head
+docker compose up -d --remove-orphans
+curl -fsS http://127.0.0.1:8000/health
 ```
 
-Проверяйте, какие сущности создаёт конкретный скрипт, и не запускайте его против
-боевой оплаты без отдельного тестового окружения.
+Перед удалением контейнера или БД всегда создавайте backup. Не удаляйте `mydb`
+из общего PostgreSQL: VPN использует только БД `vpn`.
 
-## Проверка 3x-ui
-
-Через VPN Admin:
-
-1. открыть раздел Nodes;
-2. выполнить Health;
-3. убедиться, что master доступен и inbound существует;
-4. выполнить Reconcile;
-5. проверить `errors=0`.
-
-На master-сервере:
+## Тесты
 
 ```bash
-systemctl status x-ui
-journalctl -u x-ui --since=-10m --no-pager
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-Для child на `159.223.22.59` сначала открыть туннель:
+Unit-тесты не обращаются к production 3x-ui. Скрипты `e2e_*` создают реальные
+данные и запускаются только в отдельном тестовом окружении.
 
-```bash
-ssh -N -L 2223:127.0.0.1:60628 root@159.223.22.59
-```
+## Firewall
 
-Затем проверить Nodes/Probe из master и состояние панели child в браузере.
-
-## Firewall новой 3x-ui ноды
-
-`configure_3xui_node_firewall.sh` включает минимальные правила для SSH и доступа
-master к панели child через Tailscale. Перед применением он запускает systemd
-timer: если оператор не выполнит `confirm`, правила автоматически откатятся.
-
-```bash
-sudo scripts/configure_3xui_node_firewall.sh apply \
-  --master-ip 100.102.21.123 --port 60628 --timeout 180
-```
-
-Не подтверждайте изменения, пока не проверены новая SSH-сессия и соединение
-master → child. Полная процедура, ручной откат и восстановление через консоль
-описаны в [`new-node-firewall.md`](new-node-firewall.md).
-
-## Sensitive debug
-
-`capture_sensitive_debug.py` получает разрешение через debug-сессию VPN Admin и
-может сохранить секретные значения в audit/Loki. В новой архитектуре он не
-читает Reality private key: ключ находится в БД 3x-ui, а не в этом проекте.
-
-После диагностики закройте debug-сессию и при необходимости ротируйте затронутые
-пароли и токены.
+Для новой ноды используйте только `configure_3xui_node_firewall.sh` с таймером
+аварийного отката. Полная процедура — в
+[`new-node-firewall.md`](new-node-firewall.md).

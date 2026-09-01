@@ -1,148 +1,97 @@
-# Firewall новой 3x-ui ноды и аварийный откат
+# Firewall новой 3x-ui ноды
 
-Документ описывает включение firewalld на новой child-ноде 3x-ui. Основной
-сценарий — master обращается к панели через Tailscale, x-ui слушает только
-`127.0.0.1`, а Tailscale Serve проксирует порт `60628` внутри tailnet.
+Этот документ описывает отдельный скрипт
+`scripts/configure_3xui_node_firewall.sh`. Регистрация ноды firewall не меняет.
 
-## Результат диагностики тестовой ноды
+## Границы безопасности
 
-Во время диагностики на тестовой ноде `159.223.22.59` firewalld временно
-останавливался. Это не устранило timeout master → `100.89.228.2:60628`, поэтому
-локальный firewall child не был причиной ошибки. После восстановления службы
-Tailscale на master сетевое соединение заработало.
+- не закрывайте текущую SSH-сессию до подтверждения;
+- заранее откройте web/serial console провайдера;
+- укажите фактический IP master и API-порт child;
+- не открывайте административную панель всему интернету без необходимости;
+- VPN inbound добавляется отдельным правилом 3x-ui/провайдера и не является
+  API-портом панели.
 
-Политика текущего tailnet содержит unrestricted grant `* → *`; отдельное
-разрешение ACL для этой ноды при такой политике не требуется. При переходе на
-ограничительную ACL нужно явно разрешить TCP/60628 от master к child.
+Скрипт сохраняет состояние firewalld, добавляет точечные правила и запускает
+transient systemd timer. Без `confirm` изменения автоматически откатываются.
 
-Первоначальный HTTP `404` был вызван пустым или неверным `basePath` в Nodes
-master. На child настроен web base path `/panel/`, а 3x-ui автоматически
-добавляет маршрут `panel/api/...`. Рабочий endpoint:
-
-```text
-http://100.89.228.2:60628/panel/panel/api/server/status
-```
-
-Не оставлять firewalld выключенным после завершения диагностики.
-
-## Что делает скрипт
-
-[`configure_3xui_node_firewall.sh`](../scripts/configure_3xui_node_firewall.sh):
-
-- запоминает, были ли firewalld активен и включён в автозагрузку;
-- сохраняет вывод `firewall-cmd --list-all-zones` в `/var/backups/firewalld`;
-- включает firewalld;
-- сохраняет доступ по SSH в зоне `public`;
-- разрешает `60628/tcp` только от указанного Tailscale IPv4 master;
-- запускает transient systemd timer аварийного отката;
-- не открывает панель всему интернету;
-- не удаляет существующие правила Docker, VPN и мониторинга;
-- после `confirm` оставляет правила и отменяет таймер;
-- при ручном или автоматическом `rollback` удаляет только правила, добавленные
-  данным запуском, и восстанавливает исходное состояние службы firewalld.
-
-## Подготовка
-
-Скопировать скрипт на child и сделать исполняемым:
+## Установка без применения
 
 ```bash
 scp scripts/configure_3xui_node_firewall.sh \
-  root@159.223.22.59:/usr/local/sbin/configure_3xui_node_firewall
-ssh root@159.223.22.59 \
+  root@<child-host>:/usr/local/sbin/configure_3xui_node_firewall
+ssh root@<child-host> \
   'chmod 0750 /usr/local/sbin/configure_3xui_node_firewall'
 ```
 
-На master узнать Tailscale IPv4:
+Это только копирует файл и не меняет firewall.
+
+## Предварительная проверка
 
 ```bash
-tailscale ip -4
-```
-
-На child до применения правил проверить:
-
-```bash
+systemctl is-active sshd
 systemctl is-active x-ui
-systemctl is-active tailscaled
-tailscale serve status
-ss -lntp | grep 60628
+systemctl is-active firewalld
+firewall-cmd --check-config
+firewall-cmd --list-all-zones
+ss -lntp
 ```
 
-Ожидается `x-ui` на `127.0.0.1:60628` и `tailscaled` на Tailscale IP child.
+Запишите SSH-порт, API-порт панели и публичные порты VPN inbound. Сделайте
+снимок текущих правил:
 
-## Безопасное включение правил
+```bash
+install -d -m 700 /var/backups/firewalld
+firewall-cmd --list-all-zones \
+  > /var/backups/firewalld/before-$(date -u +%Y%m%dT%H%M%SZ).txt
+```
 
-Оставить текущую SSH-сессию открытой. Запустить с окном отката 3 минуты:
+## Применение с аварийным откатом
+
+Оставьте первую SSH-сессию открытой:
 
 ```bash
 sudo /usr/local/sbin/configure_3xui_node_firewall apply \
-  --master-ip 100.102.21.123 \
-  --port 60628 \
+  --master-ip <master-ip> \
+  --port <child-api-port> \
   --timeout 180
 ```
 
-Скрипт напечатает token, например:
+Сохраните напечатанный token. До подтверждения:
 
-```text
-20260831T210000Z-12345
-```
-
-Не подтверждать изменения сразу. Сначала открыть **новую** SSH-сессию:
-
-```bash
-ssh root@159.223.22.59
-```
-
-Затем с master проверить Tailscale и TCP:
+1. откройте вторую SSH-сессию;
+2. с master проверьте TCP/HTTPS панели;
+3. выполните Probe в 3x-ui master;
+4. проверьте публичное подключение к VPN inbound;
+5. посмотрите добавленные rich rules.
 
 ```bash
-tailscale ping 100.89.228.2
-curl -v --max-time 10 \
-  http://100.89.228.2:60628/panel/panel/api/server/status
+sudo /usr/local/sbin/configure_3xui_node_firewall status <token>
+sudo firewall-cmd --zone=public --list-rich-rules
 ```
 
-Ответ HTTP `401`, `403` или `404` подтверждает, что сеть работает. После этого
-можно разбирать API token и base path. С действующим токеном scope `node-sync`
-ожидается HTTP `200`. Timeout означает, что подтверждать firewall пока нельзя:
-нужно проверить Tailscale на master, маршрут и ACL tailnet.
-
-Посмотреть состояние таймера и firewall:
+Только после успешных проверок:
 
 ```bash
-sudo /usr/local/sbin/configure_3xui_node_firewall status \
-  20260831T210000Z-12345
+sudo /usr/local/sbin/configure_3xui_node_firewall confirm <token>
 ```
 
-Если новая SSH-сессия и API-проверка работают, отменить аварийный откат:
+## Откат
+
+Если доступ нарушен, не выполняйте `confirm`: timer восстановит сохранённое
+состояние. Немедленный ручной откат:
 
 ```bash
-sudo /usr/local/sbin/configure_3xui_node_firewall confirm \
-  20260831T210000Z-12345
+sudo /usr/local/sbin/configure_3xui_node_firewall rollback <token>
 ```
 
-## Аварийный откат
-
-Если соединение потеряно, ничего не подтверждать. По истечении `--timeout`
-systemd автоматически запустит rollback. Если firewalld до запуска был
-остановлен, он снова будет остановлен; если был активен, скрипт оставит его
-активным и удалит только добавленные этим запуском правила.
-
-Для немедленного ручного отката:
+Проверка systemd-журнала:
 
 ```bash
-sudo /usr/local/sbin/configure_3xui_node_firewall rollback \
-  20260831T210000Z-12345
+sudo journalctl -u "vpn-node-firewall-rollback-<token>.service" --no-pager
 ```
 
-После автоматического отката проверить журнал:
-
-```bash
-sudo journalctl \
-  -u 'vpn-node-firewall-rollback-20260831T210000Z-12345.service' \
-  --no-pager
-```
-
-Если и после таймера SSH не восстановился, открыть web/serial console
-провайдера и выполнить:
+Если SSH уже недоступен, используйте console провайдера:
 
 ```bash
 sudo systemctl stop firewalld
@@ -150,39 +99,25 @@ sudo systemctl status sshd --no-pager
 sudo ss -lntp | grep ':22'
 ```
 
-После восстановления доступа не делать массовый сброс `/etc/firewalld`.
-Сначала изучить backup из `/var/backups/firewalld` и существующие правила:
+После восстановления не удаляйте `/etc/firewalld` и не выполняйте массовый
+reset. Сначала сравните текущие правила с backup.
+
+## Возврат к стандартному открытому firewall
+
+Если нужно полностью отменить ограничения скрипта, используйте `rollback` с
+token того запуска. Он возвращает исходное состояние, включая состояние службы
+firewalld. Если token утрачен, восстановите правила вручную из файла
+`/var/backups/firewalld/*` через console провайдера.
+
+Минимальная проверка после отката:
 
 ```bash
-sudo firewall-cmd --check-config
-sudo firewall-cmd --list-all-zones
+firewall-cmd --check-config
+firewall-cmd --get-active-zones
+firewall-cmd --list-all-zones
+systemctl is-active sshd x-ui
 ```
 
-## Проверка после подтверждения
-
-```bash
-sudo systemctl is-enabled firewalld
-sudo systemctl is-active firewalld
-sudo firewall-cmd --zone=public --query-service=ssh
-sudo firewall-cmd --zone=public --query-port=60628/tcp
-sudo firewall-cmd --zone=public --list-rich-rules
-sudo ss -lntp | grep 60628
-```
-
-Ожидается:
-
-- firewalld — `enabled` и `active`;
-- SSH — разрешён;
-- общий публичный порт `60628/tcp` — `no`;
-- rich rule разрешает `60628/tcp` только от Tailscale-IP master;
-- x-ui не слушает `0.0.0.0:60628`;
-- Tailscale Serve публикует порт только внутри tailnet.
-
-## Полностью открытый вариант
-
-Если выбран публичный вариант из
-[`3x-ui-master.md`](3x-ui-master.md), этот скрипт не следует применять без
-изменений: он намеренно не открывает `60628/tcp` всему интернету. Для публичной
-схемы обязательны HTTPS, проверка сертификата, API token, закрытый base path и
-отдельное правило cloud firewall. Команды ручного публичного открытия и полного
-точечного отката приведены в основной инструкции.
+Для публичной панели обязательны HTTPS, API token, закрытый base path и
+ограничение источника в cloud firewall/firewalld. Для Tailscale разрешите
+master → child API port в tailnet policy и не публикуйте панель наружу.

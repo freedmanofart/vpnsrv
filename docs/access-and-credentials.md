@@ -1,116 +1,81 @@
-# Доступы, служебные страницы и переменные
+# Доступы и переменные
 
-Фактические пароли, токены, закрытые base path и Reality private keys в Git не
-хранятся.
+Секреты хранятся только в `/home/freedman/vpn-service/.env` с правами `0600`.
+Не помещайте в Git токены, пароли, закрытые base path, полный VLESS URI и
+Reality private key.
 
-## Где выполняются команды
+## VPN Admin
 
-- **Основной сервер** — Docker Compose control plane и 3x-ui master.
-- **Child VPS** — удалённая установка 3x-ui и управляемый ею Xray.
-- **Операторский компьютер** — SSH-туннели и браузер.
+API опубликован только на loopback основного сервера:
 
-## Служебные страницы control plane
-
-| Страница | Адрес через туннель | Доступ |
+| Адрес | Назначение | Доступ |
 |---|---|---|
-| VPN Admin | `http://localhost:8000` или `/admin` | HTTP Basic |
-| Swagger | `http://localhost:8000/docs` | HTTP Basic или service token |
-| API health | `http://localhost:8000/health` | без авторизации |
-| DB health | `http://localhost:8000/db-health` | авторизация |
+| `http://127.0.0.1:8000/` | redirect в VPN Admin | HTTP Basic |
+| `http://127.0.0.1:8000/admin` | админка | HTTP Basic |
+| `http://127.0.0.1:8000/docs` | OpenAPI | HTTP Basic/service token |
+| `http://127.0.0.1:8000/health` | API health | без авторизации |
+| `http://127.0.0.1:8000/db-health` | PostgreSQL health | авторизация |
+
+Для доступа с операторской машины откройте SSH-туннель:
 
 ```bash
-ssh -N -L 8000:127.0.0.1:8000 codex@192.168.10.60
+ssh -N -L 8000:127.0.0.1:8000 codex@<master-host>
 ```
 
-Откройте `http://localhost:8000/admin` в браузере. Логин и пароль задаются
-только в `.env` основного сервера:
+Затем откройте `http://localhost:8000/admin`.
 
 ```dotenv
-ADMIN_USERNAME=<логин-администратора>
-ADMIN_PASSWORD=<длинный-уникальный-пароль>
+ADMIN_USERNAME=<admin-login>
+ADMIN_PASSWORD=<long-random-password>
 ```
 
-Это HTTP Basic, поэтому браузер показывает стандартное окно входа. Не
-используйте значения из `.env.example` (`admin` / `change_me`) в рабочей среде.
-Привязка порта `8000` остаётся к `127.0.0.1`: админка открывается локально на
-сервере либо через SSH-туннель и не должна публиковаться напрямую в интернет.
+## PostgreSQL
 
-Child 3x-ui на тестовом VPS:
+Используется один внешний контейнер `postgres` (`postgres:16-alpine`) и
+отдельная БД `vpn`. Compose приложения PostgreSQL не запускает.
 
-```bash
-ssh -N -L 2223:127.0.0.1:60628 root@159.223.22.59
+```dotenv
+POSTGRES_CONTAINER=postgres
+VPN_DATABASE_NAME=vpn
+DATABASE_URL=postgresql+asyncpg://<user>:<password>@host.docker.internal:6432/vpn
 ```
 
-После этого панель доступна на `http://127.0.0.1:2223`.
+Не меняйте БД `mydb`: она принадлежит другому приложению в том же экземпляре.
 
-## Основные переменные
+## Остальные переменные
 
-| Группа | Переменные | Назначение |
-|---|---|---|
-| Админка | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | VPN Admin и Swagger |
-| Внутренний API | `SERVICE_API_TOKEN`, `API_URL` | bot и внутренние вызовы |
-| 3x-ui | `THREEXUI_API_TOKEN`, `THREEXUI_VERIFY_TLS` | доступ API/worker к master |
-| Telegram | `BOT_TOKEN`, `TELEGRAM_CHANNEL_URL`, `SUPPORT_URL` | бот и ссылки |
-| Оплата | `PAYMENT_PROVIDER`, `PAYMENT_WEBHOOK_SECRET`, `YOOMONEY_*` | платежи |
-| PostgreSQL | `DATABASE_URL`, `POSTGRES_CONTAINER`, `VPN_DATABASE_NAME` | единый внешний контейнер, отдельная БД `vpn` |
+| Группа | Переменные |
+|---|---|
+| 3x-ui | `THREEXUI_API_TOKEN`, `THREEXUI_VERIFY_TLS` |
+| Telegram | `BOT_TOKEN`, `TELEGRAM_CHANNEL_URL`, `SUPPORT_URL`, `BOT_PLAN_CODES` |
+| API | `API_URL`, `SERVICE_API_TOKEN` |
+| Платежи | `PAYMENT_PROVIDER`, `PAYMENT_WEBHOOK_SECRET`, `YOOMONEY_*` |
+| Worker | `LIFECYCLE_INTERVAL_SECONDS`, `LIFECYCLE_ADVISORY_LOCK_KEY` |
+| Admin | `ADMIN_USERNAME`, `ADMIN_PASSWORD` |
 
-Переменные `XRAY_API_ADDRESS`, `XRAY_INBOUND_TAG`, `XRAY_MANAGEMENT_MODE`,
-`NODE_AGENT_TOKEN`, `NODE_AGENT_NODE_ID` и `CONTROL_PLANE_URL` удалены.
+Redis, Grafana, Loki, Alloy, собственный Xray и node-agent удалены. Их
+переменные больше не используются.
 
-## API-токены 3x-ui
-
-Используются два разных назначения:
-
-1. На child создаётся `node-sync` token, который хранится только в настройках
-   Nodes master-панели.
-2. На master создаётся отдельный `node-sync` token для VPN API. Он хранится
-   только в `.env` как `THREEXUI_API_TOKEN`.
-
-Не используйте один токен одновременно для обеих связей. Admin scope приложению
-не требуется.
-
-## Просмотр и изменение
+## Безопасное изменение
 
 ```bash
 cd /home/freedman/vpn-service
+python3 scripts/configctl.py validate
 python3 scripts/configctl.py get ADMIN_USERNAME
 python3 scripts/configctl.py get ADMIN_PASSWORD
 python3 scripts/configctl.py get ADMIN_PASSWORD --show-secret
-python3 scripts/configctl.py get THREEXUI_API_TOKEN
-python3 scripts/configctl.py get THREEXUI_API_TOKEN --show-secret
-```
-
-Обычный `get` маскирует секреты. `--show-secret` используйте только в защищённой
-SSH-сессии. Проверка прав:
-
-```bash
-stat -c '%a %U:%G %n' .env
-```
-
-Ожидаются права `0600`.
-
-После изменения токена master:
-
-```bash
-python3 scripts/configctl.py set THREEXUI_API_TOKEN '<new-token>'
-python3 scripts/configctl.py apply --services api worker
-```
-
-Сначала выполните Health в VPN Admin, затем отключите прежний токен в 3x-ui.
-
-Для установки или смены учётных данных VPN Admin:
-
-```bash
-python3 scripts/configctl.py set ADMIN_USERNAME '<новый-логин>'
-python3 scripts/configctl.py set ADMIN_PASSWORD '<новый-длинный-пароль>'
+python3 scripts/configctl.py set ADMIN_PASSWORD '<new-password>'
 python3 scripts/configctl.py apply --services api
 ```
 
-Проверка после перезапуска (код `200` означает успешную авторизацию):
+Обычный `get` маскирует секреты. `--show-secret` используйте только в
+защищённой SSH-сессии.
+
+Проверка:
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' \
   -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" http://127.0.0.1:8000/admin
+curl -fsS -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" \
+  http://127.0.0.1:8000/db-health
 ```
-
-Подробная настройка топологии: [`3x-ui-master.md`](3x-ui-master.md).
