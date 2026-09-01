@@ -78,6 +78,8 @@ async def reconcile_node(
                 client_uuid=client.client_uuid,
                 email=email,
                 flow=client.flow,
+                expiry_time=int(client.expires_at.timestamp() * 1000),
+                limit_ip=client.max_connections,
             )
             report.restored += 1
         except ThreeXUIClientAlreadyExists:

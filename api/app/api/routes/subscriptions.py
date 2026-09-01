@@ -619,6 +619,7 @@ async def renew_subscription(
         client_type=(previous_client.client_type if previous_client else "universal"),
         flow=(previous_client.flow if previous_client else ""),
         fingerprint=(previous_client.fingerprint if previous_client else "firefox"),
+        max_connections=plan.max_connections,
         client_uuid=new_uuid,
         status="provisioning",
         expires_at=new_expires_at,
@@ -649,6 +650,9 @@ async def renew_subscription(
             client_uuid=new_client.client_uuid,
             email=f"vpn-{new_client.id}",
             flow=new_client.flow,
+            expiry_time=int(new_expires_at.timestamp() * 1000),
+            telegram_id=user.telegram_id,
+            limit_ip=new_client.max_connections,
         )
 
     except ThreeXUIError as exc:
@@ -764,6 +768,9 @@ async def rotate_subscription_client(
         raise HTTPException(status_code=400, detail="Unsupported fingerprint")
 
     user = await get_user(db, subscription.user_id)
+    plan = await db.get(Plan, subscription.plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
     target_node, target_config = await get_node_for_client(db, data.node_id, "vless")
     result = await db.execute(
         select(VPNClient)
@@ -781,6 +788,7 @@ async def rotate_subscription_client(
         client_type=data.client_type,
         flow=data.flow,
         fingerprint=data.fingerprint,
+        max_connections=plan.max_connections,
         client_uuid=str(uuid4()),
         status="provisioning",
         expires_at=subscription.expires_at,
@@ -799,6 +807,7 @@ async def rotate_subscription_client(
             flow=new_client.flow,
             expiry_time=int(subscription.expires_at.timestamp() * 1000),
             telegram_id=user.telegram_id,
+            limit_ip=new_client.max_connections,
         )
     except ThreeXUIError as exc:
         await db.rollback()

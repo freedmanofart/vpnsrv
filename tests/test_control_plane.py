@@ -19,6 +19,7 @@ import app.main as main_module
 from app.db.base import Base
 from app.db.models import (
     AuditLog,
+    Payment,
     Plan,
     Subscription,
     User,
@@ -139,11 +140,13 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
                 "code": "unused-plan",
                 "name": "Unused",
                 "duration_days": 5,
+                "max_connections": 3,
                 "price": "2.00",
                 "currency": "USD",
             },
         )
         self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual(3, created.json()["max_connections"])
         plan_id = created.json()["id"]
         deleted = await self.client.delete(
             f"/plans/{plan_id}", headers=self.service_headers
@@ -151,6 +154,43 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(204, deleted.status_code, deleted.text)
         async with self.session_factory() as db:
             self.assertIsNone(await db.get(Plan, plan_id))
+
+    async def test_admin_can_cancel_pending_payment(self) -> None:
+        async with self.session_factory() as db:
+            payment = Payment(
+                user_id=self.user_id,
+                plan_id=1,
+                node_id=self.node_id,
+                provider="mock",
+                provider_payment_id="admin-cancel-test",
+                idempotency_key="admin-cancel-test",
+                amount=Decimal("1.00"),
+                currency="USD",
+                status="pending",
+                client_type="universal",
+                flow="",
+                fingerprint="firefox",
+                details={},
+            )
+            db.add(payment)
+            await db.commit()
+            await db.refresh(payment)
+            payment_id = payment.id
+
+        response = await self.client.post(
+            f"/admin/payments/{payment_id}/status",
+            auth=self.admin_auth,
+            json={"status": "cancelled"},
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("cancelled", response.json()["status"])
+
+        invalid = await self.client.post(
+            f"/admin/payments/{payment_id}/status",
+            auth=self.admin_auth,
+            json={"status": "deleted"},
+        )
+        self.assertEqual(422, invalid.status_code, invalid.text)
 
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:

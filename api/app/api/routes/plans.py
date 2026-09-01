@@ -57,6 +57,7 @@ async def create_plan(
         code=data.code,
         name=data.name,
         duration_days=data.duration_days,
+        max_connections=data.max_connections,
         price=data.price,
         currency=data.currency,
         is_public=data.is_public,

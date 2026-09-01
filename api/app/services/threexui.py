@@ -69,6 +69,8 @@ class ThreeXUIClient:
         flow: str = "",
         expiry_time: int = 0,
         telegram_id: int = 0,
+        limit_ip: int = 0,
+        limit_hwid: int = 0,
     ) -> None:
         del level
         try:
@@ -84,8 +86,8 @@ class ThreeXUIClient:
                         "totalGB": 0,
                         "expiryTime": expiry_time,
                         "tgId": telegram_id,
-                        "limitIp": 0,
-                        "limitHwid": 0,
+                        "limitIp": limit_ip,
+                        "limitHwid": limit_hwid,
                     },
                     "inboundIds": [self._inbound_id(inbound_tag)],
                 },

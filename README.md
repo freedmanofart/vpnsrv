@@ -68,6 +68,9 @@ Inbound может работать на master или быть назначен
 [`docs/add-3x-ui-node.md`](docs/add-3x-ui-node.md).
 Полный жизненный цикл тарифа, оплаты, выдачи, продления и отзыва описан в
 [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md).
+
+Возможности и ограничения интеграции web admin с API 3x-ui:
+[`docs/admin-3xui-api.md`](docs/admin-3xui-api.md).
 Устройство, изменение и безопасный деплой Telegram-бота описаны в
 [`docs/editing-telegram-bot.md`](docs/editing-telegram-bot.md).
 

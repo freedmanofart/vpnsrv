@@ -37,6 +37,13 @@ class Plan(Base):
         nullable=False,
     )
 
+    max_connections: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+
     price: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),
         nullable=False,

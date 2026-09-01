@@ -410,6 +410,10 @@ async def create_vpn_client(
             detail="Subscription has expired",
         )
 
+    plan = await db.get(Plan, subscription.plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
     # -----------------------------------------------------
     # VPN Node
     # -----------------------------------------------------
@@ -489,6 +493,7 @@ async def create_vpn_client(
         client_type="universal",
         flow="",
         fingerprint="chrome",
+        max_connections=plan.max_connections,
         client_uuid=str(uuid4()),
         status="active",
         expires_at=subscription.expires_at,
@@ -514,6 +519,9 @@ async def create_vpn_client(
                 client_uuid=client.client_uuid,
                 email=f"vpn-{client.id}",
                 flow=client.flow,
+                expiry_time=int(subscription.expires_at.timestamp() * 1000),
+                telegram_id=user.telegram_id,
+                limit_ip=client.max_connections,
             )
         except ThreeXUIError:
             await db.rollback()

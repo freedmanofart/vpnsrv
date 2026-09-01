@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from typing import Literal
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,7 @@ from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
 from app.services.vless import build_vless_url
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
+from app.services.payments import PaymentError, process_payment_event
 from app.schemas.subscription import VPNClientRotate
 from app.api.routes.subscriptions import rotate_subscription_client
 from app.core.config import settings
@@ -51,6 +53,10 @@ class AdminUserRotate(BaseModel):
     client_type: str = "universal"
     flow: str = ""
     fingerprint: str = "firefox"
+
+
+class AdminPaymentStatusUpdate(BaseModel):
+    status: Literal["paid", "failed", "cancelled", "refunded"]
 
 
 logger = logging.getLogger(__name__)
@@ -146,10 +152,10 @@ async def overview(db: AsyncSession = Depends(get_db)):
         )
     return {
         "users": user_rows,
-        "plans": [{"id": x.id, "code": x.code, "name": x.name, "days": x.duration_days, "price": str(x.price), "currency": x.currency, "active": x.is_active} for x in plans],
+        "plans": [{"id": x.id, "code": x.code, "name": x.name, "duration_days": x.duration_days, "max_connections": x.max_connections, "price": str(x.price), "currency": x.currency, "active": x.is_active} for x in plans],
         "nodes": [{"id": x.id, "name": x.name, "provider": x.provider, "region": x.region, "ip": x.ip_address, "status": x.status, "health": x.health_status, "latency_ms": x.latency_ms, "last_seen_at": x.last_seen_at, "capacity": x.capacity, "connections": x.active_connections} for x in nodes if x.status != "disabled"],
         "subscriptions": [{"id": x.id, "user_id": x.user_id, "plan_id": x.plan_id, "status": x.status, "expires_at": x.expires_at} for x in subscriptions],
-        "clients": [{"id": x.id, "user_id": x.user_id, "subscription_id": x.subscription_id, "node_id": x.node_id, "client_type": x.client_type, "flow": x.flow, "status": x.status, "expires_at": x.expires_at, "last_connected_at": x.last_connected_at, "last_ip": x.last_ip, "link_overridden": bool(x.config_override)} for x in clients],
+        "clients": [{"id": x.id, "user_id": x.user_id, "subscription_id": x.subscription_id, "node_id": x.node_id, "client_type": x.client_type, "flow": x.flow, "max_connections": x.max_connections, "status": x.status, "expires_at": x.expires_at, "last_connected_at": x.last_connected_at, "last_ip": x.last_ip, "link_overridden": bool(x.config_override)} for x in clients],
         "payments": [{"id": x.id, "user_id": x.user_id, "provider": x.provider, "amount": str(x.amount), "currency": x.currency, "status": x.status, "subscription_id": x.subscription_id, "created_at": x.created_at} for x in payments],
         "devices": [{"id": x.id, "user_id": x.user_id, "name": x.name, "platform": x.platform, "status": x.status, "last_seen_at": x.last_seen_at, "expires_at": x.expires_at} for x in devices],
         "debug": [{"id": x.id, "created_by": x.created_by, "reason": x.reason, "status": x.status, "expires_at": x.expires_at} for x in debug_sessions],
@@ -237,6 +243,7 @@ async def update_user_access(
             client_type="universal",
             flow="",
             fingerprint="chrome",
+            max_connections=plan.max_connections,
             client_uuid=str(uuid4()),
             status=target_status,
             expires_at=expires_at,
@@ -254,6 +261,7 @@ async def update_user_access(
                     flow=client.flow,
                     expiry_time=int(expires_at.timestamp() * 1000),
                     telegram_id=user.telegram_id,
+                    limit_ip=client.max_connections,
                 )
             except ThreeXUIError as exc:
                 await db.rollback()
@@ -507,6 +515,50 @@ async def revoke_device(
     return {"id": device.id, "status": device.status}
 
 
+@router.post(
+    "/payments/{payment_id}/status",
+    dependencies=[Depends(require_admin)],
+)
+async def update_payment_status(
+    payment_id: int,
+    data: AdminPaymentStatusUpdate,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    payment = await db.get(Payment, payment_id)
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if not payment.provider_payment_id:
+        raise HTTPException(status_code=409, detail="Payment has no provider ID")
+    try:
+        payment = await process_payment_event(
+            db,
+            provider=payment.provider,
+            event_id=f"admin-{payment.id}-{data.status}-{uuid4()}",
+            provider_payment_id=payment.provider_payment_id,
+            target_status=data.status,
+            payload={
+                "details": {
+                    "source": "vpn-admin",
+                    "admin": principal.name,
+                }
+            },
+        )
+    except PaymentError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await write_audit(
+        db,
+        action="payment.status.update",
+        result="success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="payment",
+        resource_id=payment.id,
+        details={"status": payment.status},
+    )
+    return {"id": payment.id, "status": payment.status}
+
+
 ADMIN_HTML = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VPN Admin</title><style>
@@ -514,7 +566,7 @@ ADMIN_HTML = r"""<!doctype html>
 <body><header><div><h1>VPN Admin</h1><div id="notice">Загрузка…</div></div><button onclick="load()">Обновить</button></header><main>
 <div class="cards" id="metrics"></div>
 <nav id="nav"></nav>
-<section id="plans"><h2>Тарифы</h2><form onsubmit="createPlan(event)"><input name="code" placeholder="Код" required><input name="name" placeholder="Название" required><input name="duration_days" type="number" placeholder="Дней" required><input name="price" type="number" step="0.01" placeholder="Цена" required><input name="currency" value="RUB" required><button>Создать тариф</button></form><div class="table"></div></section>
+<section id="plans"><h2>Тарифы</h2><form onsubmit="createPlan(event)"><input name="code" placeholder="Код" required><input name="name" placeholder="Название" required><input name="duration_days" type="number" placeholder="Дней" required><input name="max_connections" type="number" min="0" max="100" value="1" title="0 — без ограничений" required><input name="price" type="number" step="0.01" placeholder="Цена" required><input name="currency" value="RUB" required><button>Создать тариф</button></form><p>Одновременных подключений: 1, 3 или 0 — без ограничений.</p><div class="table"></div></section>
 <section id="nodes" class="hidden"><h2>VPN-ноды</h2><form onsubmit="createNode(event)"><input name="name" placeholder="Имя" required><input name="provider" placeholder="Провайдер" required><input name="ip_address" placeholder="Публичный IP" required><input name="hostname" placeholder="Hostname"><input name="capacity" type="number" value="100"><button>Создать ноду</button></form><p>Страна определяется автоматически по публичному IP.</p><details><summary>Привязать inbound из 3x-ui master</summary><form onsubmit="createConfig(event)"><input name="node_id" type="number" placeholder="Node ID в VPN Admin" required><input name="api_address" placeholder="https://master.example/base-path" required><input name="host" placeholder="Публичный адрес ноды" required><input name="port" type="number" value="443" required><input name="sni" placeholder="Reality SNI" required><input name="fingerprint" placeholder="Fingerprint" value="chrome" required><input name="pbk" placeholder="Reality public key" required><input name="sid" placeholder="Reality short ID" required><input name="inbound_tag" type="number" min="1" placeholder="3x-ui inbound ID" required><button>Привязать</button></form></details><div class="table"></div></section>
 <section id="users" class="hidden"><h2>Пользователи</h2><div class="table"></div></section>
 <section id="subscriptions" class="hidden"><h2>Подписки</h2><div class="table"></div></section>
@@ -530,16 +582,18 @@ function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return Stri
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id))}
 function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
-async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';document.getElementById('metrics').innerHTML=sections.map(x=>`<div class="card"><div>${x}</div><div class="metric">${state[x].length}</div></div>`).join('');table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+function paymentActions(p){if(['pending','processing'].includes(p.status))return `<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return `<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return ''}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';document.getElementById('metrics').innerHTML=sections.map(x=>`<div class="card"><div>${x}</div><div class="metric">${state[x].length}</div></div>`).join('');table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button onclick="show('${x}')">${x}</button>`).join('');
-async function sendForm(e,url,map){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));for(let k of ['duration_days','price','capacity','node_id','port'])if(k in f)f[k]=Number(f[k]);if(map)f=map(f);try{await request(url(f),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await load()}catch(err){alert(err.message)}}
+async function sendForm(e,url,map){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));for(let k of ['duration_days','max_connections','price','capacity','node_id','port'])if(k in f)f[k]=Number(f[k]);if(map)f=map(f);try{await request(url(f),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await load()}catch(err){alert(err.message)}}
 function createPlan(e){return sendForm(e,()=>'/plans')}
 function createNode(e){return sendForm(e,()=>'/vpn/nodes')}
 async function createConfig(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let id=Number(f.node_id);delete f.node_id;f.port=Number(f.port);f.fp=f.fingerprint;delete f.fingerprint;let body={protocol:'vless',config:{...f,type:'tcp',security:'reality'}};try{await request('/vpn/nodes/'+id+'/configs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load()}catch(err){alert(err.message)}}
 async function renew(id){if(confirm('Продлить подписку #'+id+'?')){await request('/subscriptions/'+id+'/renew',{method:'POST'});await load()}}
 async function revoke(id){if(confirm('Отозвать клиент #'+id+'?')){await request('/vpn/clients/'+id,{method:'DELETE'});await load()}}
-async function editPlan(id){let p=state.plans.find(x=>x.id===id);let name=prompt('Название тарифа',p.name);if(name===null)return;let price=prompt('Цена',p.price);if(price===null)return;let days=prompt('Длительность, дней',p.duration_days);if(days===null)return;let active=confirm('Тариф должен быть активен?');await request('/plans/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,price:Number(price),duration_days:Number(days),is_active:active})});await load()}
+async function editPlan(id){let p=state.plans.find(x=>x.id===id);let name=prompt('Название тарифа',p.name);if(name===null)return;let price=prompt('Цена',p.price);if(price===null)return;let days=prompt('Длительность, дней',p.duration_days);if(days===null)return;let limit=prompt('Одновременных подключений: 1, 3 или 0 без ограничений',p.max_connections);if(limit===null)return;let active=confirm('Тариф должен быть активен?');await request('/plans/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,price:Number(price),duration_days:Number(days),max_connections:Number(limit),is_active:active})});await load()}
 async function deletePlan(id){let p=state.plans.find(x=>x.id===id);if(!p)return;if(!confirm(`Удалить тариф «${p.name}» (#${id})?\n\nТариф с подписками или платежами удалить нельзя.`))return;try{await request('/plans/'+id,{method:'DELETE'});await load()}catch(err){alert(err.message)}}
+async function setPaymentStatus(id,status){let warnings={paid:'Подтверждение создаст подписку и ключ в 3x-ui.',failed:'Платёж будет отмечен ошибочным.',cancelled:'Платёж будет отменён.',refunded:'Возврат отзовёт активный VPN-ключ и отменит подписку.'};if(!confirm((warnings[status]||'Изменить статус платежа?')+`\n\nПлатёж #${id}, новый статус: ${status}`))return;try{await request('/admin/payments/'+id+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});await load()}catch(err){alert(err.message)}}
 async function editNode(id){let n=state.nodes.find(x=>x.id===id);let status=prompt('Статус: active, maintenance, draining, disabled',n.status);if(status===null)return;let capacity=prompt('Ёмкость',n.capacity);if(capacity===null)return;await request('/vpn/nodes/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status,capacity:Number(capacity)})});await load()}
 async function health(id){try{let h=await request('/vpn/nodes/'+id+'/health');alert(h.status==='online'?'Xray online, пользователей: '+h.xray_users:'Xray offline: '+h.error)}catch(e){alert(e.message)}}
 async function reconcile(id){try{let r=await request('/vpn/nodes/'+id+'/reconcile',{method:'POST'});alert(`restored=${r.restored}, removed=${r.removed}, errors=${r.errors}`);await load()}catch(e){alert(e.message)}}
