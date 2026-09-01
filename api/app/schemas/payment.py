@@ -15,6 +15,17 @@ class PaymentCreate(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=255)
 
 
+class ManualPaymentCreate(PaymentCreate):
+    method_code: str = Field(min_length=2, max_length=64)
+
+
+class PaymentReceiptCreate(BaseModel):
+    user_id: int
+    telegram_file_id: str = Field(min_length=5, max_length=1024)
+    telegram_file_unique_id: str | None = Field(default=None, max_length=255)
+    media_type: str = Field(pattern=r"^(photo|document)$")
+
+
 class PaymentWebhook(BaseModel):
     provider_payment_id: str
     status: str

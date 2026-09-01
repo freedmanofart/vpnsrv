@@ -213,6 +213,38 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         visible = await self.client.get("/payment-methods", headers=self.service_headers)
         self.assertEqual([], visible.json())
 
+    async def test_manual_bank_receipt_waits_for_admin_confirmation(self) -> None:
+        created = await self.client.post(
+            "/payments/manual",
+            headers=self.service_headers,
+            json={
+                "user_id": self.user_id,
+                "plan_id": 1,
+                "node_id": self.node_id,
+                "method_code": "sber_qr",
+                "idempotency_key": "manual-receipt-test",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual("pending", created.json()["status"])
+        payment_id = created.json()["id"]
+        receipt = await self.client.post(
+            f"/payments/{payment_id}/receipt",
+            headers=self.service_headers,
+            json={
+                "user_id": self.user_id,
+                "telegram_file_id": "telegram-file-id",
+                "telegram_file_unique_id": "unique-id",
+                "media_type": "photo",
+            },
+        )
+        self.assertEqual(200, receipt.status_code, receipt.text)
+        self.assertEqual("processing", receipt.json()["status"])
+        self.assertEqual(
+            "telegram-file-id",
+            receipt.json()["details"]["receipt"]["telegram_file_id"],
+        )
+
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:
             subscription = (

@@ -39,6 +39,7 @@ from aiogram.types import (
 configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_ADMIN_CHAT_ID = int(os.getenv("BOT_ADMIN_CHAT_ID", "0") or 0)
 API_URL = os.getenv("API_URL", "http://api:8000")
 SERVICE_API_TOKEN = os.environ["SERVICE_API_TOKEN"]
 TELEGRAM_CHANNEL_URL = content_link("channel")
@@ -61,6 +62,10 @@ class PurchaseFlow(StatesGroup):
     waiting_country = State()
     waiting_tier = State()
     waiting_plan = State()
+
+
+class ManualPaymentFlow(StatesGroup):
+    waiting_receipt = State()
 
 
 def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.AsyncClient:
@@ -412,6 +417,24 @@ async def create_payment(
 
         response.raise_for_status()
 
+        return response.json()
+
+
+async def create_manual_payment(
+    user_id: int, plan_id: int, node_id: int, method_code: str, idempotency_key: str
+) -> dict:
+    payload = subscription_payload(user_id=user_id, plan_id=plan_id, node_id=node_id)
+    payload.update({"method_code": method_code, "idempotency_key": idempotency_key})
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.post("/payments/manual", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
+async def attach_payment_receipt(payment_id: int, payload: dict) -> dict:
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.post(f"/payments/{payment_id}/receipt", json=payload)
+        response.raise_for_status()
         return response.json()
 
 
@@ -768,7 +791,7 @@ async def reply_plan_handler(message: Message, state: FSMContext):
     buttons = [
         InlineKeyboardButton(
             text=method["name"],
-            **({"url": method["url"]} if method.get("url") else {
+            **({"url": method["url"]} if method.get("url") and method.get("code") not in {"sber_qr", "tbank_qr", "phone_transfer"} else {
                 "callback_data": f"payment_method:{method['id']}:{plan['id']}:{node_id}"
             }),
         )
@@ -1219,7 +1242,7 @@ async def purchase_plan_handler(callback: CallbackQuery):
     buttons = [
         InlineKeyboardButton(
             text=method["name"],
-            **({"url": method["url"]} if method.get("url") else {
+            **({"url": method["url"]} if method.get("url") and method.get("code") not in {"sber_qr", "tbank_qr", "phone_transfer"} else {
                 "callback_data": f"payment_method:{method['id']}:{plan_id}:{node_id}"
             }),
         )
@@ -1243,7 +1266,7 @@ async def purchase_plan_handler(callback: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("payment_method:"))
-async def payment_method_handler(callback: CallbackQuery):
+async def payment_method_handler(callback: CallbackQuery, state: FSMContext):
     _, raw_method_id, raw_plan_id, raw_node_id = callback.data.split(":")
     methods = await get_payment_methods()
     method = next((item for item in methods if item["id"] == int(raw_method_id)), None)
@@ -1259,7 +1282,71 @@ async def payment_method_handler(callback: CallbackQuery):
     if method["code"] == "telegram_stars":
         await callback.answer("Цена в Telegram Stars ещё не настроена для этого тарифа.", show_alert=True)
         return
+    if method["code"] in {"sber_qr", "tbank_qr", "phone_transfer"}:
+        telegram_id = callback.from_user.id
+        async with api_client(base_url=API_URL, timeout=10.0) as client:
+            response = await client.get(f"/users/{telegram_id}")
+            response.raise_for_status()
+            user = response.json()
+        payment = await create_manual_payment(
+            user["id"], int(raw_plan_id), int(raw_node_id), method["code"],
+            f"manual:{telegram_id}:{callback.id}",
+        )
+        await state.set_state(ManualPaymentFlow.waiting_receipt)
+        await state.update_data(
+            payment_id=payment["id"], user_id=user["id"], method_name=method["name"],
+            amount=payment["amount"], currency=payment["currency"],
+        )
+        requisites = method.get("url") or "Реквизиты ещё не заполнены оператором в VPN Admin."
+        await callback.message.answer(
+            f"🏦 <b>{html.escape(method['name'])}</b>\n\n"
+            f"Сумма: <b>{payment['amount']} {payment['currency']}</b>\n"
+            f"Реквизиты/QR: {html.escape(requisites)}\n\n"
+            "После перевода пришлите сюда фотографию или файл чека. "
+            "Ключ будет создан после проверки оператором.",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
     await callback.answer("Добавьте ссылку этого способа оплаты в VPN Admin.", show_alert=True)
+
+
+@router.message(ManualPaymentFlow.waiting_receipt, F.photo | F.document)
+async def manual_payment_receipt_handler(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    if message.photo:
+        media = message.photo[-1]
+        media_type = "photo"
+    else:
+        media = message.document
+        media_type = "document"
+    await attach_payment_receipt(
+        data["payment_id"],
+        {
+            "user_id": data["user_id"],
+            "telegram_file_id": media.file_id,
+            "telegram_file_unique_id": media.file_unique_id,
+            "media_type": media_type,
+        },
+    )
+    if BOT_ADMIN_CHAT_ID:
+        await bot.copy_message(BOT_ADMIN_CHAT_ID, message.chat.id, message.message_id)
+        await bot.send_message(
+            BOT_ADMIN_CHAT_ID,
+            f"Платёж #{data['payment_id']} ожидает проверки\n"
+            f"Способ: {data['method_name']}\nСумма: {data['amount']} {data['currency']}\n"
+            "Подтвердите его в разделе «Платежи» VPN Admin.",
+        )
+    await state.clear()
+    await message.answer(
+        f"✅ Чек по платежу #{data['payment_id']} получен. После проверки оператором VPN активируется автоматически.",
+        reply_markup=popup_menu(),
+    )
+
+
+@router.message(ManualPaymentFlow.waiting_receipt)
+async def manual_payment_receipt_invalid(message: Message):
+    await message.answer("Пришлите чек фотографией или файлом PDF/изображением.")
 
 
 @router.callback_query(F.data.startswith("payment_qr:"))

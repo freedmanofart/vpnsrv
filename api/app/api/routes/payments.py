@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.security import require_api_access
 from app.db.models.payment import Payment
 from app.db.session import get_db
-from app.schemas.payment import PaymentCreate, PaymentResponse, PaymentWebhook
+from app.schemas.payment import ManualPaymentCreate, PaymentCreate, PaymentReceiptCreate, PaymentResponse, PaymentWebhook
 from app.services.payments import (
     PaymentError,
     PaymentInvalidTransition,
@@ -57,6 +57,55 @@ async def start_payment(
         return payment
     except PaymentError as exc:
         raise _payment_error(exc) from exc
+
+
+@router.post(
+    "/manual",
+    response_model=PaymentResponse,
+    dependencies=[Depends(require_api_access)],
+)
+async def start_manual_payment(data: ManualPaymentCreate, db: AsyncSession = Depends(get_db)):
+    try:
+        payment = await create_payment(
+            db,
+            PaymentCreate(**data.model_dump(exclude={"method_code"})),
+            provider="manual_bank",
+        )
+        payment.details = {**(payment.details or {}), "method_code": data.method_code}
+        await db.commit()
+        await db.refresh(payment)
+        return payment
+    except PaymentError as exc:
+        raise _payment_error(exc) from exc
+
+
+@router.post(
+    "/{payment_id}/receipt",
+    response_model=PaymentResponse,
+    dependencies=[Depends(require_api_access)],
+)
+async def attach_payment_receipt(
+    payment_id: int,
+    data: PaymentReceiptCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    payment = await db.get(Payment, payment_id)
+    if payment is None or payment.user_id != data.user_id:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.provider != "manual_bank" or payment.status not in {"pending", "processing"}:
+        raise HTTPException(status_code=409, detail="Payment does not accept a receipt")
+    payment.status = "processing"
+    payment.details = {
+        **(payment.details or {}),
+        "receipt": {
+            "telegram_file_id": data.telegram_file_id,
+            "telegram_file_unique_id": data.telegram_file_unique_id,
+            "media_type": data.media_type,
+        },
+    }
+    await db.commit()
+    await db.refresh(payment)
+    return payment
 
 
 @router.get(
