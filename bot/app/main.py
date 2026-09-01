@@ -84,12 +84,6 @@ def main_menu() -> InlineKeyboardMarkup:
                 ),
             ],
             [
-                InlineKeyboardButton(
-                    text="📱 VPN для устройств",
-                    callback_data="devices",
-                ),
-            ],
-            [
                 InlineKeyboardButton(text="👤 Личный кабинет", callback_data="vpn_status"),
             ],
             [
