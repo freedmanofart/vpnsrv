@@ -54,6 +54,7 @@ async def get_nodes(
 ):
     result = await db.execute(
         select(VPNNode)
+        .where(VPNNode.status != "disabled")
         .order_by(VPNNode.id)
     )
 
