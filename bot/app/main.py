@@ -24,6 +24,8 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     BufferedInputFile,
     BotCommand,
     MenuButtonCommands,
@@ -69,6 +71,29 @@ def main_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📣 Наш канал", url=TELEGRAM_CHANNEL_URL)
         if TELEGRAM_CHANNEL_URL
         else InlineKeyboardButton(text="📣 Наш канал", callback_data="channel_info")
+    )
+
+
+def popup_menu() -> ReplyKeyboardMarkup:
+    """Постоянное раскрывающееся меню рядом с полем ввода Telegram."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="💳 Оплатить"),
+                KeyboardButton(text="👤 Личный кабинет"),
+            ],
+            [
+                KeyboardButton(text="🏷 Промокод"),
+                KeyboardButton(text="🧪 Попробовать"),
+            ],
+            [
+                KeyboardButton(text="📖 Инструкции"),
+                KeyboardButton(text="🆘 Поддержка"),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите действие",
     )
     support_button = (
         InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)
@@ -447,7 +472,7 @@ async def start_handler(message: Message):
 
         await message.answer(
             content_text("welcome"),
-            reply_markup=main_menu(),
+            reply_markup=popup_menu(),
             parse_mode="HTML",
         )
 
@@ -477,7 +502,7 @@ async def menu_command_handler(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         content_text("main_menu"),
-        reply_markup=main_menu(),
+        reply_markup=popup_menu(),
         parse_mode="HTML",
     )
 
@@ -522,6 +547,53 @@ async def help_command_handler(message: Message):
         reply_markup=main_menu(),
         parse_mode="HTML",
     )
+
+
+@router.message(F.text == "💳 Оплатить")
+async def popup_buy_handler(message: Message):
+    await buy_command_handler(message)
+
+
+@router.message(F.text == "👤 Личный кабинет")
+async def popup_vpn_handler(message: Message):
+    await vpn_command_handler(message)
+
+
+@router.message(F.text == "📖 Инструкции")
+async def popup_help_handler(message: Message):
+    await help_command_handler(message)
+
+
+@router.message(F.text == "🏷 Промокод")
+async def popup_promo_handler(message: Message, state: FSMContext):
+    await state.set_state(PromoFlow.waiting_code)
+    await message.answer(content_text("promo"), parse_mode="HTML", reply_markup=popup_menu())
+
+
+@router.message(F.text == "🧪 Попробовать")
+async def popup_try_handler(message: Message):
+    rows = []
+    if TRY_PAYMENT_URL:
+        rows.append([InlineKeyboardButton(text="💳 Оплатить 50 ₽", url=TRY_PAYMENT_URL)])
+    if SUPPORT_URL:
+        rows.append([InlineKeyboardButton(text="✅ Я оплатил — поддержка", url=SUPPORT_URL)])
+    await message.answer(
+        content_text("try"),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else popup_menu(),
+    )
+
+
+@router.message(F.text == "🆘 Поддержка")
+async def popup_support_handler(message: Message):
+    if SUPPORT_URL:
+        await message.answer(
+            f'🆘 <a href="{html.escape(SUPPORT_URL)}">Открыть поддержку</a>',
+            parse_mode="HTML",
+            reply_markup=popup_menu(),
+        )
+    else:
+        await message.answer(content_text("support_missing"), reply_markup=popup_menu())
 
 
 @router.callback_query(F.data == "instructions")
