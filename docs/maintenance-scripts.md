@@ -37,6 +37,56 @@ python3 scripts/configctl.py apply --services api worker
 
 `.env` должен иметь права `0600`. Не используйте `set -x`.
 
+### Ротация секретов
+
+`configctl rotate` — единая операция для переменных, которыми владеет сам
+проект. Она генерирует новые значения в памяти, записывает `.env` атомарно,
+проверяет итоговую конфигурацию и пересоздаёт все сервисы, которым нужны новые
+значения. В вывод секреты не попадают. Если `docker compose up` не удался,
+скрипт восстанавливает прежний `.env` и пытается вернуть прежнюю конфигурацию
+тех же сервисов.
+
+Сначала всегда можно посмотреть план без изменений:
+
+```bash
+python3 scripts/configctl.py rotate --all-internal --dry-run
+```
+
+Обычная внутренняя ротация меняет `SERVICE_API_TOKEN` и `ADMIN_PASSWORD` и
+пересоздаёт `api`, `bot` и `worker` одной командой:
+
+```bash
+python3 scripts/configctl.py rotate --all-internal
+```
+
+После неё операторам нужно заново аутентифицироваться в Basic Auth, а внешние
+скрипты и интеграции с `SERVICE_API_TOKEN` должны получить новое значение из
+защищённого хранилища. Не выводите это значение через `get --show-secret` в
+терминал с записью истории.
+
+Можно выбрать конкретный внутренний секрет:
+
+```bash
+python3 scripts/configctl.py rotate ADMIN_PASSWORD
+```
+
+`PAYMENT_WEBHOOK_SECRET` передаётся стороннему платёжному провайдеру, поэтому
+он намеренно исключён из локальной генерации: сервер не может сам сообщить
+провайдеру новое значение. Сначала перевыпустите или смените секрет в панели
+провайдера, затем внесите выданное значение и пересоздайте нужные сервисы:
+
+```bash
+python3 scripts/configctl.py set PAYMENT_WEBHOOK_SECRET '<provider-issued-secret>'
+python3 scripts/configctl.py apply --services api worker
+```
+
+Токены `BOT_TOKEN`,
+`THREEXUI_API_TOKEN`, SMTP-пароль и `DATABASE_URL` не генерируются локально:
+их надо перевыпустить у Telegram, 3x-ui, почтового провайдера или PostgreSQL,
+внести через `configctl set` и выполнить `configctl apply` для затронутых
+сервисов. В частности, произвольный `THREEXUI_API_TOKEN` не будет принят
+мастер-узлом 3x-ui.
+
 ## Backup
 
 `backup.sh` создаёт custom-format dump БД `vpn` из контейнера `postgres` и
