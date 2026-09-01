@@ -155,10 +155,27 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         opened = await self.client.get(f"/cabinet/access/{raw_token}", follow_redirects=False)
         self.assertEqual(303, opened.status_code)
-        self.assertEqual("/cabinet", opened.headers["location"])
+        self.assertEqual("/cabinet/password", opened.headers["location"])
+        password_saved = await self.client.post(
+            "/web/password", json={"password": "correct-horse-123"}
+        )
+        self.assertEqual(200, password_saved.status_code, password_saved.text)
         cabinet = await self.client.get("/cabinet")
         self.assertEqual(200, cabinet.status_code, cabinet.text)
         self.assertIn("web.user@example.com", cabinet.text)
+
+        await self.client.post("/cabinet/logout")
+        password_login = await self.client.post(
+            "/web/password/login",
+            json={"email": "WEB.USER@example.com", "password": "correct-horse-123"},
+        )
+        self.assertEqual(200, password_login.status_code, password_login.text)
+        self.assertEqual(200, (await self.client.get("/cabinet")).status_code)
+        rejected = await self.client.post(
+            "/web/password/login",
+            json={"email": "web.user@example.com", "password": "wrong-password"},
+        )
+        self.assertEqual(401, rejected.status_code)
 
     async def test_web_cabinet_creates_payment_and_uploads_receipt(self) -> None:
         from app.db.models import CabinetAccessToken, PaymentMethod
