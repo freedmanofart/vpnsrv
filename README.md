@@ -62,6 +62,8 @@ Inbound может работать на master или быть назначен
 [`docs/3x-ui-master.md`](docs/3x-ui-master.md).
 Добавление новой ноды скриптом описано в
 [`docs/add-3x-ui-node.md`](docs/add-3x-ui-node.md).
+Полный жизненный цикл тарифа, оплаты, выдачи, продления и отзыва описан в
+[`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md).
 
 ## API
 
@@ -126,4 +128,5 @@ in-memory реализацию и не изменяют развёрнутую �
 - Перед перезапуском API и worker применяйте миграции Alembic.
 
 Операционные инструкции: [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md),
-доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md).
+доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md),
+бизнес-логика: [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md).

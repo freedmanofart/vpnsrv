@@ -44,14 +44,11 @@ path панели никогда не включается в VLESS URI. Пор�
 
 ## Связь master с child
 
-Поддерживаются два варианта:
-
-1. публичный HTTPS-адрес child с проверяемым сертификатом;
-2. приватный адрес Tailscale, разрешённый политикой tailnet.
-
-При Tailscale нельзя включать `allowPrivateAddress`, пока адрес не проверен и
-действительно принадлежит нужной ноде. При публичном варианте ограничьте панель
-cloud firewall/firewalld, если это возможно без привязки к изменяемому IP.
+Master подключается к child только по внешнему HTTPS-адресу. Сертификат должен
+быть действителен, его цепочка должна быть доверена master, а DNS-имя —
+совпадать с сертификатом. Приватные адреса нод и оверлейные VPN-сети в текущей
+схеме не используются. Для рабочей ноды задавайте `allowPrivateAddress=false` и
+`tlsVerifyMode=system`.
 
 Проверка выполняется из master:
 
@@ -60,8 +57,8 @@ curl -vk --max-time 10 https://<child-host>:<panel-port>/<base-path>/panel/api/s
 ```
 
 Коды `401`/`403` подтверждают сетевую доступность. `404` обычно означает
-неверный base path, `EOF` — ошибку listener/reverse proxy, timeout — маршрут,
-ACL или firewall.
+неверный base path, `EOF` — ошибку listener/reverse proxy, timeout — отсутствие
+внешнего маршрута или недоступный порт.
 
 ## Inbound и логическая нода
 
@@ -70,12 +67,12 @@ ACL или firewall.
 
 - числовой inbound ID;
 - публичные host и port;
-- Reality SNI, public key и short ID;
-- xHTTP path, mode и при необходимости host.
+- Reality SNI, public key, short ID и spiderX;
+- VLESS ML-KEM encryption из inbound;
+- xHTTP path, mode, host и диапазон padding.
 
 Регистрация выполняется скриптом из
-[`add-3x-ui-node.md`](add-3x-ui-node.md). Настройка firewall с аварийным
-откатом описана в [`new-node-firewall.md`](new-node-firewall.md).
+[`add-3x-ui-node.md`](add-3x-ui-node.md).
 
 ## Локальный API master
 

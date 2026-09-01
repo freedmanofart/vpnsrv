@@ -1,7 +1,6 @@
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -27,6 +26,7 @@ from app.schemas.client import (
 )
 from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
+from app.services.vless import build_vless_url
 from app.core.config import settings
 
 
@@ -153,18 +153,17 @@ async def activate_device(data: DeviceActivate, db: AsyncSession = Depends(get_d
 
 def build_client_uri(client: VPNClient, node: VPNNode, config: dict) -> str:
     host = config.get("host") or node.hostname or node.ip_address
-    params = {
-        "type": config.get("type", "tcp"),
-        "security": config.get("security", "none"),
-        "encryption": "none",
-        "fp": client.fingerprint or config.get("fp", "chrome"),
-    }
-    for key in ("sni", "pbk", "sid", "alpn", "path", "serviceName"):
-        if config.get(key) is not None:
-            params[key] = config[key]
+    link_config = dict(config)
+    link_config["fp"] = client.fingerprint or config.get("fp", "chrome")
     if client.flow:
-        params["flow"] = client.flow
-    return f"vless://{client.client_uuid}@{host}:{config.get('port', 443)}?{urlencode(params)}#VPN-{client.id}"
+        link_config["flow"] = client.flow
+    return build_vless_url(
+        uuid=client.client_uuid,
+        host=host,
+        port=config.get("port", 443),
+        config=link_config,
+        remark=f"vpn-{client.id}",
+    )
 
 
 @router.get("/profile", response_model=ClientProfileResponse)

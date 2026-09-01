@@ -128,17 +128,23 @@ def main():
         "host": env("VPN_PUBLIC_HOST", required=True),
         "port": int(env("VPN_PUBLIC_PORT", required=True)),
         "type": env("VPN_TRANSPORT", "xhttp"),
+        "encryption": env("VPN_VLESS_ENCRYPTION", required=True),
         "security": "reality",
         "sni": env("VPN_REALITY_SNI", required=True),
-        "fp": env("VPN_FINGERPRINT", "chrome"),
+        "fp": env("VPN_FINGERPRINT", "firefox"),
         "pbk": env("VPN_REALITY_PUBLIC_KEY", required=True),
         "sid": env("VPN_REALITY_SHORT_ID", required=True),
+        "spx": env("VPN_REALITY_SPIDER_X", required=True),
         "path": env("VPN_XHTTP_PATH", "/"),
         "mode": env("VPN_XHTTP_MODE", "auto"),
+        "x_padding_bytes": env("VPN_XHTTP_PADDING_BYTES", "100-1000"),
     }
     xhttp_host = env("VPN_XHTTP_HOST", "")
-    if xhttp_host:
-        config["xhttp_host"] = xhttp_host
+    config["xhttp_host"] = xhttp_host
+    config["extra"] = {
+        "mode": config["mode"],
+        "xPaddingBytes": config["x_padding_bytes"],
+    }
     request("POST", f"{api_url}/vpn/nodes/{logical['id']}/configs", service_token, {"protocol": "vless", "config": config})
     health = request("GET", f"{api_url}/vpn/nodes/{logical['id']}/health", service_token)
     print(f"Готово: logical_node_id={logical['id']}, health={health.get('status')}")

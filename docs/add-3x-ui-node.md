@@ -9,11 +9,12 @@
 5. определяет страну по публичному IP через HTTPS `ipwho.is`;
 6. выполняет health check.
 
-Скрипт не меняет SSH, Tailscale ACL и firewall.
+Скрипт не меняет SSH и сетевые правила сервера.
 
 ## Перед запуском
 
-- child установлен и доступен master;
+- child установлен и доступен master по внешнему HTTPS-адресу;
+- сертификат child действителен и соответствует DNS-имени;
 - на child создан токен `node-sync`;
 - на master создан временно используемый административный API token;
 - VLESS Reality xHTTP inbound создан и известен его числовой ID;
@@ -52,17 +53,21 @@ VPN_PUBLIC_PORT=2453
 
 THREEXUI_INBOUND_ID=8
 VPN_TRANSPORT=xhttp
+VPN_VLESS_ENCRYPTION=<значение-encryption-из-inbound>
 VPN_REALITY_SNI=example.org
 VPN_REALITY_PUBLIC_KEY=<public-key>
 VPN_REALITY_SHORT_ID=<short-id>
+VPN_REALITY_SPIDER_X=/<spider-x>
+VPN_FINGERPRINT=firefox
 VPN_XHTTP_PATH=/
 VPN_XHTTP_MODE=auto
 VPN_XHTTP_HOST=
+VPN_XHTTP_PADDING_BYTES=100-1000
 ```
 
-`VPN_NODE_IP` должен быть публичным IP: по нему определяется страна. Для
-закрытого тестового адреса разрешён явный формат
-`VPN_NODE_REGION=SE|Швеция`.
+`VPN_NODE_IP` должен быть публичным IP: по нему определяется страна. Панель
+child задаётся внешним DNS-именем с сертификатом от доверенного центра.
+Приватные адреса и `allowPrivateAddress=true` не используются.
 
 ## Запуск
 
@@ -89,16 +94,15 @@ curl -fsS -H "Authorization: Bearer $SERVICE_API_TOKEN" \
 `SE|Швеция`. Telegram покажет флаг и название страны автоматически.
 
 После этого выпустите тестовый ключ через VPN Admin или Telegram. URI должен
-содержать публичный порт inbound, а не порт панели. Вручную созданный в 3x-ui
+содержать публичный порт inbound и параметры `encryption`, `extra`, `fp`,
+`host`, `mode`, `path`, `pbk`, `security`, `sid`, `sni`, `spx`, `type` и
+`x_padding_bytes`. Порт панели в URI не включается. Вручную созданный в 3x-ui
 UUID не управляется приложением и не перевыпускается из личного кабинета.
 
 Диагностика:
 
 - `404` — неверный base path;
 - `EOF` — ошибка listener/reverse proxy;
-- timeout — маршрут, ACL или firewall;
+- timeout — отсутствует внешний маршрут до child или закрыт нужный порт;
 - панель online, но VPN не работает — неверен порт inbound, SNI, public key,
   short ID, xHTTP path/mode либо версия клиента.
-
-Firewall настраивается отдельно по
-[`new-node-firewall.md`](new-node-firewall.md).

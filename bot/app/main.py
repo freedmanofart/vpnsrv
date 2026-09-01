@@ -3,7 +3,6 @@ import html
 from io import BytesIO
 import logging
 import os
-from urllib.parse import urlencode
 
 import httpx
 import qrcode
@@ -433,39 +432,6 @@ async def create_vpn_client(
         response.raise_for_status()
 
         return response.json()
-
-
-# =========================================================
-# VLESS
-# =========================================================
-
-def build_vless_url(
-    client_uuid: str,
-    node: dict,
-    config: dict,
-) -> str:
-    host = config["host"]
-    port = config["port"]
-
-    params = {
-        "type": config.get("type", "tcp"),
-        "security": config.get("security", "reality"),
-        "sni": config["sni"],
-        "fp": config["fp"],
-        "pbk": config["pbk"],
-        "sid": config["sid"],
-    }
-
-    query = urlencode(params)
-
-    name = node.get("name", "VPN")
-
-    return (
-        f"vless://{client_uuid}"
-        f"@{host}:{port}"
-        f"?{query}"
-        f"#{name}"
-    )
 
 
 # =========================================================

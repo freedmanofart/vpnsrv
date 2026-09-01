@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 import logging
-from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +20,7 @@ from app.db.session import get_db
 from app.core.security import APIPrincipal, require_admin
 from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
+from app.services.vless import build_vless_url
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
 from app.schemas.subscription import VPNClientRotate
 from app.api.routes.subscriptions import rotate_subscription_client
@@ -65,23 +65,16 @@ def _client_link(client: VPNClient, node: VPNNode, config: VPNNodeConfig) -> str
         return client.config_override
     data = config.config
     host = data.get("host") or node.hostname or node.ip_address
-    params = {
-        "type": data.get("type", "tcp"),
-        "security": data.get("security", "none"),
-        "encryption": "none",
-        "fp": client.fingerprint or data.get("fp", "chrome"),
-    }
-    for key in ("sni", "pbk", "sid", "alpn", "path", "serviceName", "mode"):
-        if data.get(key) is not None:
-            params[key] = data[key]
-    transport_host = data.get("xhttp_host") or data.get("host_header")
-    if transport_host:
-        params["host"] = transport_host
+    link_config = dict(data)
+    link_config["fp"] = client.fingerprint or data.get("fp", "chrome")
     if client.flow:
-        params["flow"] = client.flow
-    return (
-        f"vless://{client.client_uuid}@{host}:{data.get('port', 443)}"
-        f"?{urlencode(params)}#VPN-{client.id}"
+        link_config["flow"] = client.flow
+    return build_vless_url(
+        uuid=client.client_uuid,
+        host=host,
+        port=data.get("port", 443),
+        config=link_config,
+        remark=f"vpn-{client.id}",
     )
 
 

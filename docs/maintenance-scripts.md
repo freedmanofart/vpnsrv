@@ -79,9 +79,3 @@ curl -fsS http://127.0.0.1:8000/health
 
 Unit-тесты не обращаются к production 3x-ui. Скрипты `e2e_*` создают реальные
 данные и запускаются только в отдельном тестовом окружении.
-
-## Firewall
-
-Для новой ноды используйте только `configure_3xui_node_firewall.sh` с таймером
-аварийного отката. Полная процедура — в
-[`new-node-firewall.md`](new-node-firewall.md).

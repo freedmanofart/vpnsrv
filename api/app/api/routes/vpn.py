@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from urllib.parse import urlencode
 from uuid import uuid4
 import time
 
@@ -33,6 +32,7 @@ from app.schemas.vpn import (
 from app.services.reconciliation import reconcile_node
 from app.services.node_health import effective_node_health, node_accepts_clients
 from app.services.country import country_from_ip
+from app.services.vless import build_vless_url
 
 router = APIRouter(
     prefix="/vpn",
@@ -745,42 +745,19 @@ async def get_vpn_client_config(
 
     port = config.get("port", 443)
 
-    params = {
-        "type": config.get("type", "tcp"),
-        "security": config.get("security", "none"),
-        "encryption": "none",
-    }
-
-    for key in (
-        "sni",
-        "pbk",
-        "sid",
-        "alpn",
-        "path",
-        "serviceName",
-        "mode",
-    ):
-        value = config.get(key)
-
-        if value is not None:
-            params[key] = value
-
-    params["fp"] = client.fingerprint or config.get("fp", "chrome")
+    link_config = dict(config)
+    link_config["fp"] = client.fingerprint or config.get("fp", "chrome")
     if client.flow:
-        params["flow"] = client.flow
-
-    # HTTP Host для транспорта, если он отдельно задан
-    transport_host = config.get("xhttp_host") or config.get("host_header")
-    if transport_host:
-        params["host"] = transport_host
-
-    query = urlencode(params)
+        link_config["flow"] = client.flow
 
     vless_url = client.config_override or (
-        f"vless://{client.client_uuid}"
-        f"@{host}:{port}"
-        f"?{query}"
-        f"#VPN-{client.id}"
+        build_vless_url(
+            uuid=client.client_uuid,
+            host=host,
+            port=port,
+            config=link_config,
+            remark=f"vpn-{client.id}",
+        )
     )
 
     return VPNClientConfigResponse(

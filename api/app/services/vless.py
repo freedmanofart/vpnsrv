@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import json
 from urllib.parse import urlencode
 
 
@@ -9,23 +12,34 @@ def build_vless_url(
     config: dict,
     remark: str | None = None,
 ) -> str:
-    params = {}
+    params: dict[str, str] = {}
 
     for key in (
-        "type",
-        "security",
         "encryption",
-        "flow",
-        "sni",
+        "extra",
         "fp",
+        "mode",
+        "path",
         "pbk",
+        "security",
         "sid",
+        "sni",
         "spx",
+        "type",
+        "x_padding_bytes",
+        "flow",
+        "alpn",
+        "serviceName",
     ):
         value = config.get(key)
 
         if value is not None:
-            params[key] = value
+            if key == "extra" and not isinstance(value, str):
+                value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            params[key] = str(value)
+
+    if config.get("type") == "xhttp":
+        params["host"] = str(config.get("xhttp_host", ""))
 
     query = urlencode(params)
 
