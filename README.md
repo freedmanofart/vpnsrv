@@ -82,6 +82,8 @@ OpenAPI — на `/docs`. Вход в административную пане�
 Basic; учётные данные задают переменные `ADMIN_USERNAME` и `ADMIN_PASSWORD`.
 Настройка сайта, SMTP и токенизированного входа описана в
 [docs/web-cabinet.md](docs/web-cabinet.md).
+Полный отчёт по последнему обновлению интерфейса, парольного входа, Telegram,
+миграций и деплоя: [docs/latest-changes-2026-09-01.md](docs/latest-changes-2026-09-01.md).
 
 `ADMIN_USERNAME` и `ADMIN_PASSWORD` в `.env`. Подробности — в
 [`docs/access-and-credentials.md`](docs/access-and-credentials.md).
@@ -106,6 +108,8 @@ Basic; учётные данные задают переменные `ADMIN_USER
 | `POST` | `/v1/client/activation-codes` | Код активации клиентского устройства |
 | `GET` | `/` | Публичный лендинг |
 | `GET` | `/cabinet` | Резервный кабинет по защищённой cookie |
+| `POST` | `/web/password/login` | Вход в кабинет по email и паролю |
+| `POST` | `/web/password` | Установка пароля с действующей cookie |
 | `GET` | `/admin` | Web admin с HTTP Basic |
 | `POST` | `/admin/users/{id}/rotate` | Перевыпуск ключа из админки |
 

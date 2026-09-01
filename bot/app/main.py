@@ -119,11 +119,12 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📖 Инструкции", callback_data="instructions"), support_button],
         [channel_button, site_button],
     ]
-    rows.extend(
-        [InlineKeyboardButton(text=item["text"], url=item["url"])]
+    extra_buttons = [
+        InlineKeyboardButton(text=item["text"], url=item["url"])
         for item in CONTENT.get("main_url_buttons", [])
         if item.get("text") and item.get("url")
-    )
+    ]
+    rows.extend(extra_buttons[index:index + 2] for index in range(0, len(extra_buttons), 2))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
