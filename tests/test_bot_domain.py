@@ -105,6 +105,11 @@ class PlanSelectionTests(unittest.TestCase):
 
 
 class ContentTests(unittest.TestCase):
+    def test_default_welcome_promotes_web_cabinet(self):
+        content = load_content()
+        self.assertIn("Freedom VPN", content["texts"]["welcome"])
+        self.assertIn("веб-кабинет", content["texts"]["welcome"])
+
     def test_content_file_expands_environment_links(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "content.json"

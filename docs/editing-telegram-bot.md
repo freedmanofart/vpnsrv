@@ -45,6 +45,11 @@ VPN API http://api:8000
 |---|---|---|
 | `BOT_TOKEN` | обязательно | токен Telegram Bot API |
 | `BOT_ADMIN_CHAT_ID` | нет | chat ID оператора, которому бот копирует присланные чеки |
+| `WEB_CABINET_URL` | да для web-кнопки | публичный HTTPS-адрес веб-кабинета, например `https://vpn.example.com/cabinet` |
+
+Для текущего временного Tailscale-доступа используется
+`https://fedora.taile485ac.ts.net/cabinet`. Имя доступно только внутри tailnet,
+имеет корректный сертификат Tailscale и открывается внутри Telegram как Web App.
 | `API_URL` | обязательно в production | URL VPN API, в Compose `http://api:8000` |
 | `SERVICE_API_TOKEN` | обязательно | Bearer token внутренних маршрутов VPN API |
 | `LOG_LEVEL` | нет | уровень логирования, обычно `INFO` |
@@ -155,12 +160,14 @@ PostgreSQL, отдаётся боту через защищённый API и п�
 
 ## Постоянное меню Telegram
 
-При `/start` и `/menu` бот отправляет `ReplyKeyboardMarkup`, который раскрывается
+При `/start` бот отправляет основной логотип Freedom VPN, приветственный текст
+и `ReplyKeyboardMarkup`, который раскрывается
 снизу над полем ввода и сворачивается системной кнопкой Telegram. Клавиатура
 двухколоночная, `resize_keyboard=true`, `is_persistent=true`:
 
 | Левая кнопка | Правая кнопка |
 |---|---|
+| `🌐 Кабинет` | открывает web-версию через Telegram Web App |
 | `💳 Приобрести подписку` | `👤 Управление подпиской` |
 | `🏷 Промокод` | `🧪 Попробовать` |
 | `📖 Инструкции` | `🆘 Поддержка` |

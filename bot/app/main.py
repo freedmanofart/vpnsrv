@@ -5,6 +5,7 @@ import html
 from io import BytesIO
 import logging
 import os
+from pathlib import Path
 
 import httpx
 import qrcode
@@ -35,6 +36,8 @@ from aiogram.types import (
     BufferedInputFile,
     BotCommand,
     MenuButtonCommands,
+    WebAppInfo,
+    FSInputFile,
 )
 
 
@@ -48,6 +51,8 @@ TELEGRAM_CHANNEL_URL = content_link("channel")
 SUPPORT_URL = content_link("support")
 YOOMONEY_PAYMENT_URL = content_link("payment")
 TRY_PAYMENT_URL = content_link("try_payment")
+WEB_CABINET_URL = os.getenv("WEB_CABINET_URL", "").strip()
+WELCOME_LOGO = Path(__file__).resolve().parent / "static" / "freedom-vpn-logo.png"
 PUBLIC_PLAN_CODES = tuple(
     item.strip()
     for item in os.getenv("BOT_PLAN_CODES", "").split(",")
@@ -90,12 +95,39 @@ def main_menu() -> InlineKeyboardMarkup:
         if TELEGRAM_CHANNEL_URL
         else InlineKeyboardButton(text="📣 Наш канал", callback_data="channel_info")
     )
+    support_button = (
+        InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)
+        if SUPPORT_URL
+        else InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
+    )
+    rows = []
+    if WEB_CABINET_URL:
+        rows.append([InlineKeyboardButton(text="🌐 Кабинет", url=WEB_CABINET_URL)])
+    rows.extend([
+        [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn")],
+        [InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
+        [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
+        [InlineKeyboardButton(text="📖 Инструкции", callback_data="instructions"), support_button],
+        [channel_button],
+    ])
+    rows.extend(
+        [InlineKeyboardButton(text=item["text"], url=item["url"])]
+        for item in CONTENT.get("main_url_buttons", [])
+        if item.get("text") and item.get("url")
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def popup_menu() -> ReplyKeyboardMarkup:
     """Постоянное раскрывающееся меню рядом с полем ввода Telegram."""
+    cabinet_button = (
+        KeyboardButton(text="🌐 Кабинет", web_app=WebAppInfo(url=WEB_CABINET_URL))
+        if WEB_CABINET_URL.startswith("https://")
+        else KeyboardButton(text="🌐 Кабинет")
+    )
     return ReplyKeyboardMarkup(
         keyboard=[
+            [cabinet_button],
             [
                 KeyboardButton(text="💳 Приобрести подписку"),
                 KeyboardButton(text="👤 Управление подпиской"),
@@ -165,38 +197,6 @@ def purchase_tiers_keyboard(tiers: dict[str, list[dict]]) -> ReplyKeyboardMarkup
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Выберите количество подключений",
-    )
-    support_button = (
-        InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)
-        if SUPPORT_URL
-        else InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
-    )
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="💳 Приобрести подписку",
-                    callback_data="buy_vpn",
-                ),
-            ],
-            [
-                InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status"),
-            ],
-            [
-                InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"),
-                InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start"),
-            ],
-            [
-                InlineKeyboardButton(text="📖 Инструкции", callback_data="instructions"),
-                support_button,
-            ],
-            [channel_button],
-            *[
-                [InlineKeyboardButton(text=item["text"], url=item["url"])]
-                for item in CONTENT.get("main_url_buttons", [])
-                if item.get("text") and item.get("url")
-            ],
-        ]
     )
 
 
@@ -607,8 +607,9 @@ async def start_handler(message: Message):
             user["id"],
         )
 
-        await message.answer(
-            content_text("welcome"),
+        await message.answer_photo(
+            photo=FSInputFile(WELCOME_LOGO),
+            caption=content_text("welcome"),
             reply_markup=popup_menu(),
             parse_mode="HTML",
         )
@@ -690,6 +691,21 @@ async def popup_buy_handler(message: Message, state: FSMContext):
 @router.message(F.text.in_({"👤 Управление подпиской", "👤 Личный кабинет"}))
 async def popup_vpn_handler(message: Message):
     await vpn_command_handler(message)
+
+
+@router.message(F.text == "🌐 Кабинет")
+async def popup_cabinet_handler(message: Message):
+    if WEB_CABINET_URL:
+        await message.answer(
+            f'🌐 <a href="{html.escape(WEB_CABINET_URL)}">Открыть веб-кабинет Freedom VPN</a>',
+            parse_mode="HTML",
+            reply_markup=popup_menu(),
+        )
+    else:
+        await message.answer(
+            "Веб-кабинет пока не настроен.",
+            reply_markup=popup_menu(),
+        )
 
 
 @router.message(F.text == "📖 Инструкции")

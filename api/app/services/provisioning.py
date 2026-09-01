@@ -182,6 +182,111 @@ async def provision_subscription(
     )
 
 
+async def renew_paid_subscription(
+    db: AsyncSession,
+    *,
+    subscription: Subscription,
+    plan: Plan,
+    node_id: int,
+    client_type: str,
+    flow: str,
+    fingerprint: str,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
+) -> ProvisioningResult:
+    """Replace the active client and extend from the current expiry for a paid order."""
+    _validate_profile(client_type, flow, fingerprint)
+    now = datetime.now(timezone.utc)
+    user = await db.get(User, subscription.user_id)
+    node = await db.get(VPNNode, node_id)
+    if user is None or node is None:
+        raise ProvisioningNotFound("User or VPN node not found")
+    if node.status != "active":
+        raise ProvisioningInvalid("VPN node is not active")
+    node_config = await db.scalar(
+        select(VPNNodeConfig).where(
+            VPNNodeConfig.node_id == node_id,
+            VPNNodeConfig.protocol == "vless",
+        )
+    )
+    if node_config is None or not node_config.config.get("api_address"):
+        raise ProvisioningNotFound("VPN node configuration not found")
+    previous = (
+        await db.execute(
+            select(VPNClient)
+            .where(
+                VPNClient.subscription_id == subscription.id,
+                VPNClient.status == "active",
+            )
+            .order_by(VPNClient.id.desc())
+            .with_for_update()
+        )
+    ).scalars().first()
+    current_expiry = subscription.expires_at
+    if current_expiry.tzinfo is None:
+        current_expiry = current_expiry.replace(tzinfo=timezone.utc)
+    expires_at = max(current_expiry, now) + timedelta(days=plan.duration_days)
+    client = VPNClient(
+        user_id=user.id,
+        subscription_id=subscription.id,
+        node_id=node.id,
+        protocol="vless",
+        client_type=client_type,
+        flow=flow,
+        fingerprint=fingerprint,
+        max_connections=plan.max_connections,
+        traffic_limit_gb=plan.traffic_limit_gb,
+        client_uuid=str(uuid4()),
+        status="provisioning",
+        expires_at=expires_at,
+    )
+    db.add(client)
+    await db.flush()
+    inbound_tag = node_config.config.get("inbound_tag", "vless-reality")
+    xray = panel_factory(address=node_config.config["api_address"])
+    try:
+        await xray.add_vless_user(
+            inbound_tag=inbound_tag,
+            client_uuid=client.client_uuid,
+            email=f"vpn-{client.id}",
+            flow=client.flow,
+            expiry_time=int(expires_at.timestamp() * 1000),
+            telegram_id=user.telegram_id,
+            limit_ip=client.max_connections,
+            total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
+        )
+        if previous is not None:
+            previous_config = await db.scalar(
+                select(VPNNodeConfig).where(
+                    VPNNodeConfig.node_id == previous.node_id,
+                    VPNNodeConfig.protocol == previous.protocol,
+                )
+            )
+            if previous_config is not None:
+                old_xray = panel_factory(address=previous_config.config.get("api_address"))
+                try:
+                    await old_xray.remove_vless_user(
+                        inbound_tag=previous_config.config.get("inbound_tag", "vless-reality"),
+                        email=f"vpn-{previous.id}",
+                    )
+                except ThreeXUIClientNotFound:
+                    pass
+    except ThreeXUIError as exc:
+        try:
+            await xray.remove_vless_user(inbound_tag=inbound_tag, email=f"vpn-{client.id}")
+        except (ThreeXUIError, ThreeXUIClientNotFound):
+            pass
+        await db.rollback()
+        raise ProvisioningThreeXUIError(f"Failed to renew VPN client in 3x-ui: {exc}") from exc
+    if previous is not None:
+        previous.status = "revoked"
+        previous.revoked_at = now
+    client.status = "active"
+    subscription.plan_id = plan.id
+    subscription.status = "active"
+    subscription.expires_at = expires_at
+    return ProvisioningResult(subscription=subscription, client=client, xray=xray, inbound_tag=inbound_tag)
+
+
 async def commit_provisioning(
     db: AsyncSession,
     result: ProvisioningResult,

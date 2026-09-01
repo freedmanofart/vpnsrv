@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import httpx
+from unittest.mock import AsyncMock, patch
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from unittest import IsolatedAsyncioTestCase
@@ -121,14 +122,66 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         main_module.AsyncSessionLocal = self.original_audit_factory
         await self.engine.dispose()
 
-    async def test_root_redirects_to_protected_admin(self) -> None:
+    async def test_root_serves_landing_and_admin_stays_protected(self) -> None:
         response = await self.client.get("/", follow_redirects=False)
-        self.assertEqual(307, response.status_code)
-        self.assertEqual("/admin", response.headers["location"])
+        self.assertEqual(200, response.status_code)
+        self.assertIn("Freedom VPN", response.text)
+        self.assertIn("Control plane", response.text)
         unauthenticated = await self.client.get("/admin")
         self.assertEqual(401, unauthenticated.status_code)
         authenticated = await self.client.get("/admin", auth=self.admin_auth)
         self.assertEqual(200, authenticated.status_code)
+
+    async def test_web_registration_emails_hashed_magic_link_and_opens_cabinet(self) -> None:
+        with patch("app.api.routes.web.send_cabinet_link", new=AsyncMock()) as send:
+            registered = await self.client.post(
+                "/web/register",
+                json={"email": "Web.User@example.com", "plan_id": 1},
+            )
+        self.assertEqual(200, registered.status_code, registered.text)
+        link = send.await_args.args[1]
+        self.assertIn("/cabinet/access/", link)
+        raw_token = link.rsplit("/", 1)[-1]
+
+        from app.db.models.cabinet_access import CabinetAccessToken
+
+        async with self.session_factory() as db:
+            web_user = await db.scalar(select(User).where(User.email == "web.user@example.com"))
+            self.assertIsNotNone(web_user)
+            access = await db.scalar(select(CabinetAccessToken).where(CabinetAccessToken.user_id == web_user.id))
+            self.assertNotEqual(raw_token, access.token_hash)
+
+        opened = await self.client.get(f"/cabinet/access/{raw_token}", follow_redirects=False)
+        self.assertEqual(303, opened.status_code)
+        self.assertEqual("/cabinet", opened.headers["location"])
+        cabinet = await self.client.get("/cabinet")
+        self.assertEqual(200, cabinet.status_code, cabinet.text)
+        self.assertIn("web.user@example.com", cabinet.text)
+
+    async def test_web_cabinet_creates_payment_and_uploads_receipt(self) -> None:
+        from app.db.models import CabinetAccessToken, PaymentMethod
+        from app.core.tokens import token_hash
+
+        raw = "web-test-token"
+        async with self.session_factory() as db:
+            user = await db.get(User, self.user_id)
+            user.email = "paid@example.com"
+            db.add(CabinetAccessToken(user_id=user.id, token_hash=token_hash(raw), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
+            db.add(PaymentMethod(code="sber_qr", name="Сбербанк QR", is_active=True, sort_order=1, image_data=b"qr", image_mime_type="image/png"))
+            await db.commit()
+        self.client.cookies.set("freedom_cabinet", raw)
+        created = await self.client.post(
+            "/web/payments/manual",
+            json={"plan_id": 1, "node_id": self.node_id, "method_code": "sber_qr"},
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertIn("qr_url", created.json())
+        receipt = await self.client.post(
+            f"/web/payments/{created.json()['payment_id']}/receipt",
+            json={"filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.b64encode(b"receipt").decode()},
+        )
+        self.assertEqual(200, receipt.status_code, receipt.text)
+        self.assertEqual("processing", receipt.json()["status"])
 
     async def test_plan_delete_rejects_used_and_removes_unused(self) -> None:
         used = await self.client.delete("/plans/1", headers=self.service_headers)

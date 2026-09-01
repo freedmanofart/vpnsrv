@@ -244,6 +244,38 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 await db.scalar(select(func.count()).select_from(PaymentEvent)),
             )
 
+    async def test_second_paid_order_renews_active_subscription(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            old_expiry = initial.subscription.expires_at
+            payment = await create_payment(
+                db, self.payment_data("web:renew-active"), provider="manual_bank"
+            )
+            paid = await process_payment_event(
+                db,
+                provider="manual_bank",
+                event_id="web-renew-paid",
+                provider_payment_id=payment.provider_payment_id,
+                target_status="paid",
+                payload={"details": {"source": "web_cabinet"}},
+                panel_factory=FakePanel,
+            )
+            self.assertEqual(initial.subscription.id, paid.subscription_id)
+            renewed = await db.get(Subscription, paid.subscription_id)
+            self.assertEqual(
+                (old_expiry + timedelta(days=30)).replace(tzinfo=None),
+                renewed.expires_at.replace(tzinfo=None),
+            )
+            clients = (
+                await db.execute(
+                    select(VPNClient)
+                    .where(VPNClient.subscription_id == renewed.id)
+                    .order_by(VPNClient.id)
+                )
+            ).scalars().all()
+            self.assertEqual(["revoked", "active"], [item.status for item in clients])
+            self.assertIn(f"vpn-{clients[1].id}", FakePanel.users["https://master.example/base"])
+
     async def test_payment_state_machine_rejects_terminal_transition(self) -> None:
         async with self.session_factory() as db:
             payment = await create_payment(

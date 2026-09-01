@@ -22,6 +22,7 @@ from app.services.provisioning import (
     ProvisioningThreeXUIError,
     commit_provisioning,
     provision_subscription,
+    renew_paid_subscription,
 )
 from app.services.threexui import ThreeXUIClient
 from app.services.payment_providers import get_payment_provider
@@ -215,16 +216,42 @@ async def process_payment_event(
             await db.rollback()
             raise PaymentInvalidTransition("Payment has no VPN node")
         try:
-            provisioning = await provision_subscription(
-                db,
-                user_id=payment.user_id,
-                plan_id=payment.plan_id,
-                node_id=payment.node_id,
-                client_type=payment.client_type,
-                flow=payment.flow,
-                fingerprint=payment.fingerprint,
-                panel_factory=panel_factory,
-            )
+            active = (
+                await db.execute(
+                    select(Subscription)
+                    .where(
+                        Subscription.user_id == payment.user_id,
+                        Subscription.status == "active",
+                        Subscription.expires_at > datetime.now(timezone.utc),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if active is not None:
+                plan = await db.get(Plan, payment.plan_id)
+                if plan is None:
+                    raise ProvisioningNotFound("Plan not found")
+                provisioning = await renew_paid_subscription(
+                    db,
+                    subscription=active,
+                    plan=plan,
+                    node_id=payment.node_id,
+                    client_type=payment.client_type,
+                    flow=payment.flow,
+                    fingerprint=payment.fingerprint,
+                    panel_factory=panel_factory,
+                )
+            else:
+                provisioning = await provision_subscription(
+                    db,
+                    user_id=payment.user_id,
+                    plan_id=payment.plan_id,
+                    node_id=payment.node_id,
+                    client_type=payment.client_type,
+                    flow=payment.flow,
+                    fingerprint=payment.fingerprint,
+                    panel_factory=panel_factory,
+                )
         except ProvisioningNotFound as exc:
             await db.rollback()
             raise PaymentNotFound(str(exc)) from exc

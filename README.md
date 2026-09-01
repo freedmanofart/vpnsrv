@@ -79,6 +79,10 @@ Inbound может работать на master или быть назначен
 После запуска админка доступна по адресу `http://localhost:8000` (корень
 перенаправляет на `/admin`), OpenAPI — `http://localhost:8000/docs`.
 Вход выполняется через HTTP Basic; учётные данные задают переменные
+Публичный лендинг доступен на `/`, резервный кабинет — на `/cabinet`, а
+административная панель — на `/admin`. Настройка сайта, SMTP и токенизированного
+входа описана в [docs/web-cabinet.md](docs/web-cabinet.md).
+
 `ADMIN_USERNAME` и `ADMIN_PASSWORD` в `.env`. Подробности — в
 [`docs/access-and-credentials.md`](docs/access-and-credentials.md).
 
