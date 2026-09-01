@@ -16,7 +16,7 @@ from app.domain import (
 from app.logging_config import configure_logging
 from aiogram.exceptions import TelegramBadRequest
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -25,6 +25,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     BufferedInputFile,
+    BotCommand,
+    MenuButtonCommands,
 )
 
 
@@ -474,6 +476,58 @@ async def start_handler(message: Message):
             "❌ Произошла ошибка.\n"
             "Попробуй ещё раз."
         )
+
+
+@router.message(Command("menu"))
+async def menu_command_handler(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        content_text("main_menu"),
+        reply_markup=main_menu(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("vpn"))
+async def vpn_command_handler(message: Message):
+    try:
+        data = await get_vpn_status(message.from_user.id)
+        subscription = data.get("subscription")
+        client = data.get("vpn_client")
+        if not subscription:
+            text = "📡 <b>Мой VPN</b>\n\nУ вас пока нет активной подписки."
+            keyboard = main_menu()
+        else:
+            expires_at = (subscription.get("expires_at") or "—").replace("T", " ").replace("+00:00", "")
+            text = (
+                "📡 <b>Мой VPN</b>\n\n"
+                f"Подписка: {'🟢 Активна' if subscription.get('status') == 'active' else '🔴 Истекла'}\n"
+                f"VPN: {'🟢 Подключён' if client else '🔴 Не настроен'}\n"
+                f"Действует до: <code>{expires_at} UTC</code>"
+            )
+            keyboard = active_vpn_keyboard() if client else main_menu()
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception:
+        logging.exception("Failed to show VPN status from command")
+        await message.answer("❌ Не удалось получить данные VPN.", reply_markup=main_menu())
+
+
+@router.message(Command("buy"))
+async def buy_command_handler(message: Message):
+    await message.answer(
+        content_text("platforms_intro"),
+        reply_markup=platforms_keyboard(purchase=True),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("help"))
+async def help_command_handler(message: Message):
+    await message.answer(
+        content_text("instructions"),
+        reply_markup=main_menu(),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == "instructions")
@@ -1157,6 +1211,17 @@ async def main_menu_handler(
 
 async def main():
     bot = Bot(token=BOT_TOKEN)
+
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Запустить бота"),
+            BotCommand(command="menu", description="Главное меню"),
+            BotCommand(command="vpn", description="Мой VPN"),
+            BotCommand(command="buy", description="Купить VPN"),
+            BotCommand(command="help", description="Инструкция"),
+        ]
+    )
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
     dp = Dispatcher()
 
