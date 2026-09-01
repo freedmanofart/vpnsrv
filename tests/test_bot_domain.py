@@ -32,7 +32,7 @@ class KeyTests(unittest.TestCase):
                 "node_id": 3,
                 "client_type": "universal",
                 "flow": "",
-                "fingerprint": "chrome",
+                "fingerprint": "firefox",
             },
         )
 
@@ -43,7 +43,7 @@ class KeyTests(unittest.TestCase):
                 "node_id": 7,
                 "client_type": "universal",
                 "flow": "",
-                "fingerprint": "chrome",
+                "fingerprint": "firefox",
             },
         )
 

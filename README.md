@@ -64,6 +64,8 @@ Inbound может работать на master или быть назначен
 [`docs/add-3x-ui-node.md`](docs/add-3x-ui-node.md).
 Полный жизненный цикл тарифа, оплаты, выдачи, продления и отзыва описан в
 [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md).
+Устройство, изменение и безопасный деплой Telegram-бота описаны в
+[`docs/editing-telegram-bot.md`](docs/editing-telegram-bot.md).
 
 ## API
 
@@ -130,3 +132,5 @@ in-memory реализацию и не изменяют развёрнутую �
 Операционные инструкции: [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md),
 доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md),
 бизнес-логика: [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md).
+Документация разработчика бота:
+[`docs/editing-telegram-bot.md`](docs/editing-telegram-bot.md).

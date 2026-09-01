@@ -26,7 +26,7 @@ def subscription_payload(
         "node_id": node_id,
         "client_type": "universal",
         "flow": "",
-        "fingerprint": "chrome",
+        "fingerprint": "firefox",
     }
 
 
@@ -35,7 +35,7 @@ def rotation_payload(node_id: int) -> dict:
         "node_id": node_id,
         "client_type": "universal",
         "flow": "",
-        "fingerprint": "chrome",
+        "fingerprint": "firefox",
     }
 
 
