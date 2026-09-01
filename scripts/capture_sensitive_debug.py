@@ -83,7 +83,6 @@ def main() -> None:
     # незаметно в чувствительный снимок без проверки кода.
     secret_names = {
         "BOT_TOKEN",
-        "POSTGRES_PASSWORD",
         "ADMIN_PASSWORD",
         "SERVICE_API_TOKEN",
         "PAYMENT_WEBHOOK_SECRET",

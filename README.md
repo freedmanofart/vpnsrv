@@ -23,7 +23,7 @@ Telegram -> aiogram bot -> FastAPI -> PostgreSQL
 |---|---|
 | `api` | FastAPI, подписки, платежи, клиенты и web admin |
 | `bot` | Telegram-интерфейс на aiogram 3 |
-| `postgres` | Пользователи, тарифы, подписки, платежи и логические VPN-клиенты |
+| внешний PostgreSQL | Единый контейнер `postgres`, отдельная БД `vpn` для данных сервиса |
 | `worker` | Истечение доступа и reconciliation с 3x-ui master |
 | `3x-ui master` | Inbound-конфигурации, физические ноды, Xray и трафик |
 
@@ -98,7 +98,6 @@ webhook, требуют service Bearer token или HTTP Basic админист�
 cp .env.example .env
 python3 scripts/configctl.py validate
 
-docker compose up -d postgres
 docker compose run --rm api alembic upgrade head
 docker compose up -d
 ```

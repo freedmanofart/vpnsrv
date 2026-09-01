@@ -31,11 +31,11 @@ class ConfigCtlTests(unittest.TestCase):
         values = {
             key: "value" for key, item in configctl.VARIABLES.items() if item.required
         }
-        values["POSTGRES_PASSWORD"] = "change_me"
+        values["ADMIN_PASSWORD"] = "change_me"
         values["PAYMENT_PROVIDER"] = "real"
         values["PAYMENT_AUTO_CONFIRM"] = "true"
         errors = configctl.validate(values)
-        self.assertIn("POSTGRES_PASSWORD: placeholder value", errors)
+        self.assertIn("ADMIN_PASSWORD: placeholder value", errors)
         self.assertTrue(any("PAYMENT_AUTO_CONFIRM" in error for error in errors))
 
 

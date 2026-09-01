@@ -52,7 +52,7 @@ ssh -N -L 2223:127.0.0.1:60628 root@159.223.22.59
 | 3x-ui | `THREEXUI_API_TOKEN`, `THREEXUI_VERIFY_TLS` | доступ API/worker к master |
 | Telegram | `BOT_TOKEN`, `TELEGRAM_CHANNEL_URL`, `SUPPORT_URL` | бот и ссылки |
 | Оплата | `PAYMENT_PROVIDER`, `PAYMENT_WEBHOOK_SECRET`, `YOOMONEY_*` | платежи |
-| PostgreSQL | `DATABASE_URL`, `POSTGRES_*` | прикладная БД |
+| PostgreSQL | `DATABASE_URL`, `POSTGRES_CONTAINER`, `VPN_DATABASE_NAME` | единый внешний контейнер, отдельная БД `vpn` |
 
 Переменные `XRAY_API_ADDRESS`, `XRAY_INBOUND_TAG`, `XRAY_MANAGEMENT_MODE`,
 `NODE_AGENT_TOKEN`, `NODE_AGENT_NODE_ID` и `CONTROL_PLANE_URL` удалены.

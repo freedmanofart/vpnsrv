@@ -23,9 +23,8 @@ class Variable:
 # Центральный allow-list. Неизвестные ключи .env можно менять и просматривать,
 # но только объявленные здесь ключи получают специальную проверку и маскирование.
 VARIABLES: dict[str, Variable] = {
-    "POSTGRES_DB": Variable(required=True),
-    "POSTGRES_USER": Variable(required=True),
-    "POSTGRES_PASSWORD": Variable(secret=True, required=True, generated_bytes=24),
+    "POSTGRES_CONTAINER": Variable(),
+    "VPN_DATABASE_NAME": Variable(),
     "DATABASE_URL": Variable(secret=True, required=True),
     "LOG_LEVEL": Variable(),
     "BOT_TOKEN": Variable(secret=True, required=True),

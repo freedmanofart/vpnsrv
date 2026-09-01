@@ -14,16 +14,16 @@ timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 # каталог и созданные файлы не должны быть доступны другим пользователям.
 install -d -m 700 "$backup_directory"
 
-# Получаем имя пользователя и БД из контейнера, не дублируя разбор .env.
-# Благодаря этому pg_dump работает именно с БД, настроенной в Compose.
-postgres_user=$(docker exec vpn-postgres printenv POSTGRES_USER)
-postgres_db=$(docker exec vpn-postgres printenv POSTGRES_DB)
+# VPN использует общесистемный контейнер PostgreSQL, но отдельную БД.
+postgres_container=${POSTGRES_CONTAINER:-postgres}
+postgres_user=$(docker exec "$postgres_container" printenv POSTGRES_USER)
+postgres_db=${VPN_DATABASE_NAME:-vpn}
 dump_path="$backup_directory/vpn-db-$timestamp.dump"
 config_path="$backup_directory/vpn-config-$timestamp.tar.gz"
 
 # Custom format поддерживает проверку через pg_restore и выборочное восстановление.
 # Перенаправление выполняется на хосте и кладёт артефакт в каталог копий.
-docker exec vpn-postgres pg_dump \
+docker exec "$postgres_container" pg_dump \
   -U "$postgres_user" \
   -d "$postgres_db" \
   -Fc >"$dump_path"
@@ -38,7 +38,7 @@ tar -C "$project_directory" -czf "$config_path" \
 # Сначала используем pg_restore хоста, а при его отсутствии — бинарник контейнера.
 chmod 600 "$dump_path" "$config_path"
 pg_restore --list "$dump_path" >/dev/null 2>&1 || \
-  docker exec -i vpn-postgres pg_restore --list <"$dump_path" >/dev/null
+  docker exec -i "$postgres_container" pg_restore --list <"$dump_path" >/dev/null
 
 # Храним 14 полных дней. Глубина и шаблоны имён ограничены, чтобы неверно
 # настроенный каталог не привёл к удалению посторонних файлов.
