@@ -52,6 +52,12 @@ class PromoFlow(StatesGroup):
     waiting_code = State()
 
 
+class PurchaseFlow(StatesGroup):
+    waiting_device = State()
+    waiting_country = State()
+    waiting_plan = State()
+
+
 def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=base_url,
@@ -94,6 +100,49 @@ def popup_menu() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Выберите действие",
+    )
+
+
+def purchase_devices_keyboard() -> ReplyKeyboardMarkup:
+    labels = [item["label"] for item in CONTENT.get("platforms", [])]
+    rows = [
+        [KeyboardButton(text=label) for label in labels[index:index + 2]]
+        for index in range(0, len(labels), 2)
+    ]
+    rows.append([KeyboardButton(text="⬅️ Главное меню")])
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите устройство",
+    )
+
+
+def purchase_countries_keyboard(nodes: list[dict]) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=country_label(node["region"]))]
+            for node in nodes
+        ] + [[KeyboardButton(text="⬅️ Главное меню")]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите страну",
+    )
+
+
+def plan_button_label(plan: dict) -> str:
+    return f"{plan['price']} {plan['currency']} — {plan['name']}"
+
+
+def purchase_plans_keyboard(plans: list[dict]) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=plan_button_label(plan))]
+            for plan in plans
+        ] + [[KeyboardButton(text="⬅️ Главное меню")]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите тариф",
     )
     support_button = (
         InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)
@@ -532,10 +581,11 @@ async def vpn_command_handler(message: Message):
 
 
 @router.message(Command("buy"))
-async def buy_command_handler(message: Message):
+async def buy_command_handler(message: Message, state: FSMContext):
+    await state.set_state(PurchaseFlow.waiting_device)
     await message.answer(
-        content_text("platforms_intro"),
-        reply_markup=platforms_keyboard(purchase=True),
+        "📱 <b>Выберите ваше устройство:</b>",
+        reply_markup=purchase_devices_keyboard(),
         parse_mode="HTML",
     )
 
@@ -550,8 +600,8 @@ async def help_command_handler(message: Message):
 
 
 @router.message(F.text == "💳 Оплатить")
-async def popup_buy_handler(message: Message):
-    await buy_command_handler(message)
+async def popup_buy_handler(message: Message, state: FSMContext):
+    await buy_command_handler(message, state)
 
 
 @router.message(F.text == "👤 Личный кабинет")
@@ -594,6 +644,102 @@ async def popup_support_handler(message: Message):
         )
     else:
         await message.answer(content_text("support_missing"), reply_markup=popup_menu())
+
+
+@router.message(F.text == "⬅️ Главное меню")
+async def popup_home_handler(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(content_text("main_menu"), parse_mode="HTML", reply_markup=popup_menu())
+
+
+async def show_reply_plans(message: Message, state: FSMContext, node: dict) -> None:
+    plans = await get_plans()
+    if not plans:
+        await state.clear()
+        await message.answer("Сейчас нет доступных тарифов.", reply_markup=popup_menu())
+        return
+    await state.update_data(
+        node_id=node["id"],
+        plans={plan_button_label(plan): plan for plan in plans},
+    )
+    await state.set_state(PurchaseFlow.waiting_plan)
+    await message.answer(
+        "💳 <b>Тарифы</b>\n\n"
+        "Выберите срок доступа. Цена и срок берутся из актуального тарифа VPN API.",
+        parse_mode="HTML",
+        reply_markup=purchase_plans_keyboard(plans),
+    )
+
+
+@router.message(PurchaseFlow.waiting_device)
+async def reply_device_handler(message: Message, state: FSMContext):
+    item = next(
+        (platform for platform in CONTENT.get("platforms", []) if platform.get("label") == message.text),
+        None,
+    )
+    if not item:
+        await message.answer("Выберите устройство кнопкой ниже.", reply_markup=purchase_devices_keyboard())
+        return
+    nodes = await available_nodes()
+    if not nodes:
+        await state.clear()
+        await message.answer("Сейчас нет доступных серверов.", reply_markup=popup_menu())
+        return
+    await state.update_data(platform_id=item["id"])
+    if len(nodes) == 1:
+        await show_reply_plans(message, state, nodes[0])
+        return
+    await state.update_data(nodes={country_label(node["region"]): node for node in nodes})
+    await state.set_state(PurchaseFlow.waiting_country)
+    await message.answer(
+        "🌍 <b>Выберите страну подключения:</b>",
+        parse_mode="HTML",
+        reply_markup=purchase_countries_keyboard(nodes),
+    )
+
+
+@router.message(PurchaseFlow.waiting_country)
+async def reply_country_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    node = data.get("nodes", {}).get(message.text)
+    if not node:
+        await message.answer("Выберите страну кнопкой ниже.")
+        return
+    await show_reply_plans(message, state, node)
+
+
+@router.message(PurchaseFlow.waiting_plan)
+async def reply_plan_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    plan = data.get("plans", {}).get(message.text)
+    node_id = data.get("node_id")
+    if not plan or not node_id:
+        await message.answer("Выберите тариф кнопкой ниже.")
+        return
+    nodes = await get_nodes()
+    node = next((item for item in nodes if item["id"] == node_id), None)
+    if not node:
+        await state.clear()
+        await message.answer("Выбранный сервер больше недоступен.", reply_markup=popup_menu())
+        return
+    payment_url = payment_url_for_plan(plan)
+    rows = []
+    if payment_url:
+        rows.extend([
+            [InlineKeyboardButton(text="💳 Перейти к оплате", url=payment_url)],
+            [InlineKeyboardButton(text="📷 QR оплаты", callback_data=f"payment_qr:{plan['id']}:{node_id}")],
+        ])
+    rows.append([InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"pay_qr:{plan['id']}:{node_id}")])
+    await state.clear()
+    await message.answer(
+        "💳 <b>Оплата</b>\n\n"
+        f"Устройство: <b>{html.escape(str(data.get('platform_id', '—')))}</b>\n"
+        f"Страна: <b>{country_label(node.get('region')) or html.escape(node['name'])}</b>\n"
+        f"Тариф: <b>{html.escape(plan['name'])}</b>\n"
+        f"Стоимость: <b>{plan['price']} {plan['currency']}</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
 
 
 @router.callback_query(F.data == "instructions")

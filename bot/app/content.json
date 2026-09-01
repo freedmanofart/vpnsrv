@@ -21,45 +21,59 @@
   "platforms": [
     {
       "id": "android",
-      "label": "🤖 Android",
+      "label": "Android",
       "client": "AmneziaVPN",
       "url": "https://amnezia.org/downloads",
       "description": "Android 9 и новее. Установите AmneziaVPN с официальной страницы загрузки."
     },
     {
       "id": "ios",
-      "label": "📱 iPhone / iPad",
+      "label": "IOS (iPhone)",
       "client": "AmneziaVPN",
       "url": "https://amnezia.org/downloads",
       "description": "iOS 17 и новее. На странице загрузки откройте ссылку App Store."
     },
     {
       "id": "macos",
-      "label": "💻 macOS",
+      "label": "MacOS",
       "client": "AmneziaVPN",
       "url": "https://amnezia.org/downloads",
       "description": "macOS 14 и новее. Используйте официальный установщик или App Store."
     },
     {
       "id": "windows",
-      "label": "🪟 Windows",
+      "label": "Windows",
       "client": "AmneziaVPN",
       "url": "https://amnezia.org/downloads",
       "description": "Windows 10/11 x64. Скачайте официальный установщик AmneziaVPN."
     },
     {
       "id": "linux",
-      "label": "🐧 Linux",
+      "label": "Linux",
       "client": "AmneziaVPN",
       "url": "https://amnezia.org/downloads",
       "description": "Выберите сборку для вашего дистрибутива на официальной странице."
     },
     {
       "id": "android_tv",
-      "label": "📺 Android TV",
+      "label": "Android TV",
       "client": "AmneziaVPN",
       "url": "https://docs.amnezia.org/ru/documentation/instructions/android_tv_connect/",
       "description": "Установите AmneziaVPN из Google Play на телевизоре и перенесите ключ по официальной инструкции."
+    },
+    {
+      "id": "apple_tv",
+      "label": "Apple TV",
+      "client": "AmneziaVPN",
+      "url": "https://amnezia.org/downloads",
+      "description": "Установите совместимый клиент из App Store и импортируйте выданную VLESS-ссылку."
+    },
+    {
+      "id": "routers",
+      "label": "Роутеры",
+      "client": "VLESS-совместимый клиент",
+      "url": "https://docs.amnezia.org/ru/documentation/",
+      "description": "Поддержка зависит от прошивки роутера. Используйте клиент с VLESS Reality xHTTP."
     }
   ],
   "main_url_buttons": []
