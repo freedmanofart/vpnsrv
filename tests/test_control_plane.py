@@ -126,7 +126,9 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         response = await self.client.get("/", follow_redirects=False)
         self.assertEqual(200, response.status_code)
         self.assertIn("Freedom VPN", response.text)
-        self.assertIn("Control plane", response.text)
+        self.assertIn("Выберите свой формат", response.text)
+        self.assertNotIn("Тарифы из административной панели", response.text)
+        self.assertNotIn("синхронизированы с VPN API", response.text)
         unauthenticated = await self.client.get("/admin")
         self.assertEqual(401, unauthenticated.status_code)
         authenticated = await self.client.get("/admin", auth=self.admin_auth)
@@ -172,7 +174,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.client.cookies.set("freedom_cabinet", raw)
         created = await self.client.post(
             "/web/payments/manual",
-            json={"plan_id": 1, "node_id": self.node_id, "method_code": "sber_qr"},
+            json={"plan_id": 1, "method_code": "sber_qr"},
         )
         self.assertEqual(200, created.status_code, created.text)
         self.assertIn("qr_url", created.json())

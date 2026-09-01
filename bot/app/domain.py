@@ -3,19 +3,19 @@ from __future__ import annotations
 
 PLAN_TIERS = {
     "lite": {
-        "label": "🛴 Лайт",
+        "label": "Лайт",
         "connections": 5,
         "traffic": "250 ГБ трафика",
         "summary": "Для одного человека",
     },
     "standard": {
-        "label": "🔥 Стандарт",
+        "label": "Стандарт",
         "connections": 15,
         "traffic": "650 ГБ трафика",
         "summary": "Идеально для всей семьи",
     },
     "ultra": {
-        "label": "🚀 Ультра",
+        "label": "Ультра",
         "connections": 30,
         "traffic": "3 ТБ трафика",
         "summary": "Для стриминга, игр и загрузок",

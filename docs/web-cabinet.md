@@ -88,6 +88,24 @@ SMTP_USE_SSL=false
 новый токен. Это предотвращает создание доступа, который пользователь не
 сможет получить. Пароль SMTP хранится только в `.env`, не в Git.
 
+На текущем Fedora master локальный исходящий Postfix устанавливается скриптом:
+
+```bash
+sudo VPN_MAIL_HOSTNAME=fedora.taile485ac.ts.net scripts/setup_postfix_relay.sh
+python3 scripts/configctl.py set SMTP_HOST host.docker.internal
+python3 scripts/configctl.py set SMTP_PORT 25
+python3 scripts/configctl.py set SMTP_FROM \
+  'Freedom VPN <no-reply@fedora.taile485ac.ts.net>'
+python3 scripts/configctl.py set SMTP_STARTTLS false
+python3 scripts/configctl.py set SMTP_USE_SSL false
+```
+
+Postfix слушает только loopback и Docker bridge, поэтому не является публичным
+open relay. Для гарантированной доставки нужен собственный почтовый домен со
+SPF, DKIM и DMARC либо внешний SMTP relay; отправитель на `.ts.net` подходит
+для первичной эксплуатации, но отдельные провайдеры могут отправлять такие
+письма в спам.
+
 После изменения переменных пересоздайте API:
 
 ```bash
@@ -98,12 +116,13 @@ curl -fsS http://127.0.0.1:8000/health
 
 ## Временный доступ через Tailscale-IP
 
-До подключения публичного домена мастер можно открыть только участникам
-tailnet. API продолжает слушать безопасный `127.0.0.1:8000`, а Tailscale Serve
-публикует его на приватном HTTPS-адресе tailnet:
+API продолжает слушать безопасный `127.0.0.1:8000`. Для доступа только из
+tailnet используется Tailscale Serve, а для публикации того же адреса в
+интернет — Tailscale Funnel:
 
 ```bash
 tailscale serve --bg --https=443 http://127.0.0.1:8000
+tailscale funnel --bg --yes 8000
 ```
 
 Переменные для текущего мастера:
@@ -113,7 +132,9 @@ PUBLIC_BASE_URL=https://fedora.taile485ac.ts.net
 WEB_CABINET_URL=https://fedora.taile485ac.ts.net/cabinet
 ```
 
-Такой адрес доступен только устройствам, подключённым к тому же tailnet.
+При Serve адрес доступен только устройствам того же tailnet. При Funnel он
+доступен публично; сертификат выпускается и обновляется самим Tailscale без
+certbot и без файлов сертификата в приложении.
 Tailscale-IP мастера — `100.102.21.123`, но TLS-сертификат выпущен на его
 MagicDNS-имя `fedora.taile485ac.ts.net`. Поэтому в Telegram используется имя:
 оно проходит проверку HTTPS и позволяет открыть кабинет как Web App. Обращение
@@ -124,7 +145,14 @@ MagicDNS-имя `fedora.taile485ac.ts.net`. Поэтому в Telegram испо�
 ```bash
 tailscale serve status
 tailscale serve --https=443 off
+tailscale funnel status
+tailscale funnel --https=443 off
 ```
+
+Если сертификат Tailscale нужен отдельному nginx или другому файловому
+listener, установите `scripts/renew_tailscale_cert.sh` и systemd units из
+`deploy/systemd/vpn-tailscale-cert.*`. Скрипт атомарно обновляет
+`/etc/ssl/tailscale/cert.pem` и `key.pem`; Funnel этот скрипт не использует.
 
 ## Связь с Telegram
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew Freedom VPN Tailscale TLS certificate
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=TAILSCALE_CERT_DOMAIN=fedora.taile485ac.ts.net
+Environment=TAILSCALE_CERT_DIR=/etc/ssl/tailscale
+ExecStart=/home/freedman/vpn-service/scripts/renew_tailscale_cert.sh

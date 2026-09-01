@@ -97,7 +97,7 @@ async def vpn_expiration_loop():
                 "VPN expiration job failed"
             )
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(settings.lifecycle_interval_seconds)
 
 
 @asynccontextmanager

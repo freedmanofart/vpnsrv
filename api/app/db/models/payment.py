@@ -67,7 +67,7 @@ class Payment(Base):
     subscription_id: Mapped[int | None] = mapped_column(
         ForeignKey("subscriptions.id"),
         nullable=True,
-        unique=True,
+        index=True,
     )
 
     client_type: Mapped[str] = mapped_column(

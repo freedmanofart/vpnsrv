@@ -79,3 +79,19 @@ curl -fsS http://127.0.0.1:8000/health
 
 Unit-тесты не обращаются к production 3x-ui. Скрипты `e2e_*` создают реальные
 данные и запускаются только в отдельном тестовом окружении.
+
+## Восстановление старого Telegram-чека
+
+Если в старой записи платежа сохранился только Telegram `file_id`, одноразовый
+скрипт скачивает файл через Bot API и загружает бинарный чек в VPN API:
+
+```bash
+docker compose exec bot python -m app.backfill_receipt \
+  PAYMENT_ID USER_ID TELEGRAM_FILE_ID TELEGRAM_FILE_UNIQUE_ID photo
+```
+
+Последний аргумент — `photo` для изображения или `document` для PDF. Скрипту
+нужны штатные `BOT_TOKEN`, `API_URL` и `SERVICE_API_TOKEN` контейнера. Перед
+запуском сверьте `PAYMENT_ID` и `USER_ID`: API отклоняет чек, если платёж
+принадлежит другому пользователю. Повторный запуск перезаписывает сохранённый
+binary-чек этой записи платежа.

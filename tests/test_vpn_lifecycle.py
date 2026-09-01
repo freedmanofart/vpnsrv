@@ -5,7 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -37,7 +37,11 @@ from app.services.payments import (
     create_payment,
     process_payment_event,
 )
-from app.services.provisioning import commit_provisioning, provision_subscription
+from app.services.provisioning import (
+    commit_provisioning,
+    provision_subscription,
+    renew_paid_subscription,
+)
 from app.services.reconciliation import reconcile_node
 from app.services.vpn_expiration import expire_desired_state, expire_subscriptions
 from app.services.threexui import (
@@ -246,21 +250,33 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
 
     async def test_second_paid_order_renews_active_subscription(self) -> None:
         async with self.session_factory() as db:
-            initial = await self.provision(db)
-            old_expiry = initial.subscription.expires_at
-            payment = await create_payment(
+            first_payment = await create_payment(
+                db, self.payment_data("web:first-order"), provider="manual_bank"
+            )
+            first_paid = await process_payment_event(
+                db,
+                provider="manual_bank",
+                event_id="web-first-paid",
+                provider_payment_id=first_payment.provider_payment_id,
+                target_status="paid",
+                payload={"details": {"source": "web_cabinet"}},
+                panel_factory=FakePanel,
+            )
+            initial = await db.get(Subscription, first_paid.subscription_id)
+            old_expiry = initial.expires_at
+            second_payment = await create_payment(
                 db, self.payment_data("web:renew-active"), provider="manual_bank"
             )
             paid = await process_payment_event(
                 db,
                 provider="manual_bank",
                 event_id="web-renew-paid",
-                provider_payment_id=payment.provider_payment_id,
+                provider_payment_id=second_payment.provider_payment_id,
                 target_status="paid",
                 payload={"details": {"source": "web_cabinet"}},
                 panel_factory=FakePanel,
             )
-            self.assertEqual(initial.subscription.id, paid.subscription_id)
+            self.assertEqual(initial.id, paid.subscription_id)
             renewed = await db.get(Subscription, paid.subscription_id)
             self.assertEqual(
                 (old_expiry + timedelta(days=30)).replace(tzinfo=None),
@@ -275,6 +291,39 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             ).scalars().all()
             self.assertEqual(["revoked", "active"], [item.status for item in clients])
             self.assertIn(f"vpn-{clients[1].id}", FakePanel.users["https://master.example/base"])
+            payments = (
+                await db.execute(
+                    select(Payment)
+                    .where(Payment.subscription_id == renewed.id)
+                    .order_by(Payment.id)
+                )
+            ).scalars().all()
+            self.assertEqual(2, len(payments))
+
+    async def test_renew_commit_failure_restores_previous_panel_client(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            previous_email = f"vpn-{initial.client.id}"
+            plan = await db.get(Plan, self.plan_id)
+            result = await renew_paid_subscription(
+                db,
+                subscription=initial.subscription,
+                plan=plan,
+                node_id=self.node_id,
+                client_type="amnezia",
+                flow="xtls-rprx-vision",
+                fingerprint="chrome",
+                panel_factory=FakePanel,
+            )
+            new_email = f"vpn-{result.client.id}"
+            db.commit = AsyncMock(side_effect=RuntimeError("simulated commit failure"))
+
+            with self.assertRaisesRegex(RuntimeError, "simulated commit failure"):
+                await commit_provisioning(db, result)
+
+            panel_users = FakePanel.users["https://master.example/base"]
+            self.assertIn(previous_email, panel_users)
+            self.assertNotIn(new_email, panel_users)
 
     async def test_payment_state_machine_rejects_terminal_transition(self) -> None:
         async with self.session_factory() as db:

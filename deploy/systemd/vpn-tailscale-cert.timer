@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew Freedom VPN Tailscale TLS certificate weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=2h
+
+[Install]
+WantedBy=timers.target

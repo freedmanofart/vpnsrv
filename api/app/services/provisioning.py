@@ -13,7 +13,12 @@ from app.db.models.user import User
 from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
-from app.services.threexui import ThreeXUIClient, ThreeXUIError, ThreeXUIClientNotFound
+from app.services.threexui import (
+    ThreeXUIClient,
+    ThreeXUIClientAlreadyExists,
+    ThreeXUIClientNotFound,
+    ThreeXUIError,
+)
 from app.core.config import settings
 
 
@@ -38,11 +43,38 @@ class ProvisioningThreeXUIError(ProvisioningError):
 
 
 @dataclass
+class PanelClientSnapshot:
+    xray: ThreeXUIClient
+    inbound_tag: str
+    client_uuid: str
+    email: str
+    flow: str
+    expiry_time: int
+    telegram_id: int
+    limit_ip: int
+    total_gb: int
+
+    async def restore(self) -> None:
+        await self.xray.add_vless_user(
+            inbound_tag=self.inbound_tag,
+            client_uuid=self.client_uuid,
+            email=self.email,
+            flow=self.flow,
+            expiry_time=self.expiry_time,
+            telegram_id=self.telegram_id,
+            limit_ip=self.limit_ip,
+            total_gb=self.total_gb,
+        )
+
+
+@dataclass
 class ProvisioningResult:
     subscription: Subscription
     client: VPNClient
     xray: ThreeXUIClient | None
     inbound_tag: str
+    client_email: str | None = None
+    previous_client: PanelClientSnapshot | None = None
 
     async def compensate(self) -> None:
         if self.xray is None:
@@ -50,10 +82,15 @@ class ProvisioningResult:
         try:
             await self.xray.remove_vless_user(
                 inbound_tag=self.inbound_tag,
-                email=f"vpn-{self.client.id}",
+                email=self.client_email or f"vpn-{self.client.id}",
             )
         except (ThreeXUIError, ThreeXUIClientNotFound):
             pass
+        if self.previous_client is not None:
+            try:
+                await self.previous_client.restore()
+            except (ThreeXUIError, ThreeXUIClientAlreadyExists):
+                pass
 
 
 def _validate_profile(client_type: str, flow: str, fingerprint: str) -> None:
@@ -179,6 +216,7 @@ async def provision_subscription(
         client=client,
         xray=xray,
         inbound_tag=inbound_tag,
+        client_email=f"vpn-{client.id}",
     )
 
 
@@ -221,6 +259,32 @@ async def renew_paid_subscription(
             .with_for_update()
         )
     ).scalars().first()
+    previous_snapshot: PanelClientSnapshot | None = None
+    if previous is not None:
+        previous_config = await db.scalar(
+            select(VPNNodeConfig).where(
+                VPNNodeConfig.node_id == previous.node_id,
+                VPNNodeConfig.protocol == previous.protocol,
+            )
+        )
+        if previous_config is None or not previous_config.config.get("api_address"):
+            raise ProvisioningNotFound("Previous VPN node configuration not found")
+        previous_inbound_tag = previous_config.config.get("inbound_tag", "vless-reality")
+        previous_xray = panel_factory(address=previous_config.config["api_address"])
+        previous_expiry = previous.expires_at
+        if previous_expiry.tzinfo is None:
+            previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+        previous_snapshot = PanelClientSnapshot(
+            xray=previous_xray,
+            inbound_tag=previous_inbound_tag,
+            client_uuid=previous.client_uuid,
+            email=f"vpn-{previous.id}",
+            flow=previous.flow,
+            expiry_time=int(previous_expiry.timestamp() * 1000),
+            telegram_id=user.telegram_id,
+            limit_ip=previous.max_connections,
+            total_gb=previous.traffic_limit_gb * 1024 * 1024 * 1024,
+        )
     current_expiry = subscription.expires_at
     if current_expiry.tzinfo is None:
         current_expiry = current_expiry.replace(tzinfo=timezone.utc)
@@ -255,21 +319,13 @@ async def renew_paid_subscription(
             total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
         )
         if previous is not None:
-            previous_config = await db.scalar(
-                select(VPNNodeConfig).where(
-                    VPNNodeConfig.node_id == previous.node_id,
-                    VPNNodeConfig.protocol == previous.protocol,
+            try:
+                await previous_snapshot.xray.remove_vless_user(
+                    inbound_tag=previous_snapshot.inbound_tag,
+                    email=previous_snapshot.email,
                 )
-            )
-            if previous_config is not None:
-                old_xray = panel_factory(address=previous_config.config.get("api_address"))
-                try:
-                    await old_xray.remove_vless_user(
-                        inbound_tag=previous_config.config.get("inbound_tag", "vless-reality"),
-                        email=f"vpn-{previous.id}",
-                    )
-                except ThreeXUIClientNotFound:
-                    pass
+            except ThreeXUIClientNotFound:
+                pass
     except ThreeXUIError as exc:
         try:
             await xray.remove_vless_user(inbound_tag=inbound_tag, email=f"vpn-{client.id}")
@@ -284,7 +340,14 @@ async def renew_paid_subscription(
     subscription.plan_id = plan.id
     subscription.status = "active"
     subscription.expires_at = expires_at
-    return ProvisioningResult(subscription=subscription, client=client, xray=xray, inbound_tag=inbound_tag)
+    return ProvisioningResult(
+        subscription=subscription,
+        client=client,
+        xray=xray,
+        inbound_tag=inbound_tag,
+        client_email=f"vpn-{client.id}",
+        previous_client=previous_snapshot,
+    )
 
 
 async def commit_provisioning(

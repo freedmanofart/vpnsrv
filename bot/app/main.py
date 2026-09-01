@@ -111,8 +111,10 @@ def main_menu() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn")],
         [InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
-        [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
-        [InlineKeyboardButton(text="📖 Инструкции", callback_data="instructions"), support_button],
+        [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start")],
+        [InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
+        [InlineKeyboardButton(text="📖 Инструкции", callback_data="instructions")],
+        [support_button],
         [channel_button],
     ]
     rows.extend(
@@ -127,18 +129,12 @@ def popup_menu() -> ReplyKeyboardMarkup:
     """Постоянное раскрывающееся меню рядом с полем ввода Telegram."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [
-                KeyboardButton(text="💳 Приобрести подписку"),
-                KeyboardButton(text="👤 Управление подпиской"),
-            ],
-            [
-                KeyboardButton(text="🏷 Промокод"),
-                KeyboardButton(text="🧪 Попробовать"),
-            ],
-            [
-                KeyboardButton(text="📖 Инструкции"),
-                KeyboardButton(text="🆘 Поддержка"),
-            ],
+            [KeyboardButton(text="💳 Приобрести подписку")],
+            [KeyboardButton(text="👤 Управление подпиской")],
+            [KeyboardButton(text="🏷 Промокод")],
+            [KeyboardButton(text="🧪 Попробовать")],
+            [KeyboardButton(text="📖 Инструкции")],
+            [KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -153,7 +149,10 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
         else InlineKeyboardButton(text="🌐 Сайт", callback_data="site_missing")
     )
     return InlineKeyboardMarkup(
-        inline_keyboard=[[site, InlineKeyboardButton(text="✉️ Email", callback_data="cabinet_email")]],
+        inline_keyboard=[
+            [site],
+            [InlineKeyboardButton(text="✉️ Email", callback_data="cabinet_email")],
+        ],
     )
 
 
