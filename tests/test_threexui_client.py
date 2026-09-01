@@ -49,13 +49,18 @@ class ThreeXUIClientTests(IsolatedAsyncioTestCase):
             patch("app.services.threexui.settings.threexui_api_token", "node-token"),
             patch("app.services.threexui.httpx.AsyncClient", FakeAsyncClient),
         ):
-            await client.add_vless_user("17", "uuid-1", "vpn-42", flow="xtls-rprx-vision")
+            await client.add_vless_user(
+                "17", "uuid-1", "vpn-42", flow="xtls-rprx-vision",
+                expiry_time=1893456000000, telegram_id=12345,
+            )
             await client.remove_vless_user("17", "vpn-42")
 
         add = FakeAsyncClient.requests[0]
         self.assertEqual("https://master.example/hidden/panel/api/clients/add", add[1])
         self.assertEqual([17], add[2]["json"]["inboundIds"])
         self.assertEqual("uuid-1", add[2]["json"]["client"]["id"])
+        self.assertEqual(1893456000000, add[2]["json"]["client"]["expiryTime"])
+        self.assertEqual(12345, add[2]["json"]["client"]["tgId"])
         self.assertEqual("Bearer node-token", add[2]["headers"]["Authorization"])
         self.assertIn("clients/del/vpn-42?keepTraffic=1", FakeAsyncClient.requests[1][1])
 

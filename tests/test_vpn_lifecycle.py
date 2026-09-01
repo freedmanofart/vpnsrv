@@ -71,6 +71,8 @@ class FakePanel:
         email: str,
         level: int = 0,
         flow: str = "",
+        expiry_time: int = 0,
+        telegram_id: int = 0,
     ) -> None:
         if self.fail_add:
             raise ThreeXUIError("simulated add failure")
@@ -83,6 +85,8 @@ class FakePanel:
             client_uuid=client_uuid,
             level=level,
             flow=flow,
+            expiry_time=expiry_time,
+            telegram_id=telegram_id,
         )
 
     async def remove_vless_user(self, inbound_tag: str, email: str) -> None:

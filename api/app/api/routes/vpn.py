@@ -270,10 +270,10 @@ async def create_node_config(
     existing = result.scalar_one_or_none()
 
     if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{protocol} configuration already exists for this node",
-        )
+        existing.config = data.config
+        await db.commit()
+        await db.refresh(existing)
+        return existing
 
     config = VPNNodeConfig(
         node_id=node.id,

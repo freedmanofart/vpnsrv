@@ -5,6 +5,7 @@ from uuid import uuid4
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -215,7 +216,4 @@ async def db_health(
 
 @app.get("/")
 async def root():
-    return {
-        "service": "vpn-api",
-        "version": "0.2.0",
-    }
+    return RedirectResponse(url="/admin", status_code=307)

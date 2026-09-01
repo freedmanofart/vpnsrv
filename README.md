@@ -58,10 +58,16 @@ Inbound может работать на master или быть назначен
 
 Подробная настройка master и child описана в
 [`docs/3x-ui-master.md`](docs/3x-ui-master.md).
+Добавление новой ноды скриптом описано в
+[`docs/add-3x-ui-node.md`](docs/add-3x-ui-node.md).
 
 ## API
 
-После запуска OpenAPI приложения доступен по адресу `http://localhost:8000/docs`.
+После запуска админка доступна по адресу `http://localhost:8000` (корень
+перенаправляет на `/admin`), OpenAPI — `http://localhost:8000/docs`.
+Вход выполняется через HTTP Basic; учётные данные задают переменные
+`ADMIN_USERNAME` и `ADMIN_PASSWORD` в `.env`. Подробности — в
+[`docs/access-and-credentials.md`](docs/access-and-credentials.md).
 
 | Метод | Маршрут | Назначение |
 |---|---|---|
@@ -78,7 +84,8 @@ Inbound может работать на master или быть назначен
 | `GET`, `POST` | `/vpn/nodes/{id}/configs` | Привязка ноды к inbound |
 | `POST` | `/payments` | Идемпотентное создание платежа |
 | `POST` | `/payments/webhooks/{provider}` | Подписанное событие провайдера |
-| `GET` | `/admin` | Web admin |
+| `GET` | `/`, `/admin` | Web admin |
+| `POST` | `/admin/users/{id}/rotate` | Перевыпуск ключа из админки |
 
 Все прикладные маршруты, кроме `/`, `/health`, документации и платежного
 webhook, требуют service Bearer token или HTTP Basic администратора.

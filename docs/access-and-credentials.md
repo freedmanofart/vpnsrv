@@ -13,7 +13,7 @@
 
 | Страница | Адрес через туннель | Доступ |
 |---|---|---|
-| VPN Admin | `http://localhost:8000/admin` | HTTP Basic |
+| VPN Admin | `http://localhost:8000` или `/admin` | HTTP Basic |
 | Swagger | `http://localhost:8000/docs` | HTTP Basic или service token |
 | API health | `http://localhost:8000/health` | без авторизации |
 | DB health | `http://localhost:8000/db-health` | авторизация |
@@ -23,6 +23,19 @@
 ssh -N -L 8000:127.0.0.1:8000 codex@192.168.10.60
 ssh -N -L 3000:127.0.0.1:3000 codex@192.168.10.60
 ```
+
+Откройте `http://localhost:8000/admin` в браузере. Логин и пароль задаются
+только в `.env` основного сервера:
+
+```dotenv
+ADMIN_USERNAME=<логин-администратора>
+ADMIN_PASSWORD=<длинный-уникальный-пароль>
+```
+
+Это HTTP Basic, поэтому браузер показывает стандартное окно входа. Не
+используйте значения из `.env.example` (`admin` / `change_me`) в рабочей среде.
+Привязка порта `8000` остаётся к `127.0.0.1`: админка открывается локально на
+сервере либо через SSH-туннель и не должна публиковаться напрямую в интернет.
 
 Child 3x-ui на тестовом VPS:
 
@@ -64,6 +77,8 @@ ssh -N -L 2223:127.0.0.1:60628 root@159.223.22.59
 ```bash
 cd /home/freedman/vpn-service
 python3 scripts/configctl.py get ADMIN_USERNAME
+python3 scripts/configctl.py get ADMIN_PASSWORD
+python3 scripts/configctl.py get ADMIN_PASSWORD --show-secret
 python3 scripts/configctl.py get THREEXUI_API_TOKEN
 python3 scripts/configctl.py get THREEXUI_API_TOKEN --show-secret
 ```
@@ -85,5 +100,20 @@ python3 scripts/configctl.py apply --services api worker
 ```
 
 Сначала выполните Health в VPN Admin, затем отключите прежний токен в 3x-ui.
+
+Для установки или смены учётных данных VPN Admin:
+
+```bash
+python3 scripts/configctl.py set ADMIN_USERNAME '<новый-логин>'
+python3 scripts/configctl.py set ADMIN_PASSWORD '<новый-длинный-пароль>'
+python3 scripts/configctl.py apply --services api
+```
+
+Проверка после перезапуска (код `200` означает успешную авторизацию):
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" http://127.0.0.1:8000/admin
+```
 
 Подробная настройка топологии: [`3x-ui-master.md`](3x-ui-master.md).

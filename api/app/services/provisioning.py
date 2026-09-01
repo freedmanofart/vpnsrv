@@ -163,6 +163,8 @@ async def provision_subscription(
             client_uuid=client.client_uuid,
             email=f"vpn-{client.id}",
             flow=client.flow,
+            expiry_time=int(subscription.expires_at.timestamp() * 1000),
+            telegram_id=user.telegram_id,
         )
     except ThreeXUIError as exc:
         await db.rollback()

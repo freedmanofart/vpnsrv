@@ -120,6 +120,15 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         main_module.AsyncSessionLocal = self.original_audit_factory
         await self.engine.dispose()
 
+    async def test_root_redirects_to_protected_admin(self) -> None:
+        response = await self.client.get("/", follow_redirects=False)
+        self.assertEqual(307, response.status_code)
+        self.assertEqual("/admin", response.headers["location"])
+        unauthenticated = await self.client.get("/admin")
+        self.assertEqual(401, unauthenticated.status_code)
+        authenticated = await self.client.get("/admin", auth=self.admin_auth)
+        self.assertEqual(200, authenticated.status_code)
+
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:
             subscription = (

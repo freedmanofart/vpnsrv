@@ -59,3 +59,6 @@ def configure_logging(level: str) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level.upper())
+    # Complete 3x-ui URLs contain the secret web base path.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

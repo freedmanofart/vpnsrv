@@ -797,6 +797,8 @@ async def rotate_subscription_client(
             client_uuid=new_client.client_uuid,
             email=f"vpn-{new_client.id}",
             flow=new_client.flow,
+            expiry_time=int(subscription.expires_at.timestamp() * 1000),
+            telegram_id=user.telegram_id,
         )
     except ThreeXUIError as exc:
         await db.rollback()
@@ -810,14 +812,16 @@ async def rotate_subscription_client(
             )
         )
         old_config = old_result.scalar_one_or_none()
+        old_address = old_config.config.get("api_address") if old_config else ""
         try:
             if not old_config:
                 raise ThreeXUIError("Previous node configuration not found")
-            old_xray = ThreeXUIClient(address=old_config.config.get("api_address"))
-            await old_xray.remove_vless_user(
-                inbound_tag=old_config.config.get("inbound_tag", "vless-reality"),
-                email=f"vpn-{previous.id}",
-            )
+            if str(old_address).startswith(("http://", "https://")):
+                old_xray = ThreeXUIClient(address=old_address)
+                await old_xray.remove_vless_user(
+                    inbound_tag=old_config.config.get("inbound_tag", "vless-reality"),
+                    email=f"vpn-{previous.id}",
+                )
         except ThreeXUIClientNotFound:
             pass
         except ThreeXUIError as exc:

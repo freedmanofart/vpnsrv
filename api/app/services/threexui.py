@@ -67,6 +67,8 @@ class ThreeXUIClient:
         email: str,
         level: int = 0,
         flow: str = "",
+        expiry_time: int = 0,
+        telegram_id: int = 0,
     ) -> None:
         del level
         try:
@@ -80,7 +82,8 @@ class ThreeXUIClient:
                         "flow": flow,
                         "enable": True,
                         "totalGB": 0,
-                        "expiryTime": 0,
+                        "expiryTime": expiry_time,
+                        "tgId": telegram_id,
                         "limitIp": 0,
                         "limitHwid": 0,
                     },

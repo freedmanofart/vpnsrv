@@ -21,6 +21,9 @@ from app.db.session import get_db
 from app.core.security import APIPrincipal, require_admin
 from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
+from app.services.threexui import ThreeXUIClient, ThreeXUIError
+from app.schemas.subscription import VPNClientRotate
+from app.api.routes.subscriptions import rotate_subscription_client
 from app.core.config import settings
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -41,6 +44,13 @@ class AdminUserAccessUpdate(BaseModel):
     active: bool = True
     expires_at: datetime | None = None
     vpn_link: str | None = Field(default=None, max_length=8192)
+
+
+class AdminUserRotate(BaseModel):
+    node_id: int
+    client_type: str = "universal"
+    flow: str = ""
+    fingerprint: str = "chrome"
 
 
 logger = logging.getLogger(__name__)
@@ -133,6 +143,8 @@ async def overview(db: AsyncSession = Depends(get_db)):
                 "expires_at": subscription.expires_at if subscription else None,
                 "client_id": client.id if client else None,
                 "node_id": client.node_id if client else None,
+                "client_type": client.client_type if client else None,
+                "flow": client.flow if client else None,
                 "vpn_link": link,
                 "link_overridden": bool(client and client.config_override),
                 "last_connected_at": client.last_connected_at if client else None,
@@ -179,7 +191,8 @@ async def update_user_access(
             VPNNodeConfig.protocol == "vless",
         )
     )
-    if config_result.scalar_one_or_none() is None:
+    node_config = config_result.scalar_one_or_none()
+    if node_config is None:
         raise HTTPException(status_code=404, detail="VLESS node configuration not found")
 
     subscription_result = await db.execute(
@@ -237,7 +250,30 @@ async def update_user_access(
         )
         db.add(client)
         await db.flush()
+        if data.active and not (data.vpn_link or "").strip():
+            try:
+                await ThreeXUIClient(
+                    address=node_config.config.get("api_address")
+                ).add_vless_user(
+                    inbound_tag=node_config.config.get("inbound_tag"),
+                    client_uuid=client.client_uuid,
+                    email=f"vpn-{client.id}",
+                    flow=client.flow,
+                    expiry_time=int(expires_at.timestamp() * 1000),
+                    telegram_id=user.telegram_id,
+                )
+            except ThreeXUIError as exc:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Не удалось создать ключ в 3x-ui: {exc}",
+                ) from exc
     else:
+        if client.node_id != node.id:
+            raise HTTPException(
+                status_code=409,
+                detail="Для смены ноды используйте перевыпуск ключа",
+            )
         client.node_id = node.id
         client.status = target_status
         client.expires_at = expires_at
@@ -258,10 +294,53 @@ async def update_user_access(
             "active": data.active,
             "expires_at": expires_at.isoformat(),
             "client_id": client.id,
-            "vpn_link": data.vpn_link,
+            "vpn_link_overridden": bool(data.vpn_link),
         },
     )
     return {"user_id": user.id, "subscription_id": subscription.id, "client_id": client.id, "active": data.active}
+
+
+@router.post("/users/{user_id}/rotate", dependencies=[Depends(require_admin)])
+async def rotate_user_key(
+    user_id: int,
+    data: AdminUserRotate,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Subscription)
+        .where(
+            Subscription.user_id == user_id,
+            Subscription.status == "active",
+        )
+        .order_by(Subscription.id.desc())
+        .limit(1)
+    )
+    subscription = result.scalar_one_or_none()
+    if subscription is None:
+        raise HTTPException(status_code=404, detail="Активная подписка не найдена")
+    client = await rotate_subscription_client(
+        subscription.id,
+        VPNClientRotate(
+            node_id=data.node_id,
+            client_type=data.client_type,
+            flow=data.flow,
+            fingerprint=data.fingerprint,
+        ),
+        db,
+    )
+    await write_audit(
+        db,
+        action="user.key.rotate",
+        result="success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="user",
+        resource_id=user_id,
+        node_id=data.node_id,
+        details={"client_id": client.id, "subscription_id": subscription.id},
+    )
+    return {"user_id": user_id, "client_id": client.id, "node_id": client.node_id}
 
 
 @router.delete("/users/{user_id}/access", dependencies=[Depends(require_admin)])
@@ -458,7 +537,7 @@ function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return Stri
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id))}
 function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
-async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';document.getElementById('metrics').innerHTML=sections.map(x=>`<div class="card"><div>${x}</div><div class="metric">${state[x].length}</div></div>`).join('');table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button>`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';document.getElementById('metrics').innerHTML=sections.map(x=>`<div class="card"><div>${x}</div><div class="metric">${state[x].length}</div></div>`).join('');table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button onclick="show('${x}')">${x}</button>`).join('');
 async function sendForm(e,url,map){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));for(let k of ['duration_days','price','capacity','node_id','port'])if(k in f)f[k]=Number(f[k]);if(map)f=map(f);try{await request(url(f),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await load()}catch(err){alert(err.message)}}
 function createPlan(e){return sendForm(e,()=>'/plans')}
@@ -474,6 +553,7 @@ async function revokeDevice(id){if(confirm('Отозвать устройств�
 function inputDate(value,days=30){let d=value?new Date(value):new Date(Date.now()+days*86400000);let local=new Date(d.getTime()-d.getTimezoneOffset()*60000);return local.toISOString().slice(0,16)}
 function openAccess(id){let u=state.users.find(x=>x.id===id),f=document.getElementById('accessForm');f.user_id.value=id;f.plan_id.innerHTML=state.plans.map(p=>`<option value="${p.id}">${esc(p.name)} (#${p.id})</option>`).join('');f.node_id.innerHTML=state.nodes.filter(n=>n.status==='active').map(n=>`<option value="${n.id}">${esc(n.name)} / ${esc(n.region)}</option>`).join('');if(u.plan_id)f.plan_id.value=u.plan_id;if(u.node_id)f.node_id.value=u.node_id;f.active.value=String(u.access_active);f.expires_at.value=inputDate(u.expires_at);f.vpn_link.value=u.vpn_link||'';document.getElementById('activityInfo').innerHTML=`Последнее подключение: <b>${esc(u.last_connected_at||'нет')}</b> · IP: <b>${esc(u.last_ip||'нет')}</b> · Client ID: <b>${esc(u.client_id||'нет')}</b>${u.link_overridden?' · ссылка изменена вручную':''}`;document.getElementById('accessDialog').showModal()}
 async function saveAccess(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let id=Number(f.user_id);let body={plan_id:Number(f.plan_id),node_id:Number(f.node_id),active:f.active==='true',expires_at:new Date(f.expires_at).toISOString(),vpn_link:f.vpn_link};try{await request('/admin/users/'+id+'/access',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});document.getElementById('accessDialog').close();await load()}catch(err){alert(err.message)}}
+async function rotateUser(id){let u=state.users.find(x=>x.id===id),available=state.nodes.filter(n=>n.status==='active'&&n.health!=='offline');if(!available.length){alert('Нет доступных нод');return}let hint=available.map(n=>`${n.id}: ${n.name} (${n.region||'—'})`).join('\n');let raw=prompt('ID целевой ноды:\n'+hint,String(u.node_id||available[0].id));if(raw===null)return;let nodeId=Number(raw);if(!available.some(n=>n.id===nodeId)){alert('Нода недоступна');return}if(!confirm('Создать новый ключ на выбранной ноде? Старый будет отозван после успешного создания.'))return;let body={node_id:nodeId,client_type:u.client_type||'universal',flow:u.flow||'',fingerprint:'chrome'};try{await request('/admin/users/'+id+'/rotate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load();alert('Ключ перевыпущен')}catch(err){alert(err.message)}}
 async function resetAccess(){let id=Number(document.getElementById('accessForm').user_id.value);if(!confirm('Сбросить тариф, отключить доступ и удалить ручную ссылку?'))return;try{await request('/admin/users/'+id+'/access',{method:'DELETE'});document.getElementById('accessDialog').close();await load()}catch(err){alert(err.message)}}
 async function createDebug(e){return sendForm(e,()=>'/admin/debug-sessions',f=>({...f,duration_minutes:Number(f.duration_minutes)}))}
 async function closeDebug(id){if(confirm('Закрыть debug-сессию #'+id+'?')){await request('/admin/debug-sessions/'+id,{method:'DELETE'});await load()}}
