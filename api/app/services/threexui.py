@@ -139,7 +139,14 @@ class ThreeXUIClient:
         ]
 
     async def get_client_traffic(self, email: str) -> dict:
-        traffic = await self._request("GET", f"clients/traffic/{quote(email, safe='')}")
-        if not isinstance(traffic, dict):
-            raise ThreeXUIError("3x-ui returned invalid client traffic")
-        return traffic
+        rows = await self._request("GET", "inbounds/list")
+        if not isinstance(rows, list):
+            raise ThreeXUIError("3x-ui returned invalid inbound traffic")
+        for inbound in rows:
+            if not isinstance(inbound, dict):
+                continue
+            stats = inbound.get("clientStats") or []
+            for traffic in stats:
+                if isinstance(traffic, dict) and traffic.get("email") == email:
+                    return traffic
+        raise ThreeXUIClientNotFound(f"3x-ui traffic for {email} was not found")
