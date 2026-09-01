@@ -86,6 +86,21 @@ docker inspect vpn-api --format '{{range .NetworkSettings.Networks}}{{.Gateway}}
 sudo systemctl status vpn-threexui-proxy.service --no-pager
 ```
 
+Unit proxy содержит `PartOf=x-ui.service`: обычный `systemctl restart x-ui`
+должен автоматически перезапустить и proxy. Если 3x-ui online, но создание
+клиента возвращает `All connection attempts failed`, проверьте listener на
+Docker bridge и восстановите proxy:
+
+```bash
+sudo systemctl start vpn-threexui-proxy.service
+sudo systemctl is-active vpn-threexui-proxy.service
+ss -lntp | grep 41026
+```
+
+После ручной замены unit-файла выполните `systemctl daemon-reload`. Изменение
+порта 3x-ui требует синхронно обновить обе стороны `ExecStart` и `api_address`
+логической ноды.
+
 После изменения токена или адреса:
 
 ```bash

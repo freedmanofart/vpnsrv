@@ -3,6 +3,7 @@ Description=Proxy 3x-ui loopback API to VPN Docker bridge
 After=network-online.target x-ui.service docker.service
 Wants=network-online.target
 Requires=x-ui.service
+PartOf=x-ui.service
 
 [Service]
 Type=simple
