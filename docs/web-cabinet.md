@@ -67,7 +67,7 @@ CABINET_ALLOW_TEMPORARY_REGISTRATION=true
 регистрация может создавать неограниченное число пустых пользователей. После
 настройки SMTP установите `CABINET_ALLOW_TEMPORARY_REGISTRATION=false`.
 
-## Настройка SMTP
+## Настройка SMTP и внешнего relay
 
 Добавьте в серверный `.env`:
 
@@ -91,7 +91,22 @@ SMTP_USE_SSL=false
 новый токен. Это предотвращает создание доступа, который пользователь не
 сможет получить. Пароль SMTP хранится только в `.env`, не в Git.
 
-На текущем Fedora master локальный исходящий Postfix устанавливается скриптом:
+### Вариант 1: API подключается к relay напрямую
+
+Это самый короткий путь. Укажите выданные почтовым провайдером hostname,
+username и app password в `SMTP_*`, используйте подтверждённый адрес или домен в
+`SMTP_FROM`, затем пересоздайте только API. Не используйте обычный пароль от
+почтового ящика, если провайдер поддерживает отдельные app passwords.
+
+### Вариант 2: API → локальный Postfix → authenticated smarthost
+
+Этот вариант удобен, когда несколько локальных сервисов должны отправлять через
+один relay. Скрипт `scripts/setup_postfix_relay.sh` настраивает только локальный
+приём от Docker и сам по себе **не настраивает внешний relayhost**. Без
+smarthost Postfix пытается доставлять почту напрямую; письма от `.ts.net` или от
+домена без SPF/DKIM/DMARC часто отклоняются либо попадают в спам.
+
+Сначала установите локальный Postfix:
 
 ```bash
 sudo VPN_MAIL_HOSTNAME=fedora.taile485ac.ts.net scripts/setup_postfix_relay.sh
@@ -104,10 +119,56 @@ python3 scripts/configctl.py set SMTP_USE_SSL false
 ```
 
 Postfix слушает только loopback и Docker bridge, поэтому не является публичным
-open relay. Для гарантированной доставки нужен собственный почтовый домен со
-SPF, DKIM и DMARC либо внешний SMTP relay; отправитель на `.ts.net` подходит
-для первичной эксплуатации, но отдельные провайдеры могут отправлять такие
-письма в спам.
+open relay. Затем настройте у Postfix внешний authenticated smarthost. Пример
+для relay с STARTTLS на порту 587:
+
+```bash
+sudo dnf install -y cyrus-sasl-plain
+sudo postconf -e 'relayhost = [smtp.provider.example]:587'
+sudo postconf -e 'smtp_sasl_auth_enable = yes'
+sudo postconf -e 'smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd'
+sudo postconf -e 'smtp_sasl_security_options = noanonymous'
+sudo postconf -e 'smtp_tls_security_level = encrypt'
+sudo postconf -e 'smtp_tls_CApath = /etc/pki/tls/certs'
+sudo install -m 600 /dev/null /etc/postfix/sasl_passwd
+sudoedit /etc/postfix/sasl_passwd
+```
+
+В `/etc/postfix/sasl_passwd` добавьте одну строку, не фиксируя её в Git:
+
+```text
+[smtp.provider.example]:587 relay-user@example.com:app-password
+```
+
+Примените и проверьте конфигурацию:
+
+```bash
+sudo postmap /etc/postfix/sasl_passwd
+sudo chmod 600 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+sudo postfix check
+sudo systemctl restart postfix
+sudo postconf relayhost smtp_sasl_auth_enable smtp_tls_security_level
+sudo postqueue -p
+```
+
+После этого API по-прежнему обращается к локальному Postfix без SMTP AUTH:
+
+```dotenv
+SMTP_HOST=host.docker.internal
+SMTP_PORT=25
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_STARTTLS=false
+SMTP_USE_SSL=false
+SMTP_FROM=Freedom VPN <verified-sender@example.com>
+```
+
+Доступ от контейнера разрешайте только фактической Docker-сети. Проверьте её
+gateway через `docker inspect vpn-api`; фиксированные `172.17.0.1` и
+`172.18.0.1` из установочного скрипта подходят не для каждой Compose-сети.
+Успешный ответ relay (`250`) означает принятие письма relay-сервером, но ещё не
+гарантирует inbox. Для доставки нужны подтверждённый sender и корректные SPF,
+DKIM и DMARC домена.
 
 После изменения переменных пересоздайте API:
 
@@ -116,6 +177,22 @@ docker compose up -d --build api
 docker compose exec api alembic upgrade head
 curl -fsS http://127.0.0.1:8000/health
 ```
+
+Проверка полного пути:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8000/web/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"controlled-test-address@example.com"}'
+sudo journalctl -u postfix --since '10 minutes ago' --no-pager
+sudo postqueue -p
+```
+
+Если API вернул `200`, но письма нет, найдите в журнале конечный статус relay.
+`status=sent` подтверждает передачу следующему серверу; `status=deferred`,
+`SASL authentication failed`, `Relay access denied` и `Sender address rejected`
+указывают соответственно на очередь, неверные credentials, запрет relay или
+неподтверждённого отправителя.
 
 ## Временный доступ через Tailscale-IP
 

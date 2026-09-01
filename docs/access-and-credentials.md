@@ -10,9 +10,10 @@ API опубликован только на loopback основного сер�
 
 | Адрес | Назначение | Доступ |
 |---|---|---|
-| `http://127.0.0.1:8000/` | redirect в VPN Admin | HTTP Basic |
+| `http://127.0.0.1:8000/` | публичный лендинг | без авторизации |
 | `http://127.0.0.1:8000/admin` | админка | HTTP Basic |
-| `http://127.0.0.1:8000/docs` | OpenAPI | HTTP Basic/service token |
+| `http://127.0.0.1:8000/docs` | Swagger UI | без авторизации в текущей реализации |
+| `http://127.0.0.1:8000/openapi.json` | схема OpenAPI | без авторизации в текущей реализации |
 | `http://127.0.0.1:8000/health` | API health | без авторизации |
 | `http://127.0.0.1:8000/db-health` | PostgreSQL health | авторизация |
 
@@ -23,6 +24,11 @@ ssh -N -L 8000:127.0.0.1:8000 codex@<master-host>
 ```
 
 Затем откройте `http://localhost:8000/admin`.
+
+HTTP Basic передаёт логин и пароль в обратимо кодированном заголовке, поэтому
+за пределами SSH-туннеля или loopback используйте только HTTPS. Если OpenAPI не
+должен быть публичным, закройте `/docs`, `/redoc` и `/openapi.json` на reverse
+proxy: само FastAPI-приложение сейчас их не защищает.
 
 ```dotenv
 ADMIN_USERNAME=<admin-login>
@@ -52,6 +58,11 @@ DATABASE_URL=postgresql+asyncpg://<user>:<password>@host.docker.internal:6432/vp
 | Платежи | `PAYMENT_PROVIDER`, `PAYMENT_WEBHOOK_SECRET`, `YOOMONEY_*` |
 | Worker | `LIFECYCLE_INTERVAL_SECONDS`, `LIFECYCLE_ADVISORY_LOCK_KEY` |
 | Admin | `ADMIN_USERNAME`, `ADMIN_PASSWORD` |
+
+`SERVICE_API_TOKEN` является общим высокопривилегированным секретом: его
+держат API, бот и операторские скрипты. Он не идентифицирует конечного Telegram-
+пользователя и не имеет срока действия; при компрометации сгенерируйте новый и
+одновременно пересоздайте все использующие его контейнеры.
 
 Redis, Grafana, Loki, Alloy, собственный Xray и node-agent удалены. Их
 переменные больше не используются.

@@ -31,8 +31,11 @@ Telegram -> aiogram bot -> FastAPI -> PostgreSQL
 
 OpenAPI панели доступен по адресу
 `<panel-base>/panel/api/openapi.json`, интерактивная документация — по
-`<panel-base>/api-docs`. Для API и worker нужен Bearer token со scope
-`node-sync`, созданный в `Settings → Security → API Token`.
+`<panel-base>/api-docs`. Для API и worker нужен отдельный Bearer token,
+созданный в `Settings → Security → API Token`. Если установленная сборка
+поддерживает scopes, выдайте минимально достаточный `node-sync`. Если scopes в
+ней нет, считайте API token полноадминистративным и дополнительно ограничьте
+доступ к панели сетью и TLS.
 
 ```dotenv
 THREEXUI_API_TOKEN=одноразово-показанный-токен-master
@@ -78,8 +81,11 @@ Inbound может работать на master или быть назначен
 
 После запуска публичный лендинг доступен по адресу `http://localhost:8000/`,
 резервный кабинет — на `/cabinet`, административная панель — на `/admin`, а
-OpenAPI — на `/docs`. Вход в административную панель выполняется через HTTP
-Basic; учётные данные задают переменные `ADMIN_USERNAME` и `ADMIN_PASSWORD`.
+OpenAPI — на `/docs`. В текущей реализации `/docs`, `/redoc` и
+`/openapi.json` публичны; закрывайте их на reverse proxy либо отключайте в
+FastAPI, если схема API не должна публиковаться. Вход в административную панель
+выполняется через HTTP Basic; учётные данные задают переменные
+`ADMIN_USERNAME` и `ADMIN_PASSWORD`.
 Настройка сайта, SMTP и токенизированного входа описана в
 [docs/web-cabinet.md](docs/web-cabinet.md).
 Полный отчёт по последнему обновлению интерфейса, парольного входа, Telegram,
@@ -92,7 +98,7 @@ Basic; учётные данные задают переменные `ADMIN_USER
 |---|---|---|
 | `GET` | `/health` | Состояние API |
 | `GET` | `/db-health` | Проверка PostgreSQL |
-| `POST` | `/users` | Регистрация Telegram-пользователя |
+| `POST` | `/users` | Регистрация Telegram-пользователя ботом; нужен service Bearer или admin Basic |
 | `GET`, `POST` | `/plans` | Тарифы |
 | `POST` | `/subscriptions` | Создание подписки и клиента 3x-ui |
 | `POST` | `/subscriptions/{id}/renew` | Продление с новым UUID |
@@ -114,9 +120,11 @@ Basic; учётные данные задают переменные `ADMIN_USER
 | `POST` | `/admin/users/{id}/rotate` | Перевыпуск ключа из админки |
 
 Служебные маршруты требуют service Bearer token или HTTP Basic администратора.
-Публичными остаются лендинг, health, документация, регистрация и вход в кабинет,
-а также подписанный webhook. Маршруты `/v1/client/profile` и `/refresh`
-используют отдельный токен активированного устройства.
+Публичными остаются лендинг, health, документация FastAPI, регистрация и вход в
+web-кабинет, активация устройства по одноразовому коду, а также подписанный
+webhook. Telegram-регистрация `/users` не публична. Маршруты
+`/v1/client/profile` и `/refresh` используют отдельный токен активированного
+устройства.
 
 Повторный подтверждённый платёж не создаёт вторую активную подписку: он
 продлевает существующую, меняет тариф и выбранную страну согласно заказу,
@@ -166,7 +174,9 @@ in-memory реализацию и не изменяют развёрнутую �
 ## Безопасность
 
 - Не коммитьте `.env` и API token 3x-ui.
-- Используйте scope `node-sync`, а не `admin`.
+- Если установленная сборка 3x-ui поддерживает scopes, используйте
+  `node-sync`; иначе обращайтесь с API token как с полным административным
+  секретом.
 - Не отключайте TLS verification вне закрытого тестового стенда.
 - Не публикуйте закрытый base path панели.
 - Полный VLESS URI является секретом.
@@ -174,6 +184,8 @@ in-memory реализацию и не изменяют развёрнутую �
 
 Операционные инструкции: [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md),
 доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md),
-бизнес-логика: [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md).
+бизнес-логика: [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md),
+план устранения неисправностей:
+[`docs/remediation-plan.md`](docs/remediation-plan.md).
 Документация разработчика бота:
 [`docs/editing-telegram-bot.md`](docs/editing-telegram-bot.md).
