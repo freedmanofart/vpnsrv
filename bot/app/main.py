@@ -57,6 +57,11 @@ WEB_CABINET_URL = os.getenv("WEB_CABINET_URL", "").strip()
 WEB_SITE_URL = os.getenv("WEB_SITE_URL", "").strip()
 if not WEB_SITE_URL and WEB_CABINET_URL:
     WEB_SITE_URL = WEB_CABINET_URL.removesuffix("/cabinet").rstrip("/") + "/"
+POLICY_BASE_URL = WEB_SITE_URL.rstrip("/")
+if not POLICY_BASE_URL and WEB_CABINET_URL:
+    POLICY_BASE_URL = WEB_CABINET_URL.removesuffix("/cabinet").rstrip("/")
+if not POLICY_BASE_URL:
+    POLICY_BASE_URL = "https://freedomvpn.taile485ac.ts.net"
 WELCOME_LOGO = Path(__file__).resolve().parent / "static" / "freedom-vpn-logo.png"
 PUBLIC_PLAN_CODES = tuple(
     item.strip()
@@ -104,11 +109,7 @@ def main_menu() -> InlineKeyboardMarkup:
         if TELEGRAM_CHANNEL_URL
         else InlineKeyboardButton(text="📣 Наш канал", callback_data="channel_info")
     )
-    support_button = (
-        InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)
-        if SUPPORT_URL
-        else InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
-    )
+    support_button = InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
     site_button = (
         InlineKeyboardButton(text="🌐 Сайт", url=WEB_SITE_URL)
         if WEB_SITE_URL
@@ -219,6 +220,34 @@ def back_menu() -> InlineKeyboardMarkup:
                 ),
             ],
         ]
+    )
+
+
+def support_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🆘 Написать в поддержку", url=SUPPORT_URL)],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+        ],
+    )
+
+
+def policy_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Политика конфиденциальности",
+                    url=f"{POLICY_BASE_URL}/static/privacy.html",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Пользовательское соглашение",
+                    url=f"{POLICY_BASE_URL}/static/terms.html",
+                )
+            ],
+        ],
     )
 
 
@@ -748,6 +777,15 @@ async def help_command_handler(message: Message):
     )
 
 
+@router.message(Command("policy"))
+async def policy_command_handler(message: Message):
+    await message.answer(
+        content_text("policy"),
+        reply_markup=policy_keyboard(),
+        parse_mode="HTML",
+    )
+
+
 @router.message(F.text.in_({"💳 Приобрести подписку", "💳 Оплатить"}))
 async def popup_buy_handler(message: Message, state: FSMContext):
     await buy_command_handler(message, state)
@@ -816,14 +854,11 @@ async def popup_try_handler(message: Message):
 
 @router.message(F.text == "🆘 Поддержка")
 async def popup_support_handler(message: Message):
-    if SUPPORT_URL:
-        await message.answer(
-            f'🆘 <a href="{html.escape(SUPPORT_URL)}">Открыть поддержку</a>',
-            parse_mode="HTML",
-            reply_markup=popup_menu(),
-        )
-    else:
-        await message.answer(content_text("support_missing"), reply_markup=popup_menu())
+    await message.answer(
+        content_text("support"),
+        parse_mode="HTML",
+        reply_markup=support_keyboard(),
+    )
 
 
 @router.message(F.text == "⬅️ Главное меню")
@@ -1002,7 +1037,12 @@ async def channel_info_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "support_info")
 async def support_info_handler(callback: CallbackQuery):
-    await callback.answer(content_text("support_missing"), show_alert=True)
+    await callback.answer(content_text("support"), show_alert=True)
+    await callback.message.answer(
+        content_text("support"),
+        parse_mode="HTML",
+        reply_markup=support_keyboard(),
+    )
 
 
 def access_node_keyboard(nodes: list[dict], prefix: str) -> InlineKeyboardMarkup:
