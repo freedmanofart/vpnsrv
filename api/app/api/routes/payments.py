@@ -21,6 +21,7 @@ from app.services.payments import (
     create_payment,
     process_payment_event,
 )
+from app.services.notifications import notify_payment_created, notify_payment_receipt
 
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -56,6 +57,7 @@ async def start_payment(
                 target_status="paid",
                 payload={"details": {"mode": "mock-auto-confirm"}},
             )
+        await notify_payment_created(db, payment)
         return payment
     except PaymentError as exc:
         raise _payment_error(exc) from exc
@@ -76,6 +78,7 @@ async def start_manual_payment(data: ManualPaymentCreate, db: AsyncSession = Dep
         payment.details = {**(payment.details or {}), "method_code": data.method_code}
         await db.commit()
         await db.refresh(payment)
+        await notify_payment_created(db, payment)
         return payment
     except PaymentError as exc:
         raise _payment_error(exc) from exc
@@ -124,6 +127,7 @@ async def attach_payment_receipt(
     }
     await db.commit()
     await db.refresh(payment)
+    await notify_payment_receipt(db, payment)
     return payment
 
 

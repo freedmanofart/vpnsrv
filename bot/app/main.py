@@ -1475,14 +1475,6 @@ async def manual_payment_receipt_handler(message: Message, state: FSMContext, bo
             "data_base64": base64.b64encode(receipt_bytes).decode(),
         },
     )
-    if BOT_ADMIN_CHAT_ID:
-        await bot.copy_message(BOT_ADMIN_CHAT_ID, message.chat.id, message.message_id)
-        await bot.send_message(
-            BOT_ADMIN_CHAT_ID,
-            f"Платёж #{data['payment_id']} ожидает проверки\n"
-            f"Способ: {data['method_name']}\nСумма: {data['amount']} {data['currency']}\n"
-            "Подтвердите его в разделе «Платежи» VPN Admin.",
-        )
     await state.clear()
     await message.answer(
         f"✅ Чек по платежу #{data['payment_id']} получен. После проверки оператором VPN активируется автоматически.",

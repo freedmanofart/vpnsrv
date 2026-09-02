@@ -34,6 +34,7 @@ from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.session import get_db
 from app.services.email import EmailDeliveryError, send_cabinet_code
 from app.services.payments import PaymentError, create_payment
+from app.services.notifications import notify_payment_created, notify_payment_receipt
 from app.schemas.payment import PaymentCreate
 from app.core.security import hash_password, require_api_access, verify_password
 from app.services.audit import write_audit
@@ -606,6 +607,8 @@ async def web_manual_payment(data: WebOrder, cabinet_token: str | None = Cookie(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     payment.details = {**(payment.details or {}), "method_code": method.code, "source": "web_cabinet"}
     await db.commit()
+    await db.refresh(payment)
+    await notify_payment_created(db, payment)
     return {"payment_id": payment.id, "status": payment.status, "amount": str(payment.amount), "currency": payment.currency, "instructions": method.url, "qr_url": f"/web/payment-methods/{method.id}/image" if method.image_data else None}
 
 
@@ -638,4 +641,6 @@ async def web_payment_receipt(payment_id: int, data: WebReceipt, cabinet_token: 
     payment.status = "processing"
     payment.details = {**(payment.details or {}), "receipt": {"source": "web_cabinet", "media_type": "document"}}
     await db.commit()
+    await db.refresh(payment)
+    await notify_payment_receipt(db, payment)
     return {"payment_id": payment.id, "status": payment.status}

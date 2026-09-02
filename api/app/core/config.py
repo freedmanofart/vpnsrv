@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     smtp_from: str = ""
     smtp_starttls: bool = True
     smtp_use_ssl: bool = False
+    bot_token: str = ""
+    bot_admin_chat_id: int = 0
+    admin_notification_email: str = "freedmanofart5@gmail.com"
 
     model_config = SettingsConfigDict(
         env_file=".env",
