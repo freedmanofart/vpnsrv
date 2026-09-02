@@ -43,6 +43,7 @@ router = APIRouter(tags=["Web cabinet"])
 logger = logging.getLogger(__name__)
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 COOKIE = "freedom_cabinet"
+MANUAL_PAYMENT_METHODS = {"sber_qr", "tbank_qr", "phone_transfer"}
 
 
 class Registration(BaseModel):
