@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     payment_provider: str = "mock"
     payment_webhook_secret: str = "change_me"
     payment_auto_confirm: bool = False
+    telegram_stars_rate: float = Field(default=0.6, gt=0)
     promo_codes: str = "WELCOME7:7"
     background_jobs_enabled: bool = False
     lifecycle_interval_seconds: int = 60

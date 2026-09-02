@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from decimal import Decimal, ROUND_HALF_UP
 import math
 import html
 from io import BytesIO
@@ -35,8 +36,10 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     BufferedInputFile,
     BotCommand,
+    LabeledPrice,
     MenuButtonCommands,
     MenuButtonWebApp,
+    PreCheckoutQuery,
     WebAppInfo,
     FSInputFile,
 )
@@ -53,6 +56,7 @@ SUPPORT_URL = content_link("support")
 YOOMONEY_PAYMENT_URL = content_link("payment")
 TRY_PAYMENT_URL = content_link("try_payment")
 TRY_PAYMENT_AMOUNT_RUB = "50"
+TELEGRAM_STARS_RATE = Decimal(os.getenv("TELEGRAM_STARS_RATE", "0.6"))
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-09-02-66"
 TERMS_OF_USE_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-09-02-30"
 WEB_CABINET_URL = os.getenv("WEB_CABINET_URL", "").strip()
@@ -362,6 +366,12 @@ def payment_url_for_plan(plan: dict) -> str:
     return content_link(f"payment_{plan.get('code', '')}") or YOOMONEY_PAYMENT_URL
 
 
+def stars_amount_for_plan(plan: dict) -> int:
+    price = Decimal(str(plan.get("price") or "0"))
+    amount = (price * TELEGRAM_STARS_RATE).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return max(1, int(amount))
+
+
 # =========================================================
 # API
 # =========================================================
@@ -406,6 +416,13 @@ async def get_or_create_user(message: Message) -> dict:
 
         response.raise_for_status()
 
+        return response.json()
+
+
+async def get_user_by_telegram_id(telegram_id: int) -> dict:
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.get(f"/users/{telegram_id}")
+        response.raise_for_status()
         return response.json()
 
 
@@ -534,6 +551,41 @@ async def create_manual_payment(
         return response.json()
 
 
+async def create_telegram_stars_payment(
+    user_id: int,
+    plan_id: int,
+    node_id: int,
+    stars_amount: int,
+    idempotency_key: str,
+) -> dict:
+    payload = subscription_payload(user_id=user_id, plan_id=plan_id, node_id=node_id)
+    payload.update({"stars_amount": stars_amount, "idempotency_key": idempotency_key})
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.post("/payments/telegram-stars", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
+async def confirm_telegram_stars_payment(
+    user_id: int,
+    provider_payment_id: str,
+    telegram_payment_charge_id: str,
+    invoice_payload: str,
+) -> dict:
+    async with api_client(base_url=API_URL, timeout=20.0) as client:
+        response = await client.post(
+            "/payments/telegram-stars/paid",
+            json={
+                "user_id": user_id,
+                "provider_payment_id": provider_payment_id,
+                "telegram_payment_charge_id": telegram_payment_charge_id,
+                "invoice_payload": invoice_payload,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 async def attach_payment_receipt(payment_id: int, payload: dict) -> dict:
     async with api_client(base_url=API_URL, timeout=10.0) as client:
         response = await client.post(f"/payments/{payment_id}/receipt", json=payload)
@@ -657,6 +709,38 @@ async def send_key_message(message: Message, client_id: int) -> None:
         parse_mode="HTML",
         reply_markup=active_vpn_keyboard(),
     )
+
+
+async def show_paid_subscription(
+    message: Message,
+    telegram_id: int,
+    plan: dict,
+    subscription: dict,
+    *,
+    price_label: str,
+) -> None:
+    status = await get_vpn_status(telegram_id)
+    client_data = status.get("vpn_client")
+    if not client_data:
+        raise RuntimeError("VPN client was not created")
+    config_data = await get_vpn_client_config(client_data["id"])
+    vless_url = config_data["config"]
+    expires_at = (
+        subscription["expires_at"]
+        .replace("T", " ")
+        .replace("+00:00", "")
+    )
+    text = (
+        "✅ <b>VPN успешно активирован!</b>\n\n"
+        f"📦 Тариф: <b>{html.escape(str(plan['name']))}</b>\n"
+        f"💰 Стоимость: <b>{html.escape(price_label)}</b>\n"
+        f"📅 Действует до: <b>{expires_at} UTC</b>\n\n"
+        "🔐 <b>VLESS Reality xHTTP</b>\n\n"
+        "Скопируйте ссылку ниже и импортируйте в VLESS-приложение:"
+        f"\n\n<code>{html.escape(vless_url)}</code>"
+    )
+    await message.answer(text, reply_markup=vpn_ready_keyboard(), parse_mode="HTML")
+    await send_key_message(message, client_data["id"])
 
 
 async def create_vpn_client(
@@ -1408,14 +1492,46 @@ async def payment_method_handler(callback: CallbackQuery, state: FSMContext):
         )
         return
     if method["code"] == "telegram_stars":
-        await callback.answer("Цена в Telegram Stars ещё не настроена для этого тарифа.", show_alert=True)
+        telegram_id = callback.from_user.id
+        plans = await get_plans()
+        nodes = await get_nodes()
+        plan = next((item for item in plans if item["id"] == int(raw_plan_id)), None)
+        node = next((item for item in nodes if item["id"] == int(raw_node_id)), None)
+        if not plan or not node:
+            await callback.answer("Тариф или сервер недоступен", show_alert=True)
+            return
+        user = await get_user_by_telegram_id(telegram_id)
+        stars_amount = stars_amount_for_plan(plan)
+        payment = await create_telegram_stars_payment(
+            user["id"],
+            int(raw_plan_id),
+            int(raw_node_id),
+            stars_amount,
+            f"stars:{telegram_id}:{callback.id}",
+        )
+        invoice_payload = f"stars:{payment['id']}:{payment['provider_payment_id']}"
+        country = country_label(node.get("region")) or node["name"]
+        await callback.message.answer_invoice(
+            title="Freedom VPN",
+            description=(
+                f"{plan['name']} · {country}. "
+                "После оплаты VPN-ключ появится автоматически."
+            )[:255],
+            payload=invoice_payload,
+            provider_token="",
+            currency="XTR",
+            prices=[
+                LabeledPrice(
+                    label=f"Freedom VPN — {plan['name']}"[:32],
+                    amount=stars_amount,
+                )
+            ],
+        )
+        await callback.answer()
         return
     if method["code"] in {"sber_qr", "tbank_qr", "phone_transfer"}:
         telegram_id = callback.from_user.id
-        async with api_client(base_url=API_URL, timeout=10.0) as client:
-            response = await client.get(f"/users/{telegram_id}")
-            response.raise_for_status()
-            user = response.json()
+        user = await get_user_by_telegram_id(telegram_id)
         payment = await create_manual_payment(
             user["id"], int(raw_plan_id), int(raw_node_id), method["code"],
             f"manual:{telegram_id}:{callback.id}",
@@ -1444,6 +1560,60 @@ async def payment_method_handler(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     await callback.answer("Добавьте ссылку этого способа оплаты в VPN Admin.", show_alert=True)
+
+
+@router.pre_checkout_query()
+async def telegram_stars_pre_checkout_handler(query: PreCheckoutQuery):
+    if not query.invoice_payload.startswith("stars:"):
+        await query.answer(ok=False, error_message="Платёж Freedom VPN не найден.")
+        return
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def telegram_stars_successful_payment_handler(message: Message):
+    successful_payment = message.successful_payment
+    telegram_user = message.from_user
+    if successful_payment is None or telegram_user is None:
+        return
+    if successful_payment.currency != "XTR":
+        return
+    payload_parts = successful_payment.invoice_payload.split(":", 2)
+    if len(payload_parts) != 3 or payload_parts[0] != "stars":
+        await message.answer("Платёж получен, но не удалось распознать заказ. Напишите в поддержку.")
+        return
+    raw_payment_id, provider_payment_id = payload_parts[1], payload_parts[2]
+    try:
+        user = await get_user_by_telegram_id(telegram_user.id)
+        payment = await confirm_telegram_stars_payment(
+            user["id"],
+            provider_payment_id,
+            successful_payment.telegram_payment_charge_id,
+            successful_payment.invoice_payload,
+        )
+        if str(payment["id"]) != raw_payment_id:
+            raise RuntimeError("Telegram Stars payment id mismatch")
+        plans = await get_plans()
+        plan = next((item for item in plans if item["id"] == payment["plan_id"]), None)
+        if plan is None:
+            plan = {"name": f"Тариф #{payment['plan_id']}"}
+        status = await get_vpn_status(telegram_user.id)
+        subscription = status.get("subscription")
+        if not subscription:
+            raise RuntimeError("Subscription was not created")
+        await show_paid_subscription(
+            message,
+            telegram_user.id,
+            plan,
+            subscription,
+            price_label=f"{successful_payment.total_amount} ⭐",
+        )
+    except Exception:
+        logging.exception("Failed to finalize Telegram Stars payment")
+        await message.answer(
+            "Платёж Telegram Stars получен, но ключ не удалось выдать автоматически. "
+            "Напишите в поддержку — мы проверим оплату и активируем доступ."
+        )
 
 
 @router.message(ManualPaymentFlow.waiting_receipt, F.photo | F.document)

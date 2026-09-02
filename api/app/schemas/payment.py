@@ -19,6 +19,17 @@ class ManualPaymentCreate(PaymentCreate):
     method_code: str = Field(min_length=2, max_length=64)
 
 
+class TelegramStarsPaymentCreate(PaymentCreate):
+    stars_amount: int = Field(gt=0)
+
+
+class TelegramStarsPaid(BaseModel):
+    user_id: int
+    provider_payment_id: str = Field(min_length=1, max_length=255)
+    telegram_payment_charge_id: str = Field(min_length=1, max_length=255)
+    invoice_payload: str = Field(min_length=1, max_length=128)
+
+
 class PaymentReceiptCreate(BaseModel):
     user_id: int
     telegram_file_id: str = Field(min_length=5, max_length=1024)

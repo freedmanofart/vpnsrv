@@ -6,13 +6,22 @@ import binascii
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.security import require_api_access
 from app.db.models.payment import Payment
 from app.db.session import get_db
-from app.schemas.payment import ManualPaymentCreate, PaymentCreate, PaymentReceiptCreate, PaymentResponse, PaymentWebhook
+from app.schemas.payment import (
+    ManualPaymentCreate,
+    PaymentCreate,
+    PaymentReceiptCreate,
+    PaymentResponse,
+    PaymentWebhook,
+    TelegramStarsPaid,
+    TelegramStarsPaymentCreate,
+)
 from app.services.payments import (
     PaymentError,
     PaymentInvalidTransition,
@@ -82,6 +91,77 @@ async def start_manual_payment(data: ManualPaymentCreate, db: AsyncSession = Dep
         return payment
     except PaymentError as exc:
         raise _payment_error(exc) from exc
+
+
+@router.post(
+    "/telegram-stars",
+    response_model=PaymentResponse,
+    dependencies=[Depends(require_api_access)],
+)
+async def start_telegram_stars_payment(
+    data: TelegramStarsPaymentCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        payment = await create_payment(
+            db,
+            PaymentCreate(**data.model_dump(exclude={"stars_amount"})),
+            provider="telegram_stars",
+        )
+        payment.currency = "XTR"
+        payment.amount = data.stars_amount
+        payment.details = {
+            **(payment.details or {}),
+            "stars_amount": data.stars_amount,
+            "source": "telegram_stars",
+        }
+        await db.commit()
+        await db.refresh(payment)
+        await notify_payment_created(db, payment)
+        return payment
+    except PaymentError as exc:
+        raise _payment_error(exc) from exc
+
+
+@router.post(
+    "/telegram-stars/paid",
+    response_model=PaymentResponse,
+    dependencies=[Depends(require_api_access)],
+)
+async def confirm_telegram_stars_payment(
+    data: TelegramStarsPaid,
+    db: AsyncSession = Depends(get_db),
+):
+    existing = await db.scalar(
+        select(Payment).where(
+            Payment.provider == "telegram_stars",
+            Payment.provider_payment_id == data.provider_payment_id,
+        )
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if existing.user_id != data.user_id:
+        raise HTTPException(status_code=409, detail="Payment user mismatch")
+    try:
+        payment = await process_payment_event(
+            db,
+            provider="telegram_stars",
+            event_id=data.telegram_payment_charge_id,
+            provider_payment_id=data.provider_payment_id,
+            target_status="paid",
+            payload={
+                "details": {
+                    "telegram_payment_charge_id": data.telegram_payment_charge_id,
+                    "invoice_payload": data.invoice_payload,
+                    "source": "telegram_stars",
+                }
+            },
+        )
+    except PaymentError as exc:
+        raise _payment_error(exc) from exc
+    if payment.user_id != data.user_id:
+        raise HTTPException(status_code=409, detail="Payment user mismatch")
+    return payment
 
 
 @router.post(
