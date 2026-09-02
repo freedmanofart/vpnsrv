@@ -65,7 +65,7 @@ callback data или логи `BOT_TOKEN`, `SERVICE_API_TOKEN`, токены 3x-
 VLESS URI и закрытый base path панели.
 
 Для текущего временного Tailscale-доступа используется
-`https://fedora.taile485ac.ts.net/cabinet`. Имя доступно только внутри tailnet,
+`https://freedomvpn.taile485ac.ts.net/cabinet`. Имя доступно только внутри tailnet,
 имеет корректный сертификат Tailscale и открывается внутри Telegram как Web App.
 
 `VPN_PLAN_ID` и `VPN_NODE_ID` ещё передаются контейнеру исторически, но текущий

@@ -88,6 +88,8 @@ FastAPI, если схема API не должна публиковаться. �
 `ADMIN_USERNAME` и `ADMIN_PASSWORD`.
 Настройка сайта, SMTP и токенизированного входа описана в
 [docs/web-cabinet.md](docs/web-cabinet.md).
+Frontend-структура лендинга, web-кабинета и админки для передачи фронтендеру:
+[docs/frontend-site-structure.md](docs/frontend-site-structure.md).
 Полный отчёт по последнему обновлению интерфейса, парольного входа, Telegram,
 миграций и деплоя: [docs/latest-changes-2026-09-01.md](docs/latest-changes-2026-09-01.md).
 
@@ -136,6 +138,14 @@ webhook. Telegram-регистрация `/users` не публична. Мар�
 ## Недавние изменения
 
 - добавлены публичный лендинг и резервный web-кабинет с одноразовым email-кодом;
+- админка переведена на единый flow через боковое меню на русском: без
+  дублирующихся верхних карточек, с разделами документации, скриптов и
+  инфраструктурных ссылок;
+- добавлены просмотр последних email-кодов входа и ручная смена пароля
+  пользователя в `/admin`;
+- добавлены скрипты `scripts/check_mail_chain.sh` и
+  `scripts/check_online_apis.sh` для проверки почты, быстрого переподнятия
+  цепочки и online-тестов ключевых API;
 - Telegram-кнопки сайта и кабинета разделены через `WEB_SITE_URL` и
   `WEB_CABINET_URL`;
 - из бота можно доверенно привязать email к существующему Telegram-пользователю;
@@ -187,6 +197,7 @@ in-memory реализацию и не изменяют развёрнутую �
 Операционные инструкции: [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md),
 доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md),
 бизнес-логика: [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md),
+frontend-структура: [`docs/frontend-site-structure.md`](docs/frontend-site-structure.md),
 план устранения неисправностей:
 [`docs/remediation-plan.md`](docs/remediation-plan.md).
 Документация разработчика бота:

@@ -27,23 +27,18 @@ Telegram и отправляется как фотография в привет
 
 ## Регистрация и вход
 
-1. Пользователь выбирает тариф на лендинге. Модальное окно показывает группы
-   «Лайт», «Стандарт» и «Ультра»: клик по карточке раскрывает остальные сроки
-   этой группы, а кнопка «Оплата» открывает `/cabinet?plan_id=...#payment`.
-   Email-поля в модальном выборе тарифа нет.
-2. Если cookie кабинета ещё нет, `/cabinet` показывает страницу входа. Кнопка
-   «Получить код на email» вызывает `POST /web/register`: API нормализует email
-   и создаёт веб-пользователя, если его ещё нет.
-3. Генерируется шестизначный код. В `cabinet_login_codes` хранится только его
-   HMAC-SHA-256 с серверным секретом и привязкой к `user_id`, срок действия и
-   число неудачных попыток.
-4. Код отправляется на email и вводится на странице входа. Действует только
+1. Пользователь выбирает тариф на лендинге и вводит email.
+2. API нормализует email и создаёт веб-пользователя, если его ещё нет.
+3. Генерируется шестизначный код. Для проверки входа используется
+   `code_hash`: HMAC-SHA-256 с серверным секретом и привязкой к `user_id`.
+   Дополнительно в `plain_code` сохраняется сам короткоживущий код, чтобы
+   администратор мог увидеть последние отправленные коды во время поддержки.
+   Также сохраняются срок действия и число неудачных попыток.
+4. Код отправляется на email и вводится в том же окне сайта. Действует только
    последний выданный код, по умолчанию 10 минут и не более пяти попыток.
 5. `POST /web/code/login` одноразово погашает код и выпускает случайный session
    token. В браузер он попадает только как cookie с `HttpOnly`,
-   `SameSite=Strict`, а при HTTPS — также `Secure`. После входа страница
-   перезагружается с исходным `plan_id`, поэтому пользователь сразу попадает к
-   выбранному тарифу и способу оплаты.
+   `SameSite=Strict`, а при HTTPS — также `Secure`.
 6. Пароль остаётся необязательным альтернативным способом входа и хранится как
    PBKDF2-SHA256-хеш с индивидуальной солью.
 7. Кнопка «Выйти» удаляет cookie. Срок cookie-сессии задаёт
@@ -79,7 +74,7 @@ CABINET_ALLOW_TEMPORARY_REGISTRATION=true
 Добавьте в серверный `.env`:
 
 ```dotenv
-PUBLIC_BASE_URL=https://vpn.example.com
+PUBLIC_BASE_URL=https://freedomvpn.taile485ac.ts.net
 CABINET_TOKEN_TTL_DAYS=365
 CABINET_EMAIL_CODE_TTL_MINUTES=10
 SMTP_HOST=smtp.example.com
@@ -117,11 +112,11 @@ smarthost Postfix пытается доставлять почту напрям�
 Сначала установите локальный Postfix:
 
 ```bash
-sudo VPN_MAIL_HOSTNAME=fedora.taile485ac.ts.net scripts/setup_postfix_relay.sh
+sudo VPN_MAIL_HOSTNAME=freedomvpn.taile485ac.ts.net scripts/setup_postfix_relay.sh
 python3 scripts/configctl.py set SMTP_HOST host.docker.internal
 python3 scripts/configctl.py set SMTP_PORT 25
 python3 scripts/configctl.py set SMTP_FROM \
-  'Freedom VPN <no-reply@fedora.taile485ac.ts.net>'
+  'Freedom VPN <no-reply@freedomvpn.taile485ac.ts.net>'
 python3 scripts/configctl.py set SMTP_STARTTLS false
 python3 scripts/configctl.py set SMTP_USE_SSL false
 ```
@@ -209,7 +204,8 @@ tailnet используется Tailscale Serve, а для публикации
 интернет — Tailscale Funnel:
 
 ```bash
-tailscale funnel --bg --yes --https=443 http://127.0.0.1:8000
+tailscale serve --bg --https=443 http://127.0.0.1:8000
+tailscale funnel --bg --yes 8000
 ```
 
 Переменные для текущего мастера:
@@ -223,27 +219,17 @@ WEB_CABINET_URL=https://freedomvpn.taile485ac.ts.net/cabinet
 доступен публично; сертификат выпускается и обновляется самим Tailscale без
 certbot и без файлов сертификата в приложении.
 Tailscale-IP мастера — `100.102.21.123`, но TLS-сертификат выпущен на его
-MagicDNS-имя `freedomvpn.taile485ac.ts.net`. Поэтому в Telegram используется
-имя: оно проходит проверку HTTPS и позволяет открыть кабинет как Web App.
-Обращение к `https://100.102.21.123` приведёт к ошибке соответствия
-сертификата.
-
-Чтобы Funnel автоматически поднимался после перезагрузки или сброса состояния
-Tailscale, установите unit из репозитория:
-
-```bash
-sudo install -m 0644 deploy/systemd/vpn-tailscale-funnel.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now vpn-tailscale-funnel.service
-```
+MagicDNS-имя `freedomvpn.taile485ac.ts.net`. Поэтому в Telegram используется имя:
+оно проходит проверку HTTPS и позволяет открыть кабинет как Web App. Обращение
+к `https://100.102.21.123` приведёт к ошибке соответствия сертификата.
 
 Проверка и отключение только этого listener:
 
 ```bash
 tailscale serve status
+tailscale serve --https=443 off
 tailscale funnel status
-systemctl status vpn-tailscale-funnel.service
-systemctl restart vpn-tailscale-funnel.service
+tailscale funnel --https=443 off
 ```
 
 Если сертификат Tailscale нужен отдельному nginx или другому файловому
@@ -299,6 +285,77 @@ webhook/запрос подтверждения защищён уникальн�
 `/cabinet/access/[redacted]`. Новые email-коды передаются в JSON-теле POST и не
 включаются в URL или структурированный журнал. HTTPS обязателен: без него
 cookie не получает флаг `Secure`.
+
+## Проверка почты и быстрый перезапуск цепочки
+
+Для диагностики входа по email используйте серверный скрипт:
+
+```bash
+scripts/check_mail_chain.sh
+```
+
+Он проверяет:
+
+- состояние `api`, `bot`, `worker`;
+- `/health` API;
+- SMTP-переменные внутри контейнера `api`;
+- авторизацию на SMTP без отправки письма;
+- наличие колонки `cabinet_login_codes.plain_code`, которая нужна админке для
+  просмотра новых отправленных кодов;
+- быстро пересоздаёт `api` и `bot`;
+- показывает хвост логов по `smtp`, `email`, `mail`, `cabinet`, `503`,
+  `error`, `failed`, `exception`.
+
+Чтобы отправить контрольное письмо с кодом `000000`, явно передайте адрес:
+
+```bash
+scripts/check_mail_chain.sh user@example.com
+```
+
+Не используйте чужой адрес для теста без согласия владельца. Если SMTP идёт
+через Mail.ru, `SMTP_FROM` должен совпадать с авторизованным ящиком, например:
+
+```dotenv
+SMTP_USERNAME=freedomvpn@list.ru
+SMTP_FROM=Freedom VPN <freedomvpn@list.ru>
+```
+
+Если `SMTP_FROM` указывает на домен Tailscale или другой неподтверждённый
+домен, внешний SMTP relay может принять логин, но отказать в отправке письма.
+
+Для общей online-проверки ключевых API используйте:
+
+```bash
+scripts/check_online_apis.sh
+scripts/check_online_apis.sh TELEGRAM_ID
+```
+
+Скрипт проверяет `docker compose ps`, локальный `/health`, публичный лендинг,
+`/plans`, `/payment-methods`, `/admin/overview`, `tailscale funnel status`.
+Если передать Telegram ID, дополнительно проверяются `/users/{telegram_id}` и
+`/users/{telegram_id}/status` с внутренним service token.
+
+В `/admin` раздел `Скрипты` содержит кнопки-команды для всех ключевых операций:
+почта, быстрый restart `api`/`bot`, Tailscale certificate/Funnel, backup,
+проверка backup и online-тесты API.
+
+## Коды входа и пароли в админке
+
+В `/admin` есть вкладка `login_codes`. Она показывает последние коды входа в
+web-кабинет:
+
+- `code` — отправленный 6-значный код для новых записей;
+- `legacy_hash_only` — старый код, созданный до добавления поля `plain_code`;
+- `status` — `active`, `used` или `expired`;
+- `attempts`, `created_at`, `expires_at`, `used_at`.
+
+Коды дают доступ к аккаунту до истечения срока, поэтому открывайте эту вкладку
+только администраторам.
+
+Пароли не отображаются и не хранятся в открытом виде. В таблице `users` видно
+только состояние `password`: `set` или `not_set`. Чтобы сменить пароль вручную,
+нажмите кнопку `Пароль` у пользователя, введите новый пароль минимум из 8
+символов и подтвердите действие. Старый пароль сразу перестанет работать.
 
 ## Проверка
 

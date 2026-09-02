@@ -52,6 +52,7 @@ TELEGRAM_CHANNEL_URL = content_link("channel")
 SUPPORT_URL = content_link("support")
 YOOMONEY_PAYMENT_URL = content_link("payment")
 TRY_PAYMENT_URL = content_link("try_payment")
+TRY_PAYMENT_AMOUNT_RUB = "50"
 WEB_CABINET_URL = os.getenv("WEB_CABINET_URL", "").strip()
 WEB_SITE_URL = os.getenv("WEB_SITE_URL", "").strip()
 if not WEB_SITE_URL and WEB_CABINET_URL:
@@ -444,6 +445,11 @@ async def get_payment_method_image(method_id: int) -> bytes | None:
         return response.content
 
 
+async def sber_payment_method() -> dict | None:
+    methods = await get_payment_methods()
+    return next((item for item in methods if item.get("code") == "sber_qr"), None)
+
+
 async def get_node_configs(node_id: int) -> list[dict]:
     async with api_client(
         base_url=API_URL,
@@ -571,6 +577,43 @@ def qr_file(value: str) -> BufferedInputFile:
     output = BytesIO()
     image.save(output, format="PNG")
     return BufferedInputFile(output.getvalue(), filename="vpn-key.png")
+
+
+async def show_try_payment(target: Message | CallbackQuery) -> None:
+    method = await sber_payment_method()
+    rows = []
+    if SUPPORT_URL:
+        rows.append([InlineKeyboardButton(text="✅ Я оплатил — поддержка", url=SUPPORT_URL)])
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    text = (
+        "🧪 <b>Попробовать VPN</b>\n\n"
+        f"К оплате: <b>{TRY_PAYMENT_AMOUNT_RUB} ₽</b>\n"
+        "Оплатите по QR Сбербанка и нажмите «Я оплатил — поддержка» "
+        "или отправьте чек в чат. Тестовый доступ будет выдан после проверки."
+    )
+    message = target.message if isinstance(target, CallbackQuery) else target
+    if not method:
+        await message.answer(
+            "QR Сбербанка пока не настроен в админке.",
+            reply_markup=keyboard,
+        )
+        return
+    if method.get("has_image"):
+        image = await get_payment_method_image(method["id"])
+        if image:
+            await message.answer_photo(
+                BufferedInputFile(image, filename="sber-try-payment-qr.png"),
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            return
+    await message.answer(
+        text + f"\n\nРеквизиты: {html.escape(method.get('url') or 'не заполнены')}",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
 
 
 async def send_key_message(message: Message, client_id: int) -> None:
@@ -768,16 +811,7 @@ async def popup_promo_handler(message: Message, state: FSMContext):
 
 @router.message(F.text == "🧪 Попробовать")
 async def popup_try_handler(message: Message):
-    rows = []
-    if TRY_PAYMENT_URL:
-        rows.append([InlineKeyboardButton(text="💳 Оплатить 50 ₽", url=TRY_PAYMENT_URL)])
-    if SUPPORT_URL:
-        rows.append([InlineKeyboardButton(text="✅ Я оплатил — поддержка", url=SUPPORT_URL)])
-    await message.answer(
-        content_text("try"),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else popup_menu(),
-    )
+    await show_try_payment(message)
 
 
 @router.message(F.text == "🆘 Поддержка")
@@ -957,21 +991,8 @@ async def device_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "try_start")
 async def try_start_handler(callback: CallbackQuery):
-    rows = []
-    if TRY_PAYMENT_URL:
-        rows.append([InlineKeyboardButton(text="💳 Оплатить 50 ₽", url=TRY_PAYMENT_URL)])
-    if SUPPORT_URL:
-        rows.append([InlineKeyboardButton(text="✅ Я оплатил — поддержка", url=SUPPORT_URL)])
-    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
-    await show_screen(
-        callback,
-        content_text("try"),
-        InlineKeyboardMarkup(inline_keyboard=rows),
-    )
-    if TRY_PAYMENT_URL:
-        await callback.answer()
-    else:
-        await callback.answer("Ссылка оплаты пока не настроена", show_alert=True)
+    await show_try_payment(callback)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "channel_info")

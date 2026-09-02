@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mail_hostname="${VPN_MAIL_HOSTNAME:-fedora.taile485ac.ts.net}"
+mail_hostname="${VPN_MAIL_HOSTNAME:-freedomvpn.taile485ac.ts.net}"
 
 dnf install -y postfix
 postconf -e "myhostname = $mail_hostname"

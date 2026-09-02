@@ -1,12 +1,17 @@
 from datetime import datetime, timedelta, timezone
+import asyncio
 import logging
+import smtplib
+import time
+from urllib.parse import quote
 from uuid import uuid4
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Literal
 from fastapi.responses import HTMLResponse, Response as FastAPIResponse
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.plan import Plan
@@ -18,8 +23,9 @@ from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.models.payment import Payment
 from app.db.models.payment_method import PaymentMethod
 from app.db.models.audit import AuditLog, ClientDevice, DebugSession
+from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.session import get_db
-from app.core.security import APIPrincipal, require_admin
+from app.core.security import APIPrincipal, hash_password, require_admin
 from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
 from app.services.vless import build_vless_url
@@ -60,7 +66,122 @@ class AdminPaymentStatusUpdate(BaseModel):
     status: Literal["paid", "failed", "cancelled", "refunded"]
 
 
+class AdminUserPasswordSet(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
 logger = logging.getLogger(__name__)
+
+HOST_COMMANDS = {
+    "backup_postgres": "scripts/backup.sh",
+    "verify_latest_backup": "latest=$(ls -t /var/backups/vpn-service/vpn-db-*.dump 2>/dev/null | head -1) && scripts/verify_backup.sh \"$latest\"",
+    "restore_postgres": "scripts/restore_postgres.sh /var/backups/vpn-service/vpn-db-TIMESTAMP.dump",
+    "mail_chain_recover": "scripts/check_mail_chain.sh",
+    "online_apis": "scripts/check_online_apis.sh",
+    "tailscale_funnel": "tailscale funnel status",
+}
+
+
+async def _public_probe(path: str = "/", timeout: float = 5.0) -> dict:
+    url = f"{settings.public_base_url.rstrip('/')}{path}"
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.get(url)
+        return {
+            "name": f"Public {path}",
+            "status": "online" if response.status_code < 500 else "degraded",
+            "details": f"HTTP {response.status_code}",
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    except httpx.HTTPError as exc:
+        return {
+            "name": f"Public {path}",
+            "status": "offline",
+            "details": str(exc),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+
+def _check_smtp() -> dict:
+    host = settings.smtp_host
+    if not host:
+        return {"name": "Email SMTP", "status": "offline", "details": "SMTP_HOST не задан"}
+    port = int(settings.smtp_port or 587)
+    started = time.perf_counter()
+    try:
+        smtp_class = smtplib.SMTP_SSL if settings.smtp_use_ssl else smtplib.SMTP
+        with smtp_class(host, port, timeout=8) as smtp:
+            smtp.ehlo()
+            if settings.smtp_starttls and not settings.smtp_use_ssl:
+                smtp.starttls()
+                smtp.ehlo()
+            if settings.smtp_username:
+                smtp.login(settings.smtp_username, settings.smtp_password)
+        return {
+            "name": "Email SMTP",
+            "status": "online",
+            "details": f"{host}:{port}, login ok",
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    except (OSError, smtplib.SMTPException) as exc:
+        return {
+            "name": "Email SMTP",
+            "status": "offline",
+            "details": str(exc),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+
+async def _check_nodes(db: AsyncSession) -> list[dict]:
+    result = await db.execute(
+        select(VPNNode, VPNNodeConfig)
+        .join(VPNNodeConfig, VPNNodeConfig.node_id == VPNNode.id)
+        .where(VPNNode.status != "disabled", VPNNodeConfig.protocol == "vless")
+    )
+    checks = []
+    for node, config in result.all():
+        api_address = config.config.get("api_address")
+        inbound_tag = config.config.get("inbound_tag", "vless-reality")
+        started = time.perf_counter()
+        if not api_address:
+            checks.append({"name": f"VPN-нода #{node.id} {node.name}", "status": "offline", "details": "api_address не задан"})
+            continue
+        try:
+            users = await ThreeXUIClient(address=api_address, timeout=5.0).get_users(inbound_tag)
+            node.health_status = "online"
+            node.latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            node.last_seen_at = datetime.now(timezone.utc)
+            checks.append({
+                "name": f"VPN-нода #{node.id} {node.name}",
+                "status": "online",
+                "details": f"3x-ui ok, inbound {inbound_tag}, users={len(users)}",
+                "latency_ms": node.latency_ms,
+            })
+        except ThreeXUIError as exc:
+            node.health_status = "offline"
+            node.latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            node.last_seen_at = datetime.now(timezone.utc)
+            checks.append({
+                "name": f"VPN-нода #{node.id} {node.name}",
+                "status": "offline",
+                "details": str(exc),
+                "latency_ms": node.latency_ms,
+            })
+    await db.commit()
+    return checks
+
+
+def _host_script_result(script_id: str) -> dict:
+    command = HOST_COMMANDS.get(script_id)
+    if not command:
+        raise HTTPException(status_code=404, detail="Unknown admin script")
+    return {
+        "script_id": script_id,
+        "status": "host_required",
+        "message": "Эта операция должна выполняться на SSH-хосте, а не внутри API-контейнера.",
+        "command": f"cd /home/freedman/vpn-service && {command}",
+    }
 
 
 def _aware(value: datetime) -> datetime:
@@ -105,6 +226,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
     payment_methods = await rows(PaymentMethod)
     devices = await rows(ClientDevice)
     debug_sessions = await rows(DebugSession)
+    login_codes = await rows(CabinetLoginCode)
     audit_result = await db.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(300))
     audit_logs = audit_result.scalars().all()
     config_result = await db.execute(
@@ -114,6 +236,13 @@ async def overview(db: AsyncSession = Depends(get_db)):
     plan_map = {item.id: item for item in plans}
     node_map = {item.id: item for item in nodes}
     config_map = {item.node_id: item for item in configs}
+    xui_links = sorted(
+        {
+            str(config.config.get("api_address"))
+            for config in configs
+            if config.config.get("api_address")
+        }
+    )
     subscription_map = {}
     for item in subscriptions:
         if item.status in {"active", "disabled"}:
@@ -137,6 +266,8 @@ async def overview(db: AsyncSession = Depends(get_db)):
                 "telegram_id": user.telegram_id,
                 "username": user.username,
                 "account_status": user.status,
+                "email": user.email,
+                "password": "set" if user.password_hash else "not_set",
                 "access_active": bool(subscription and subscription.status == "active" and client and client.status == "active"),
                 "subscription_id": subscription.id if subscription else None,
                 "plan_id": plan.id if plan else None,
@@ -158,12 +289,75 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "nodes": [{"id": x.id, "name": x.name, "provider": x.provider, "region": x.region, "ip": x.ip_address, "status": x.status, "health": x.health_status, "latency_ms": x.latency_ms, "last_seen_at": x.last_seen_at, "capacity": x.capacity, "connections": x.active_connections} for x in nodes if x.status != "disabled"],
         "subscriptions": [{"id": x.id, "user_id": x.user_id, "plan_id": x.plan_id, "status": x.status, "expires_at": x.expires_at} for x in subscriptions],
         "clients": [{"id": x.id, "user_id": x.user_id, "subscription_id": x.subscription_id, "node_id": x.node_id, "client_type": x.client_type, "flow": x.flow, "max_connections": x.max_connections, "status": x.status, "expires_at": x.expires_at, "last_connected_at": x.last_connected_at, "last_ip": x.last_ip, "link_overridden": bool(x.config_override)} for x in clients],
-        "payments": [{"id": x.id, "user_id": x.user_id, "provider": x.provider, "amount": str(x.amount), "currency": x.currency, "status": x.status, "subscription_id": x.subscription_id, "has_receipt": x.receipt_data is not None, "details": x.details, "created_at": x.created_at} for x in payments],
+        "payments": [{"id": x.id, "user_id": x.user_id, "provider": x.provider, "amount": str(x.amount), "currency": x.currency, "status": x.status, "subscription_id": x.subscription_id, "has_receipt": x.receipt_data is not None, "receipt_url": f"/admin/payments/{x.id}/receipt" if x.receipt_data is not None else None, "receipt_filename": x.receipt_filename, "receipt_mime_type": x.receipt_mime_type, "details": x.details, "created_at": x.created_at} for x in payments],
         "payment_methods": [{"id": x.id, "code": x.code, "name": x.name, "url": x.url, "sort_order": x.sort_order, "is_active": x.is_active, "has_image": x.image_data is not None} for x in sorted(payment_methods, key=lambda item: (item.sort_order, item.id))],
         "devices": [{"id": x.id, "user_id": x.user_id, "name": x.name, "platform": x.platform, "status": x.status, "last_seen_at": x.last_seen_at, "expires_at": x.expires_at} for x in devices],
+        "login_codes": [{"id": x.id, "user_id": x.user_id, "code": x.plain_code or "legacy_hash_only", "status": "used" if x.used_at else ("expired" if _aware(x.expires_at) <= datetime.now(timezone.utc) else "active"), "attempts": x.attempts, "created_at": x.created_at, "expires_at": x.expires_at, "used_at": x.used_at} for x in login_codes],
+        "docs": [
+            {"name": "Frontend-структура сайта и web-кабинета", "path": "docs/frontend-site-structure.md"},
+            {"name": "Web-кабинет, почта, коды и пароли", "path": "docs/web-cabinet.md"},
+            {"name": "Последние изменения", "path": "docs/latest-changes-2026-09-01.md"},
+            {"name": "Доступы и переменные", "path": "docs/access-and-credentials.md"},
+            {"name": "Редактирование Telegram-бота", "path": "docs/editing-telegram-bot.md"},
+            {"name": "Скрипты обслуживания", "path": "docs/maintenance-scripts.md"},
+        ],
+        "scripts": [
+            {"id": "health_dashboard", "name": "Health-dashboard: API, сайт, почта, 3x-ui", "command": "выполняется из админки", "runnable": True},
+            {"id": "smtp_check", "name": "Проверить SMTP-логин и отправку писем", "command": "выполняется из админки", "runnable": True},
+            {"id": "online_apis", "name": "Все online-тесты ключевых API", "command": "scripts/check_online_apis.sh", "runnable": True},
+            {"id": "mail_chain_recover", "name": "Проверить почту и быстро переподнять api/bot", "command": "scripts/check_mail_chain.sh", "runnable": True},
+            {"id": "backup_postgres", "name": "Создать backup PostgreSQL и конфигурации", "command": "scripts/backup.sh", "runnable": True},
+            {"id": "verify_latest_backup", "name": "Проверить последний backup восстановлением во временную БД", "command": "scripts/verify_backup.sh /path/to/vpn-db-TIMESTAMP.dump", "runnable": True},
+            {"id": "restore_postgres", "name": "Восстановить PostgreSQL из backup", "command": "scripts/restore_postgres.sh /var/backups/vpn-service/vpn-db-TIMESTAMP.dump", "runnable": True},
+            {"id": "tailscale_funnel", "name": "Проверить Tailscale Funnel", "command": "tailscale funnel status", "runnable": True},
+            {"name": "Обновить Tailscale certificate", "command": "systemctl start vpn-tailscale-cert.service", "runnable": False},
+            {"name": "Посмотреть последние backup-файлы", "command": "ls -lh /var/backups/vpn-service | tail -20", "runnable": False},
+            {"name": "Проверить пользователя Telegram", "command": "scripts/check_online_apis.sh TELEGRAM_ID", "runnable": False},
+            {"name": "Проверить последние ошибки API/бота", "command": "docker compose logs --tail=200 api bot worker | grep -i -E \"error|failed|exception|traceback|503\" || true", "runnable": False},
+        ],
+        "resources": [
+            {"name": "Публичный сайт", "url": settings.public_base_url},
+            {"name": "Web-кабинет", "url": f"{settings.public_base_url.rstrip('/')}/cabinet"},
+            {"name": "VPN Admin", "url": f"{settings.public_base_url.rstrip('/')}/admin"},
+            *[{"name": f"VPN API / Master 3x-ui #{index + 1}", "url": url, "note": "Внутренний/proxy SSH адрес"} for index, url in enumerate(xui_links)],
+        ],
         "debug": [{"id": x.id, "created_by": x.created_by, "reason": x.reason, "status": x.status, "expires_at": x.expires_at} for x in debug_sessions],
         "audit": [{"id": x.id, "created_at": x.created_at, "actor": f"{x.actor_type}:{x.actor_id or '-'}", "action": x.action, "resource": f"{x.resource_type or '-'}:{x.resource_id or '-'}", "result": x.result, "node_id": x.node_id, "sensitive": x.sensitive, "details": x.details} for x in audit_logs],
     }
+
+
+@router.get("/health-dashboard", dependencies=[Depends(require_admin)])
+async def health_dashboard(db: AsyncSession = Depends(get_db)):
+    checks = [
+        {"name": "API контейнер", "status": "online", "details": "/admin отвечает"},
+    ]
+    try:
+        await db.execute(text("SELECT 1"))
+        checks.append({"name": "PostgreSQL", "status": "online", "details": "SELECT 1 ok"})
+    except Exception as exc:  # pragma: no cover - admin diagnostics
+        checks.append({"name": "PostgreSQL", "status": "offline", "details": str(exc)})
+    public_results = await asyncio.gather(
+        _public_probe("/"),
+        _public_probe("/plans"),
+        _public_probe("/payment-methods"),
+    )
+    checks.extend(public_results)
+    checks.append(await asyncio.to_thread(_check_smtp))
+    checks.extend(await _check_nodes(db))
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "status": "online" if all(item["status"] == "online" for item in checks) else "attention",
+        "checks": checks,
+    }
+
+
+@router.post("/scripts/{script_id}/run", dependencies=[Depends(require_admin)])
+async def run_admin_script(script_id: str, db: AsyncSession = Depends(get_db)):
+    if script_id in {"health_dashboard", "online_apis"}:
+        return await health_dashboard(db)
+    if script_id == "smtp_check":
+        return {"status": "done", "checks": [await asyncio.to_thread(_check_smtp)]}
+    return _host_script_result(script_id)
 
 
 @router.put("/users/{user_id}/access", dependencies=[Depends(require_admin)])
@@ -347,6 +541,31 @@ async def rotate_user_key(
         details={"client_id": client.id, "subscription_id": subscription.id},
     )
     return {"user_id": user_id, "client_id": client.id, "node_id": client.node_id}
+
+
+@router.post("/users/{user_id}/password", dependencies=[Depends(require_admin)])
+async def set_user_password(
+    user_id: int,
+    data: AdminUserPasswordSet,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.password_hash = hash_password(data.password)
+    await db.commit()
+    await write_audit(
+        db,
+        action="user.password.set",
+        result="success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="user",
+        resource_id=user.id,
+        details={"password": "changed_manually"},
+    )
+    return {"user_id": user.id, "password": "set"}
 
 
 @router.delete("/users/{user_id}/access", dependencies=[Depends(require_admin)])
@@ -572,17 +791,15 @@ async def get_payment_receipt(payment_id: int, db: AsyncSession = Depends(get_db
     return FastAPIResponse(
         content=payment.receipt_data,
         media_type=payment.receipt_mime_type or "application/octet-stream",
-        headers={"Content-Disposition": f'inline; filename="{payment.receipt_filename or "receipt"}"'},
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(payment.receipt_filename or 'receipt')}"},
     )
 
 
 ADMIN_HTML = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VPN Admin</title><style>
-:root{color-scheme:light;--bg:#f5f8ff;--surface:#fff;--card:#fff;--ink:#111827;--muted:#667085;--line:#e3e9f5;--blue:#175cff;--blue2:#0b49e8;--bad:#d92d20;--ok:#079455;--warn:#b54708;--shadow:0 18px 45px #15336f12}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{position:sticky;top:0;z-index:3;background:#ffffffd9;backdrop-filter:blur(14px);border-bottom:1px solid var(--line);padding:18px 4vw;display:flex;justify-content:space-between;gap:18px;align-items:center}h1{margin:0;font-size:26px;letter-spacing:-.04em}.subhead{color:var(--muted);margin-top:3px}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.search{min-width:260px}main{padding:24px 4vw 42px;display:grid;grid-template-columns:230px minmax(0,1fr);gap:18px}.cards{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.card,section,nav{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:16px;box-shadow:var(--shadow)}.card{min-height:92px}.card .label{color:var(--muted);font-weight:700}.metric{font-size:30px;font-weight:850;color:var(--blue);letter-spacing:-.05em;margin-top:8px}nav{align-self:start;position:sticky;top:92px;display:grid;gap:8px}button{background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:10px 13px;cursor:pointer;font:inherit;font-weight:750;transition:.15s}button:hover{border-color:var(--blue);box-shadow:0 8px 20px #175cff16;transform:translateY(-1px)}button.primary{background:var(--blue);border-color:var(--blue);color:white}button.active{background:#edf3ff;border-color:#b8ccff;color:var(--blue)}button.danger{color:var(--bad);border-color:#ffd3cc;background:#fff7f5}input,select,textarea{width:100%;background:#fff;color:var(--ink);border:1px solid #d7deea;border-radius:12px;padding:10px 12px;font:inherit}textarea{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}form{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px;margin:12px 0}form button{align-self:end}.table{overflow:auto;border:1px solid var(--line);border-radius:16px;background:#fff}table{border-collapse:separate;border-spacing:0;width:100%;min-width:760px}th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);max-width:380px;overflow-wrap:anywhere;vertical-align:top}th{position:sticky;top:0;background:#f8fbff;color:#667085;font-size:12px;text-transform:uppercase;letter-spacing:.04em}tr:hover td{background:#fbfdff}.hidden{display:none}.ok{color:var(--ok);font-weight:800}.bad{color:var(--bad);font-weight:800}code{color:#0b49e8}#notice{min-height:20px;color:var(--muted)}dialog{width:min(900px,94vw);background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:22px;padding:22px;box-shadow:0 30px 80px #0f172a38}dialog::backdrop{background:#0f172a80;backdrop-filter:blur(2px)}.wide{grid-column:1/-1}.dialog-actions{display:flex;gap:10px;justify-content:flex-end;grid-column:1/-1}section>h2{margin-top:0;font-size:24px;letter-spacing:-.03em}section>p{color:var(--muted)}@media(max-width:900px){header{align-items:flex-start;flex-direction:column}.toolbar{width:100%}.search{min-width:0}main{grid-template-columns:1fr}nav{position:static;grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}}</style></head>
-<body><header><div><h1>Freedom VPN Admin</h1><div class="subhead">Пользователи, подписки, оплаты, ноды и аудит</div><div id="notice">Загрузка…</div></div><div class="toolbar"><input id="globalSearch" class="search" placeholder="Поиск по текущей таблице" oninput="renderCurrent()"><button class="primary" onclick="load()">Обновить</button></div></header><main>
-<div class="cards" id="metrics"></div>
-<nav id="nav"></nav>
+:root{color-scheme:dark;--bg:#0b1020;--card:#141b2d;--line:#29334d;--accent:#61dafb;--bad:#ff6b6b;--ok:#55d187;--warn:#ffd166}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#edf2ff;font:14px system-ui,sans-serif}.layout{min-height:100vh;display:grid;grid-template-columns:280px 1fr}.sidebar{position:sticky;top:0;height:100vh;padding:22px 18px;border-right:1px solid var(--line);background:#0f1729;overflow:auto}.sidebar h1{font-size:24px;margin:0 0 8px}.sidebar-actions{display:grid;gap:10px;margin:18px 0}.content{min-width:0;padding:24px 3vw;display:grid;gap:22px;align-content:start}.card,section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;min-width:0}nav{display:grid;gap:8px}button,.action{background:#263454;color:white;border:1px solid #3c4c73;border-radius:8px;padding:9px 13px;cursor:pointer;text-decoration:none;display:inline-block;white-space:nowrap}button:hover,.action:hover,button.active{border-color:var(--accent)}button.active{background:#1b3a61}button.danger{color:#ffb1b1}input,select,textarea{width:100%;background:#0d1425;color:white;border:1px solid var(--line);border-radius:8px;padding:9px}form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}form button{align-self:end}.table{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#0d1425}table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow-wrap:normal;word-break:normal}th{position:sticky;top:0;z-index:1;background:#101a2e;color:#9fb0d0;font-size:12px;text-transform:uppercase;letter-spacing:.04em}td{max-width:340px}.cell-clip{display:inline-block;max-width:300px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}.cell-long{white-space:normal;word-break:break-word;overflow-wrap:anywhere}details.cell-long{max-width:420px}summary{cursor:pointer;color:var(--accent)}.badge{display:inline-block;border:1px solid #3c4c73;border-radius:999px;padding:3px 8px;background:#17233a}.badge.ok{border-color:#2d8f66;background:#113528}.badge.bad{border-color:#9a3d45;background:#3a1720}.hidden{display:none}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}code{color:#b9e9ff}.muted{color:#9fb0d0}#notice{min-height:20px}dialog{width:min(850px,94vw);background:var(--card);color:#edf2ff;border:1px solid var(--line);border-radius:14px;padding:20px}dialog::backdrop{background:#000a}.wide{grid-column:1/-1}.dialog-actions{display:flex;gap:10px;justify-content:flex-end;grid-column:1/-1}.script-list,.resource-list,.doc-list,.health-grid{display:grid;gap:10px}.health-grid{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}.script-item,.resource-item,.doc-item,.health-item{border:1px solid var(--line);border-radius:12px;padding:12px;background:#0d1425}.health-item.ok{border-color:#2d8f66}.health-item.bad{border-color:#9a3d45}.health-item.warn{border-color:#8a7230}.script-item code,.script-output{display:block;margin-top:7px;white-space:pre-wrap}.script-output{padding:10px;border-radius:10px;background:#080d18;color:#cfe7ff;overflow:auto;max-height:260px}@media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{position:static;height:auto}.content{padding:16px}.sidebar-actions{grid-template-columns:1fr 1fr}nav{grid-template-columns:1fr 1fr}}</style></head>
+<body><div class="layout"><aside class="sidebar"><h1>VPN Admin</h1><div id="notice">Загрузка…</div><div class="sidebar-actions"><button onclick="load()">Обновить</button><a class="action" href="/" target="_blank" rel="noopener">Открыть сайт</a></div><nav id="nav"></nav></aside><main class="content">
 <section id="plans"><h2>Тарифы</h2><form onsubmit="createPlan(event)"><input name="code" placeholder="Код" required><input name="name" placeholder="Название" required><input name="duration_days" type="number" placeholder="Дней" required><input name="max_connections" type="number" min="0" max="100" value="5" title="0 — без ограничений" required><input name="traffic_limit_gb" type="number" min="0" value="250" title="0 — без ограничений" required><input name="price" type="number" step="0.01" placeholder="Цена" required><input name="currency" value="RUB" required><button>Создать тариф</button></form><p>Лимиты: количество одновременных IP и трафик в ГБ; 0 снимает соответствующее ограничение.</p><div class="table"></div></section>
 <section id="nodes" class="hidden"><h2>VPN-ноды</h2><form onsubmit="createNode(event)"><input name="name" placeholder="Имя" required><input name="provider" placeholder="Провайдер" required><input name="ip_address" placeholder="Публичный IP" required><input name="hostname" placeholder="Hostname"><input name="capacity" type="number" value="100"><button>Создать ноду</button></form><p>Страна определяется автоматически по публичному IP.</p><details><summary>Привязать inbound из 3x-ui master</summary><form onsubmit="createConfig(event)"><input name="node_id" type="number" placeholder="Node ID в VPN Admin" required><input name="api_address" placeholder="https://master.example/base-path" required><input name="host" placeholder="Публичный адрес ноды" required><input name="port" type="number" value="443" required><input name="sni" placeholder="Reality SNI" required><input name="fingerprint" placeholder="Fingerprint" value="chrome" required><input name="pbk" placeholder="Reality public key" required><input name="sid" placeholder="Reality short ID" required><input name="inbound_tag" type="number" min="1" placeholder="3x-ui inbound ID" required><button>Привязать</button></form></details><div class="table"></div></section>
 <section id="users" class="hidden"><h2>Пользователи</h2><div class="table"></div></section>
@@ -591,21 +808,33 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="payments" class="hidden"><h2>Платежи</h2><div class="table"></div></section>
 <section id="payment_methods" class="hidden"><h2>Способы оплаты</h2><form onsubmit="createPaymentMethod(event)"><input name="code" placeholder="Код: sber_qr" required><input name="name" placeholder="Название кнопки" required><input name="url" placeholder="Ссылка на QR или реквизиты/телефон"><input name="sort_order" type="number" value="100" required><button>Добавить способ</button></form><p>Для Сбербанка, Т-Банка и перевода по телефону поле URL используется как ссылка на QR или текст реквизитов. Порядок и активность управляют кнопками Telegram.</p><div class="table"></div></section>
 <section id="devices" class="hidden"><h2>Устройства</h2><div class="table"></div></section>
+<section id="login_codes" class="hidden"><h2>Коды входа в web-кабинет</h2><p class="bad">Коды дают доступ к аккаунту до истечения срока. Не пересылайте их пользователям в открытых чатах без проверки владельца.</p><div class="table"></div></section>
+<section id="docs" class="hidden"><h2>Документация</h2><p class="muted">Единая точка входа в основные инструкции проекта. Пути открываются на сервере из каталога репозитория.</p><div class="doc-list"></div></section>
+<section id="health" class="hidden"><h2>Health-dashboard</h2><p class="muted">Проверка API, публичного Tailscale URL, PostgreSQL, SMTP и VPN API / 3x-ui нод.</p><button onclick="loadHealth()">Проверить сейчас</button><div class="health-grid" id="health-grid"></div></section>
+<section id="scripts" class="hidden"><h2>Запуск ключевых скриптов</h2><p class="muted">Кнопки запускают безопасные проверки из админки. Host-only операции для PostgreSQL backup/restore возвращают точную команду для SSH-хоста.</p><div class="script-list"></div></section>
+<section id="resources" class="hidden"><h2>Ресурсы инфраструктуры</h2><p class="muted">Быстрые ссылки на сайт, кабинет, админку и master 3x-ui из конфигурации VPN-нод.</p><div class="resource-list"></div></section>
 <section id="debug" class="hidden"><h2>Sensitive debug</h2><p class="bad">Активная сессия разрешает сохранять полные ключи в audit log. После диагностики секреты нужно ротировать.</p><form onsubmit="createDebug(event)"><input name="reason" placeholder="Причина" required><input name="duration_minutes" type="number" min="1" max="1440" value="30" required><button>Открыть сессию</button></form><div class="table"></div></section>
 <section id="audit" class="hidden"><h2>Audit log</h2><div class="table"></div></section>
-</main>
+</main></div>
 <dialog id="accessDialog"><h2>Управление доступом</h2><form id="accessForm" onsubmit="saveAccess(event)"><input name="user_id" type="hidden"><label>Тариф<select name="plan_id" required></select></label><label>VPN-нода<select name="node_id" required></select></label><label>Статус<select name="active"><option value="true">Активен</option><option value="false">Не активен</option></select></label><label>Действует до<input name="expires_at" type="datetime-local" required></label><label class="wide">Выданная VPN-ссылка<textarea name="vpn_link" rows="6" placeholder="Пусто — генерировать автоматически"></textarea></label><div class="wide" id="activityInfo"></div><div class="dialog-actions"><button type="button" class="danger" onclick="resetAccess()">Сбросить план и ссылку</button><button type="button" onclick="document.getElementById('accessDialog').close()">Отмена</button><button>Сохранить</button></div></form></dialog><script>
-let state={},current='plans';const sections=['plans','nodes','users','subscriptions','clients','payments','payment_methods','devices','debug','audit'];
-const labels={plans:'Тарифы',nodes:'Ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',debug:'Debug',audit:'Аудит'};
+let state={};const sections=['health','plans','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','docs','scripts','resources','debug','audit'];
+const labels={health:'Health',plans:'Тарифы',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
+const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',expires_at:'Действует до',client_id:'Клиент ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
 function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function show(id){current=id;sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===id));renderCurrent()}
-function filtered(rows){let q=(document.getElementById('globalSearch')?.value||'').trim().toLowerCase();return q?rows.filter(r=>JSON.stringify(r).toLowerCase().includes(q)):rows}
-function table(id,rows,actions){rows=filtered(rows);let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(k)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
+function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===id))}
+function prettyDate(v){if(!v)return '';let d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString('ru-RU',{year:'2-digit',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}
+function formatCell(k,v){if(v===true)return '<span class="badge ok">да</span>';if(v===false)return '<span class="badge bad">нет</span>';if(v===null||v===undefined||v==='')return '<span class="muted">—</span>';if(k.endsWith('_at')||k==='expires_at')return esc(prettyDate(v));if(typeof v==='object'){let s=JSON.stringify(v,null,2);return `<details class="cell-long"><summary>показать</summary><code>${esc(s)}</code></details>`}let s=String(v);if(s.length>42)return `<span class="cell-clip" title="${esc(s)}">${esc(s)}</span>`;return esc(s)}
+function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(columnLabels[k]||k)}</th>`).join('')}<th>Действия</th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${formatCell(k,r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
-function paymentActions(p){let receipt=p.has_receipt?`<button onclick="window.open('/admin/payments/${p.id}/receipt','_blank')">Открыть чек</button> `:'';if(['pending','processing'].includes(p.status))return receipt+`<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return receipt+`<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return receipt}
-function renderCurrent(){if(!state.plans)return;table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit)}
-async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';document.getElementById('metrics').innerHTML=sections.map(x=>`<div class="card"><div class="label">${labels[x]}</div><div class="metric">${state[x].length}</div></div>`).join('');renderCurrent();show(current)}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+function paymentActions(p){let receipt=p.receipt_url?`<a class="action" href="${esc(p.receipt_url)}" target="_blank" rel="noopener">Открыть чек</a> `:'';if(['pending','processing'].includes(p.status))return receipt+`<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return receipt+`<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return receipt}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button data-section="${x}" onclick="show('${x}')">${labels[x]}</button>`).join('');
+function renderDocs(){document.querySelector('#docs .doc-list').innerHTML=(state.docs||[]).map(d=>`<div class="doc-item"><b>${esc(d.name)}</b><br><code>${esc(d.path)}</code></div>`).join('')||'Нет данных'}
+function renderScripts(){document.querySelector('#scripts .script-list').innerHTML=(state.scripts||[]).map(s=>`<div class="script-item"><b>${esc(s.name)}</b><code>${esc(s.command)}</code>${s.runnable&&s.id?`<p><button onclick="runScript('${esc(s.id)}',this)">Запустить</button></p><pre class="script-output" id="script-output-${esc(s.id)}"></pre>`:''}</div>`).join('')||'Нет данных'}
+function renderResources(){document.querySelector('#resources .resource-list').innerHTML=(state.resources||[]).map(r=>`<div class="resource-item"><b>${esc(r.name)}</b><br><a class="action" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>${r.note?`<p class="muted">${esc(r.note)}</p>`:''}</div>`).join('')||'Нет данных'}
+function renderHealth(data){let box=document.getElementById('health-grid');box.innerHTML=(data.checks||[]).map(h=>{let cls=h.status==='online'?'ok':(h.status==='offline'?'bad':'warn');return `<div class="health-item ${cls}"><b>${esc(h.name)}</b><p class="${cls}">${esc(h.status)}</p><p>${esc(h.details||'')}</p>${h.latency_ms?`<p class="muted">${esc(h.latency_ms)} мс</p>`:''}</div>`}).join('')||'Нет данных'}
+async function loadHealth(){try{let data=await request('/admin/health-dashboard');renderHealth(data);document.getElementById('notice').innerHTML=data.status==='online'?'<span class="ok">Health OK</span>':'<span class="warn">Health требует внимания</span>'}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function runScript(id,btn){let out=document.getElementById('script-output-'+id);btn.disabled=true;out.textContent='Выполняю…';try{let data=await request('/admin/scripts/'+id+'/run',{method:'POST'});out.textContent=JSON.stringify(data,null,2);if(data.checks)renderHealth(data)}catch(e){out.textContent=e.message}finally{btn.disabled=false}}
 async function sendForm(e,url,map){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));for(let k of ['duration_days','max_connections','traffic_limit_gb','price','capacity','node_id','port'])if(k in f)f[k]=Number(f[k]);if(map)f=map(f);try{await request(url(f),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await load()}catch(err){alert(err.message)}}
 function createPlan(e){return sendForm(e,()=>'/plans')}
 function createPaymentMethod(e){return sendForm(e,()=>'/payment-methods',f=>({...f,sort_order:Number(f.sort_order),url:f.url||null,is_active:true}))}
@@ -629,6 +858,7 @@ function inputDate(value,days=30){let d=value?new Date(value):new Date(Date.now(
 function openAccess(id){let u=state.users.find(x=>x.id===id),f=document.getElementById('accessForm');f.user_id.value=id;f.plan_id.innerHTML=state.plans.map(p=>`<option value="${p.id}">${esc(p.name)} (#${p.id})</option>`).join('');f.node_id.innerHTML=state.nodes.filter(n=>n.status==='active').map(n=>`<option value="${n.id}">${esc(n.name)} / ${esc(n.region)}</option>`).join('');if(u.plan_id)f.plan_id.value=u.plan_id;if(u.node_id)f.node_id.value=u.node_id;f.active.value=String(u.access_active);f.expires_at.value=inputDate(u.expires_at);f.vpn_link.value=u.vpn_link||'';document.getElementById('activityInfo').innerHTML=`Последнее подключение: <b>${esc(u.last_connected_at||'нет')}</b> · IP: <b>${esc(u.last_ip||'нет')}</b> · Client ID: <b>${esc(u.client_id||'нет')}</b>${u.link_overridden?' · ссылка изменена вручную':''}`;document.getElementById('accessDialog').showModal()}
 async function saveAccess(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let id=Number(f.user_id);let body={plan_id:Number(f.plan_id),node_id:Number(f.node_id),active:f.active==='true',expires_at:new Date(f.expires_at).toISOString(),vpn_link:f.vpn_link};try{await request('/admin/users/'+id+'/access',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});document.getElementById('accessDialog').close();await load()}catch(err){alert(err.message)}}
 async function rotateUser(id){let u=state.users.find(x=>x.id===id),available=state.nodes.filter(n=>n.status==='active'&&n.health!=='offline');if(!available.length){alert('Нет доступных нод');return}let hint=available.map(n=>`${n.id}: ${n.name} (${n.region||'—'})`).join('\n');let raw=prompt('ID целевой ноды:\n'+hint,String(u.node_id||available[0].id));if(raw===null)return;let nodeId=Number(raw);if(!available.some(n=>n.id===nodeId)){alert('Нода недоступна');return}if(!confirm('Создать новый ключ на выбранной ноде? Старый будет отозван после успешного создания.'))return;let body={node_id:nodeId,client_type:u.client_type||'universal',flow:u.flow||'',fingerprint:'chrome'};try{await request('/admin/users/'+id+'/rotate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load();alert('Ключ перевыпущен')}catch(err){alert(err.message)}}
+async function setUserPassword(id){let password=prompt('Новый пароль для пользователя #'+id+' (минимум 8 символов)');if(password===null)return;if(password.length<8){alert('Минимум 8 символов');return}if(!confirm('Сменить пароль пользователя #'+id+'? Старый пароль перестанет работать.'))return;try{await request('/admin/users/'+id+'/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});await load();alert('Пароль обновлён')}catch(err){alert(err.message)}}
 async function resetAccess(){let id=Number(document.getElementById('accessForm').user_id.value);if(!confirm('Сбросить тариф, отключить доступ и удалить ручную ссылку?'))return;try{await request('/admin/users/'+id+'/access',{method:'DELETE'});document.getElementById('accessDialog').close();await load()}catch(err){alert(err.message)}}
 async function createDebug(e){return sendForm(e,()=>'/admin/debug-sessions',f=>({...f,duration_minutes:Number(f.duration_minutes)}))}
 async function closeDebug(id){if(confirm('Закрыть debug-сессию #'+id+'?')){await request('/admin/debug-sessions/'+id,{method:'DELETE'});await load()}}
