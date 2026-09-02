@@ -16,6 +16,7 @@ from app.db.models.plan import Plan
 from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.vpn_node import VPNNode
+from app.services.admin_settings import get_admin_contacts
 from app.services.audit import write_audit
 from app.services.email import (
     EmailDeliveryError,
@@ -68,13 +69,20 @@ async def _payment_card(db: AsyncSession, payment: Payment, *, title: str) -> st
     )
 
 
-async def _send_email(subject: str, body: str, *, attachment: tuple[str, str, bytes] | None = None) -> None:
-    if not settings.admin_notification_email or not settings.smtp_host or not settings.smtp_from:
+async def _send_email(
+    db: AsyncSession,
+    subject: str,
+    body: str,
+    *,
+    attachment: tuple[str, str, bytes] | None = None,
+) -> None:
+    contacts = await get_admin_contacts(db)
+    if not contacts.admin_notification_email or not settings.smtp_host or not settings.smtp_from:
         return
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = settings.smtp_from
-    message["To"] = settings.admin_notification_email
+    message["To"] = contacts.admin_notification_email
     message.set_content(body)
     if attachment is not None:
         filename, mime_type, content = attachment
@@ -91,22 +99,31 @@ async def _send_email(subject: str, body: str, *, attachment: tuple[str, str, by
         logger.warning("admin_email_notification_failed: %s", exc)
 
 
-async def _send_telegram_message(text: str) -> None:
-    if not settings.bot_token or not settings.bot_admin_chat_id:
+async def _send_telegram_message(db: AsyncSession, text: str) -> None:
+    contacts = await get_admin_contacts(db)
+    if not settings.bot_token or not contacts.bot_admin_chat_id:
         return
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
                 f"https://api.telegram.org/bot{settings.bot_token}/sendMessage",
-                json={"chat_id": settings.bot_admin_chat_id, "text": text[:4096]},
+                json={"chat_id": contacts.bot_admin_chat_id, "text": text[:4096]},
             )
             response.raise_for_status()
     except httpx.HTTPError as exc:
         logger.warning("admin_telegram_notification_failed: %s", exc)
 
 
-async def _send_telegram_receipt(text: str, *, filename: str, mime_type: str, content: bytes) -> None:
-    if not settings.bot_token or not settings.bot_admin_chat_id:
+async def _send_telegram_receipt(
+    db: AsyncSession,
+    text: str,
+    *,
+    filename: str,
+    mime_type: str,
+    content: bytes,
+) -> None:
+    contacts = await get_admin_contacts(db)
+    if not settings.bot_token or not contacts.bot_admin_chat_id:
         return
     method = "sendPhoto" if (mime_type or "").startswith("image/") else "sendDocument"
     field = "photo" if method == "sendPhoto" else "document"
@@ -114,7 +131,7 @@ async def _send_telegram_receipt(text: str, *, filename: str, mime_type: str, co
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"https://api.telegram.org/bot{settings.bot_token}/{method}",
-                data={"chat_id": settings.bot_admin_chat_id, "caption": text[:1024]},
+                data={"chat_id": contacts.bot_admin_chat_id, "caption": text[:1024]},
                 files={field: (filename or "receipt", content, mime_type or "application/octet-stream")},
             )
             response.raise_for_status()
@@ -124,8 +141,8 @@ async def _send_telegram_receipt(text: str, *, filename: str, mime_type: str, co
 
 async def notify_payment_created(db: AsyncSession, payment: Payment) -> None:
     card = await _payment_card(db, payment, title="🧾 Новая покупка Freedom VPN")
-    await _send_telegram_message(card)
-    await _send_email(f"Новая покупка Freedom VPN #{payment.id}", card)
+    await _send_telegram_message(db, card)
+    await _send_email(db, f"Новая покупка Freedom VPN #{payment.id}", card)
 
 
 async def notify_payment_receipt(db: AsyncSession, payment: Payment) -> None:
@@ -134,8 +151,9 @@ async def notify_payment_receipt(db: AsyncSession, payment: Payment) -> None:
     card = await _payment_card(db, payment, title="📎 Загружен чек Freedom VPN")
     filename = payment.receipt_filename or f"receipt-{payment.id}"
     mime_type = payment.receipt_mime_type or "application/octet-stream"
-    await _send_telegram_receipt(card, filename=filename, mime_type=mime_type, content=payment.receipt_data)
+    await _send_telegram_receipt(db, card, filename=filename, mime_type=mime_type, content=payment.receipt_data)
     await _send_email(
+        db,
         f"Чек по платежу Freedom VPN #{payment.id}",
         card,
         attachment=(filename, mime_type, payment.receipt_data),

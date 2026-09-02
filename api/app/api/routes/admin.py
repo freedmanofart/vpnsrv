@@ -32,6 +32,7 @@ from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.session import get_db
 from app.core.security import APIPrincipal, hash_password, require_admin
 from app.services.audit import write_audit
+from app.services.admin_settings import get_admin_contacts, set_admin_contacts
 from app.services.node_health import node_accepts_clients
 from app.services.vless import build_vless_url
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
@@ -73,6 +74,11 @@ class AdminPaymentStatusUpdate(BaseModel):
 
 class AdminUserPasswordSet(BaseModel):
     password: str = Field(min_length=8, max_length=128)
+
+
+class AdminContactsUpdate(BaseModel):
+    admin_notification_email: str = Field(max_length=320)
+    bot_admin_chat_id: int = 0
 
 
 logger = logging.getLogger(__name__)
@@ -392,6 +398,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
         select(VPNNodeConfig).where(VPNNodeConfig.protocol == "vless")
     )
     configs = config_result.scalars().all()
+    admin_contacts = await get_admin_contacts(db)
     plan_map = {item.id: item for item in plans}
     node_map = {item.id: item for item in nodes}
     config_map = {item.node_id: item for item in configs}
@@ -443,6 +450,10 @@ async def overview(db: AsyncSession = Depends(get_db)):
             }
         )
     return {
+        "admin_contacts": {
+            "admin_notification_email": admin_contacts.admin_notification_email,
+            "bot_admin_chat_id": admin_contacts.bot_admin_chat_id,
+        },
         "users": user_rows,
         "plans": [{"id": x.id, "code": x.code, "name": x.name, "duration_days": x.duration_days, "max_connections": x.max_connections, "traffic_limit_gb": x.traffic_limit_gb, "price": str(x.price), "currency": x.currency, "active": x.is_active, "public": x.is_public} for x in plans],
         "nodes": [{"id": x.id, "name": x.name, "provider": x.provider, "region": x.region, "ip": x.ip_address, "status": x.status, "health": x.health_status, "latency_ms": x.latency_ms, "last_seen_at": x.last_seen_at, "capacity": x.capacity, "connections": x.active_connections} for x in nodes if x.status != "disabled"],
@@ -540,6 +551,39 @@ async def run_admin_script(script_id: str, db: AsyncSession = Depends(get_db)):
     if script_id == "list_backups":
         return {"status": "done", "backups": _backup_files()}
     return _host_script_result(script_id)
+
+
+@router.put("/settings/admin-contacts", dependencies=[Depends(require_admin)])
+async def update_admin_contacts(
+    data: AdminContactsUpdate,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    email_address = data.admin_notification_email.strip()
+    if email_address and not re.fullmatch(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email_address):
+        raise HTTPException(status_code=422, detail="Укажите корректный email")
+    contacts = await set_admin_contacts(
+        db,
+        admin_notification_email=email_address,
+        bot_admin_chat_id=data.bot_admin_chat_id,
+    )
+    await write_audit(
+        db,
+        action="admin.contacts.update",
+        result="success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="settings",
+        resource_id="admin_contacts",
+        details={
+            "admin_notification_email": contacts.admin_notification_email,
+            "bot_admin_chat_id": contacts.bot_admin_chat_id,
+        },
+    )
+    return {
+        "admin_notification_email": contacts.admin_notification_email,
+        "bot_admin_chat_id": contacts.bot_admin_chat_id,
+    }
 
 
 @router.put("/users/{user_id}/access", dependencies=[Depends(require_admin)])
@@ -992,6 +1036,7 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="devices" class="hidden"><h2>Устройства</h2><div class="table"></div></section>
 <section id="login_codes" class="hidden"><h2>Коды входа в web-кабинет</h2><p class="bad">Коды дают доступ к аккаунту до истечения срока. Не пересылайте их пользователям в открытых чатах без проверки владельца.</p><div class="table"></div></section>
 <section id="email_logs" class="hidden"><h2>Email-логи</h2><p class="muted">Последние почтовые уведомления: коды входа, рассылки по подпискам, ошибки SMTP и пропуски без email.</p><div class="table"></div></section>
+<section id="settings" class="hidden"><h2>Настройки</h2><p class="muted">Админские контакты для уведомлений о покупках, чеках и важных событиях.</p><form id="adminContactsForm" onsubmit="saveAdminContacts(event)"><label>Email администратора<input name="admin_notification_email" type="email" placeholder="admin@example.com"></label><label>Telegram chat ID администратора<input name="bot_admin_chat_id" type="number" step="1" placeholder="0"></label><button>Сохранить контакты</button></form><p id="settings-result"></p></section>
 <section id="docs" class="hidden"><h2>Документация</h2><p class="muted">Единая точка входа в основные инструкции проекта. Пути открываются на сервере из каталога репозитория.</p><div class="doc-list"></div></section>
 <section id="health" class="hidden"><h2>Health-dashboard</h2><p class="muted">Проверка API, публичного Tailscale URL, PostgreSQL, SMTP и VPN API / 3x-ui нод.</p><button onclick="loadHealth()">Проверить сейчас</button><div class="health-grid" id="health-grid"></div></section>
 <section id="scripts" class="hidden"><h2>Запуск ключевых скриптов</h2><p class="muted">Кнопки запускают безопасные проверки из админки. Host-only операции для PostgreSQL backup/restore возвращают точную команду для SSH-хоста.</p><div class="script-list"></div></section>
@@ -1000,8 +1045,8 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="audit" class="hidden"><h2>Audit log</h2><div class="table"></div></section>
 </main></div>
 <dialog id="accessDialog"><h2>Управление доступом</h2><form id="accessForm" onsubmit="saveAccess(event)"><input name="user_id" type="hidden"><label>Тариф<select name="plan_id" required></select></label><label>VPN-нода<select name="node_id" required></select></label><label>Статус<select name="active"><option value="true">Активен</option><option value="false">Не активен</option></select></label><label>Действует до<input name="expires_at" type="datetime-local" required></label><label class="wide">Выданная VPN-ссылка<textarea name="vpn_link" rows="6" placeholder="Пусто — генерировать автоматически"></textarea></label><div class="wide" id="activityInfo"></div><div class="dialog-actions"><button type="button" class="danger" onclick="resetAccess()">Сбросить план и ссылку</button><button type="button" onclick="document.getElementById('accessDialog').close()">Отмена</button><button>Сохранить</button></div></form></dialog><script>
-let state={};const sections=['health','plans','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','email_logs','docs','scripts','resources','debug','audit'];
-const labels={health:'Health',plans:'Тарифы',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',email_logs:'Email-логи',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
+let state={};const sections=['health','plans','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','email_logs','settings','docs','scripts','resources','debug','audit'];
+const labels={health:'Health',plans:'Тарифы',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',email_logs:'Email-логи',settings:'Настройки',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
 const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',expires_at:'Действует до',client_id:'Клиент ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
 function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===id))}
@@ -1010,8 +1055,10 @@ function formatCell(k,v){if(v===true)return '<span class="badge ok">да</span>'
 function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(columnLabels[k]||k)}</th>`).join('')}<th>Действия</th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${formatCell(k,r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
 function paymentActions(p){let receipt=p.receipt_url?`<a class="action" href="${esc(p.receipt_url)}" target="_blank" rel="noopener">Открыть чек</a> `:'';if(['pending','processing'].includes(p.status))return receipt+`<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return receipt+`<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return receipt}
-async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderAdminContacts();renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button data-section="${x}" onclick="show('${x}')">${labels[x]}</button>`).join('');
+function renderAdminContacts(){let f=document.getElementById('adminContactsForm'),c=state.admin_contacts||{};if(!f)return;f.admin_notification_email.value=c.admin_notification_email||'';f.bot_admin_chat_id.value=c.bot_admin_chat_id||0}
+async function saveAdminContacts(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let out=document.getElementById('settings-result');out.className='';out.textContent='Сохраняю…';try{state.admin_contacts=await request('/admin/settings/admin-contacts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_notification_email:f.admin_notification_email||'',bot_admin_chat_id:Number(f.bot_admin_chat_id||0)})});renderAdminContacts();out.className='ok';out.textContent='Контакты сохранены'}catch(err){out.className='bad';out.textContent=err.message}}
 function renderDocs(){document.querySelector('#docs .doc-list').innerHTML=(state.docs||[]).map(d=>`<div class="doc-item"><b>${esc(d.name)}</b><br><code>${esc(d.path)}</code><p><a class="action" href="/admin/docs/${esc(d.id)}" target="_blank" rel="noopener">Открыть</a></p></div>`).join('')||'Нет данных'}
 function renderScripts(){document.querySelector('#scripts .script-list').innerHTML=(state.scripts||[]).map(s=>`<div class="script-item"><b>${esc(s.name)}</b><code>${esc(s.command)}</code>${s.runnable&&s.id?`<p><button onclick="runScript('${esc(s.id)}',this)">Запустить</button></p><pre class="script-output" id="script-output-${esc(s.id)}"></pre>`:''}</div>`).join('')||'Нет данных'}
 function renderResources(){document.querySelector('#resources .resource-list').innerHTML=(state.resources||[]).map(r=>`<div class="resource-item"><b>${esc(r.name)}</b><br><a class="action" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>${r.note?`<p class="muted">${esc(r.note)}</p>`:''}</div>`).join('')||'Нет данных'}
