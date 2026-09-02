@@ -260,6 +260,50 @@ def _verify_latest_postgres_backup() -> dict:
     return result
 
 
+async def _mail_chain_recover(db: AsyncSession) -> dict:
+    checks = [
+        {"name": "API контейнер", "status": "online", "details": "/admin отвечает"},
+    ]
+    try:
+        await db.execute(text("SELECT 1"))
+        checks.append({"name": "PostgreSQL", "status": "online", "details": "SELECT 1 ok"})
+    except Exception as exc:  # pragma: no cover - admin diagnostics
+        checks.append({"name": "PostgreSQL", "status": "offline", "details": str(exc)})
+    try:
+        await db.execute(text("ALTER TABLE cabinet_login_codes ADD COLUMN IF NOT EXISTS plain_code VARCHAR(6)"))
+        await db.commit()
+        checks.append({"name": "Колонка кодов", "status": "online", "details": "cabinet_login_codes.plain_code ok"})
+    except Exception as exc:  # pragma: no cover - admin diagnostics
+        await db.rollback()
+        checks.append({"name": "Колонка кодов", "status": "offline", "details": str(exc)})
+    checks.append(await asyncio.to_thread(_check_smtp))
+    recent_result = await db.execute(
+        select(CabinetLoginCode).order_by(CabinetLoginCode.id.desc()).limit(10)
+    )
+    now = datetime.now(timezone.utc)
+    recent_codes = []
+    for code in recent_result.scalars().all():
+        expires_at = _aware(code.expires_at)
+        recent_codes.append(
+            {
+                "id": code.id,
+                "user_id": code.user_id,
+                "code": code.plain_code or "legacy_hash_only",
+                "status": "used" if code.used_at else ("expired" if expires_at <= now else "active"),
+                "attempts": code.attempts,
+                "created_at": code.created_at,
+                "expires_at": code.expires_at,
+                "used_at": code.used_at,
+            }
+        )
+    return {
+        "status": "online" if all(item["status"] == "online" for item in checks) else "attention",
+        "checks": checks,
+        "recent_codes": recent_codes,
+        "restart_command": "cd /home/freedman/vpn-service && docker compose up -d --force-recreate api bot",
+    }
+
+
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
@@ -436,6 +480,8 @@ async def run_admin_script(script_id: str, db: AsyncSession = Depends(get_db)):
         return await health_dashboard(db)
     if script_id == "smtp_check":
         return {"status": "done", "checks": [await asyncio.to_thread(_check_smtp)]}
+    if script_id == "mail_chain_recover":
+        return await _mail_chain_recover(db)
     if script_id == "backup_postgres":
         return await asyncio.to_thread(_create_postgres_backup)
     if script_id == "verify_latest_backup":
