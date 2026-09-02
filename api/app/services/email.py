@@ -31,6 +31,8 @@ async def send_cabinet_code(email: str, code: str, ttl_minutes: int) -> None:
         "Код для входа в кабинет Freedom VPN:\n\n"
         f"{code}\n\n"
         f"Код действует {ttl_minutes} минут и может быть использован один раз.\n"
+        "\n"
+        f"{_cabinet_renewal_footer()}\n\n"
         "Никому не сообщайте этот код. Если вы его не запрашивали, "
         "просто проигнорируйте письмо."
     )
@@ -46,6 +48,15 @@ def _cabinet_url() -> str:
 
 def _renew_url() -> str:
     return _cabinet_url() + "?checkout=1#payment"
+
+
+def _cabinet_renewal_footer() -> str:
+    return (
+        f"Web-кабинет: {_cabinet_url()}\n"
+        f"Продлить подписку: {_renew_url()}\n\n"
+        "Если подписка скоро закончится или уже закончилась, зайдите в web-кабинет "
+        "и продлите доступ — после оплаты VPN-ключ обновится автоматически."
+    )
 
 
 async def send_subscription_expiring(
@@ -67,9 +78,7 @@ async def send_subscription_expiring(
         f"Тариф: {plan_name}\n"
         f"Действует до: {expires_at} UTC\n"
         f"Осталось дней: {days_remaining}\n\n"
-        f"Вход в web-кабинет: {_cabinet_url()}\n"
-        f"Продлить услугу: {_renew_url()}\n\n"
-        "После оплаты подписка будет продлена в вашем кабинете."
+        f"{_cabinet_renewal_footer()}"
     )
     try:
         await asyncio.to_thread(_send, message)
@@ -94,9 +103,7 @@ async def send_subscription_expired(
         "Срок действия вашей услуги Freedom VPN закончился.\n\n"
         f"Тариф: {plan_name}\n"
         f"Закончилась: {expires_at} UTC\n\n"
-        f"Вход в web-кабинет: {_cabinet_url()}\n"
-        f"Продлить услугу: {_renew_url()}\n\n"
-        "После продления новый VPN-ключ появится в web-кабинете."
+        f"{_cabinet_renewal_footer()}"
     )
     try:
         await asyncio.to_thread(_send, message)
