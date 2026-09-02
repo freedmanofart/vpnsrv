@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     smtp_use_ssl: bool = False
     bot_token: str = ""
     bot_admin_chat_id: int = 0
+    support_url: str = ""
     admin_notification_email: str = "freedmanofart5@gmail.com"
 
     model_config = SettingsConfigDict(

@@ -30,6 +30,10 @@ class TelegramStarsPaid(BaseModel):
     invoice_payload: str = Field(min_length=1, max_length=128)
 
 
+class PaymentStatusUpdate(BaseModel):
+    status: str = Field(pattern=r"^(paid|failed|cancelled|refunded)$")
+
+
 class PaymentReceiptCreate(BaseModel):
     user_id: int
     telegram_file_id: str = Field(min_length=5, max_length=1024)

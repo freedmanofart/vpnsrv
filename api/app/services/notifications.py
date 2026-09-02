@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import exists, or_, select
@@ -27,6 +29,50 @@ from app.services.email import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _support_chat_id() -> str:
+    value = (settings.support_url or "").strip()
+    if not value:
+        return "@Freedom_VPN_Support"
+    if value.startswith("@"):
+        return value
+    parsed = urlparse(value)
+    if parsed.netloc.lower() in {"t.me", "telegram.me"}:
+        username = parsed.path.strip("/").split("/", 1)[0]
+        if username:
+            return f"@{username}"
+    return value
+
+
+async def _telegram_destinations(db: AsyncSession) -> list[int | str]:
+    contacts = await get_admin_contacts(db)
+    destinations: list[int | str] = []
+    if contacts.bot_admin_chat_id:
+        destinations.append(contacts.bot_admin_chat_id)
+    support = _support_chat_id()
+    if support and support not in destinations:
+        destinations.append(support)
+    return destinations
+
+
+def _payment_actions(payment: Payment) -> dict:
+    buttons = []
+    if payment.status in {"pending", "processing"}:
+        buttons.append(
+            [
+                {"text": "✅ Подтвердить", "callback_data": f"admin_pay:paid:{payment.id}"},
+                {"text": "❌ Ошибка", "callback_data": f"admin_pay:failed:{payment.id}"},
+            ]
+        )
+        buttons.append(
+            [{"text": "🚫 Отменить", "callback_data": f"admin_pay:cancelled:{payment.id}"}]
+        )
+    elif payment.status == "paid":
+        buttons.append(
+            [{"text": "↩️ Возврат", "callback_data": f"admin_pay:refunded:{payment.id}"}]
+        )
+    return {"inline_keyboard": buttons} if buttons else {}
 
 
 async def _payment_card(db: AsyncSession, payment: Payment, *, title: str) -> str:
@@ -99,19 +145,33 @@ async def _send_email(
         logger.warning("admin_email_notification_failed: %s", exc)
 
 
-async def _send_telegram_message(db: AsyncSession, text: str) -> None:
-    contacts = await get_admin_contacts(db)
-    if not settings.bot_token or not contacts.bot_admin_chat_id:
+async def _send_telegram_message(
+    db: AsyncSession,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+) -> None:
+    if not settings.bot_token:
         return
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{settings.bot_token}/sendMessage",
-                json={"chat_id": contacts.bot_admin_chat_id, "text": text[:4096]},
-            )
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.warning("admin_telegram_notification_failed: %s", exc)
+    destinations = await _telegram_destinations(db)
+    if not destinations:
+        return
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for chat_id in destinations:
+            try:
+                payload = {"chat_id": chat_id, "text": text[:4096]}
+                if reply_markup:
+                    payload["reply_markup"] = reply_markup
+                response = await client.post(
+                    f"https://api.telegram.org/bot{settings.bot_token}/sendMessage",
+                    json=payload,
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                details = ""
+                if isinstance(exc, httpx.HTTPStatusError):
+                    details = exc.response.text[:500]
+                logger.warning("admin_telegram_notification_failed chat_id=%s: %s %s", chat_id, exc, details)
 
 
 async def _send_telegram_receipt(
@@ -121,27 +181,37 @@ async def _send_telegram_receipt(
     filename: str,
     mime_type: str,
     content: bytes,
+    reply_markup: dict | None = None,
 ) -> None:
-    contacts = await get_admin_contacts(db)
-    if not settings.bot_token or not contacts.bot_admin_chat_id:
+    if not settings.bot_token:
+        return
+    destinations = await _telegram_destinations(db)
+    if not destinations:
         return
     method = "sendPhoto" if (mime_type or "").startswith("image/") else "sendDocument"
     field = "photo" if method == "sendPhoto" else "document"
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{settings.bot_token}/{method}",
-                data={"chat_id": contacts.bot_admin_chat_id, "caption": text[:1024]},
-                files={field: (filename or "receipt", content, mime_type or "application/octet-stream")},
-            )
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
-        logger.warning("admin_telegram_receipt_failed: %s", exc)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for chat_id in destinations:
+            try:
+                data = {"chat_id": chat_id, "caption": text[:1024]}
+                if reply_markup:
+                    data["reply_markup"] = json.dumps(reply_markup)
+                response = await client.post(
+                    f"https://api.telegram.org/bot{settings.bot_token}/{method}",
+                    data=data,
+                    files={field: (filename or "receipt", content, mime_type or "application/octet-stream")},
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                details = ""
+                if isinstance(exc, httpx.HTTPStatusError):
+                    details = exc.response.text[:500]
+                logger.warning("admin_telegram_receipt_failed chat_id=%s: %s %s", chat_id, exc, details)
 
 
 async def notify_payment_created(db: AsyncSession, payment: Payment) -> None:
     card = await _payment_card(db, payment, title="🧾 Новая покупка Freedom VPN")
-    await _send_telegram_message(db, card)
+    await _send_telegram_message(db, card, reply_markup=_payment_actions(payment))
     await _send_email(db, f"Новая покупка Freedom VPN #{payment.id}", card)
 
 
@@ -151,7 +221,14 @@ async def notify_payment_receipt(db: AsyncSession, payment: Payment) -> None:
     card = await _payment_card(db, payment, title="📎 Загружен чек Freedom VPN")
     filename = payment.receipt_filename or f"receipt-{payment.id}"
     mime_type = payment.receipt_mime_type or "application/octet-stream"
-    await _send_telegram_receipt(db, card, filename=filename, mime_type=mime_type, content=payment.receipt_data)
+    await _send_telegram_receipt(
+        db,
+        card,
+        filename=filename,
+        mime_type=mime_type,
+        content=payment.receipt_data,
+        reply_markup=_payment_actions(payment),
+    )
     await _send_email(
         db,
         f"Чек по платежу Freedom VPN #{payment.id}",

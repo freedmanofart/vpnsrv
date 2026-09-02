@@ -586,6 +586,16 @@ async def confirm_telegram_stars_payment(
         return response.json()
 
 
+async def update_payment_status(payment_id: int, status: str) -> dict:
+    async with api_client(base_url=API_URL, timeout=30.0) as client:
+        response = await client.post(
+            f"/payments/{payment_id}/status",
+            json={"status": status},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 async def attach_payment_receipt(payment_id: int, payload: dict) -> dict:
     async with api_client(base_url=API_URL, timeout=10.0) as client:
         response = await client.post(f"/payments/{payment_id}/receipt", json=payload)
@@ -1614,6 +1624,49 @@ async def telegram_stars_successful_payment_handler(message: Message):
             "Платёж Telegram Stars получен, но ключ не удалось выдать автоматически. "
             "Напишите в поддержку — мы проверим оплату и активируем доступ."
         )
+
+
+@router.callback_query(F.data.startswith("admin_pay:"))
+async def admin_payment_action_handler(callback: CallbackQuery):
+    if BOT_ADMIN_CHAT_ID and callback.from_user.id != BOT_ADMIN_CHAT_ID and callback.message.chat.id != BOT_ADMIN_CHAT_ID:
+        await callback.answer("Эта кнопка только для администратора.", show_alert=True)
+        return
+    try:
+        _, status, raw_payment_id = callback.data.split(":", 2)
+        payment_id = int(raw_payment_id)
+    except (ValueError, AttributeError):
+        await callback.answer("Некорректная кнопка платежа.", show_alert=True)
+        return
+    labels = {
+        "paid": "подтверждён",
+        "failed": "отмечен ошибкой",
+        "cancelled": "отменён",
+        "refunded": "возвращён",
+    }
+    if status not in labels:
+        await callback.answer("Неизвестный статус платежа.", show_alert=True)
+        return
+    try:
+        payment = await update_payment_status(payment_id, status)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:180] if exc.response is not None else "ошибка API"
+        logging.exception("Admin payment action failed")
+        await callback.answer(f"Не удалось изменить платёж: {detail}", show_alert=True)
+        return
+    except Exception:
+        logging.exception("Admin payment action failed")
+        await callback.answer("Не удалось изменить платёж. Проверьте API.", show_alert=True)
+        return
+    suffix = f"\n\n✅ Действие выполнено: платёж #{payment['id']} {labels[status]}."
+    try:
+        if callback.message.text:
+            await callback.message.edit_text((callback.message.text + suffix)[:4096])
+        elif callback.message.caption:
+            await callback.message.edit_caption((callback.message.caption + suffix)[:1024])
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await callback.answer(f"Платёж #{payment['id']} {labels[status]}")
 
 
 @router.message(ManualPaymentFlow.waiting_receipt, F.photo | F.document)

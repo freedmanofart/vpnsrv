@@ -3,6 +3,7 @@ import hmac
 import json
 import base64
 import binascii
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import ValidationError
@@ -18,6 +19,7 @@ from app.schemas.payment import (
     PaymentCreate,
     PaymentReceiptCreate,
     PaymentResponse,
+    PaymentStatusUpdate,
     PaymentWebhook,
     TelegramStarsPaid,
     TelegramStarsPaymentCreate,
@@ -162,6 +164,34 @@ async def confirm_telegram_stars_payment(
     if payment.user_id != data.user_id:
         raise HTTPException(status_code=409, detail="Payment user mismatch")
     return payment
+
+
+@router.post(
+    "/{payment_id}/status",
+    response_model=PaymentResponse,
+    dependencies=[Depends(require_api_access)],
+)
+async def update_payment_status_from_service(
+    payment_id: int,
+    data: PaymentStatusUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    payment = await db.get(Payment, payment_id)
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if not payment.provider_payment_id:
+        raise HTTPException(status_code=409, detail="Payment has no provider ID")
+    try:
+        return await process_payment_event(
+            db,
+            provider=payment.provider,
+            event_id=f"service-{payment.id}-{data.status}-{uuid4()}",
+            provider_payment_id=payment.provider_payment_id,
+            target_status=data.status,
+            payload={"details": {"source": "telegram-admin-button"}},
+        )
+    except PaymentError as exc:
+        raise _payment_error(exc) from exc
 
 
 @router.post(

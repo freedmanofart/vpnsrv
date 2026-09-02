@@ -417,6 +417,27 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, downloaded.status_code, downloaded.text)
         self.assertEqual(b"fake-receipt", downloaded.content)
 
+    async def test_service_can_update_payment_status_for_telegram_admin_button(self) -> None:
+        created = await self.client.post(
+            "/payments/manual",
+            headers=self.service_headers,
+            json={
+                "user_id": self.user_id,
+                "plan_id": 1,
+                "node_id": self.node_id,
+                "method_code": "sber_qr",
+                "idempotency_key": "telegram-admin-button-test",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        updated = await self.client.post(
+            f"/payments/{created.json()['id']}/status",
+            headers=self.service_headers,
+            json={"status": "failed"},
+        )
+        self.assertEqual(200, updated.status_code, updated.text)
+        self.assertEqual("failed", updated.json()["status"])
+
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:
             subscription = (
