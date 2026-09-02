@@ -202,32 +202,41 @@ tailnet используется Tailscale Serve, а для публикации
 интернет — Tailscale Funnel:
 
 ```bash
-tailscale serve --bg --https=443 http://127.0.0.1:8000
-tailscale funnel --bg --yes 8000
+tailscale funnel --bg --yes --https=443 http://127.0.0.1:8000
 ```
 
 Переменные для текущего мастера:
 
 ```dotenv
-PUBLIC_BASE_URL=https://fedora.taile485ac.ts.net
-WEB_CABINET_URL=https://fedora.taile485ac.ts.net/cabinet
+PUBLIC_BASE_URL=https://freedomvpn.taile485ac.ts.net
+WEB_CABINET_URL=https://freedomvpn.taile485ac.ts.net/cabinet
 ```
 
 При Serve адрес доступен только устройствам того же tailnet. При Funnel он
 доступен публично; сертификат выпускается и обновляется самим Tailscale без
 certbot и без файлов сертификата в приложении.
 Tailscale-IP мастера — `100.102.21.123`, но TLS-сертификат выпущен на его
-MagicDNS-имя `fedora.taile485ac.ts.net`. Поэтому в Telegram используется имя:
-оно проходит проверку HTTPS и позволяет открыть кабинет как Web App. Обращение
-к `https://100.102.21.123` приведёт к ошибке соответствия сертификата.
+MagicDNS-имя `freedomvpn.taile485ac.ts.net`. Поэтому в Telegram используется
+имя: оно проходит проверку HTTPS и позволяет открыть кабинет как Web App.
+Обращение к `https://100.102.21.123` приведёт к ошибке соответствия
+сертификата.
+
+Чтобы Funnel автоматически поднимался после перезагрузки или сброса состояния
+Tailscale, установите unit из репозитория:
+
+```bash
+sudo install -m 0644 deploy/systemd/vpn-tailscale-funnel.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vpn-tailscale-funnel.service
+```
 
 Проверка и отключение только этого listener:
 
 ```bash
 tailscale serve status
-tailscale serve --https=443 off
 tailscale funnel status
-tailscale funnel --https=443 off
+systemctl status vpn-tailscale-funnel.service
+systemctl restart vpn-tailscale-funnel.service
 ```
 
 Если сертификат Tailscale нужен отдельному nginx или другому файловому
