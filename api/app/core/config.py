@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     background_jobs_enabled: bool = False
     lifecycle_interval_seconds: int = 60
     lifecycle_advisory_lock_key: int = 846_202_608
+    subscription_expiration_reminder_days: int = Field(default=3, ge=1, le=30)
     worker_run_once: bool = False
     threexui_api_token: str = ""
     threexui_verify_tls: bool = True

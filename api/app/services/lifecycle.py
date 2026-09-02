@@ -8,6 +8,7 @@ from app.services.vpn_expiration import (
     expire_subscriptions,
     expire_vpn_clients,
 )
+from app.services.notifications import notify_subscription_email_reminders
 
 
 @dataclass
@@ -15,10 +16,14 @@ class LifecycleResult:
     expired_subscriptions: int
     revoked_clients: int
     expired_debug_sessions: int
+    subscription_expiring_emails: int
+    subscription_expired_emails: int
+    subscription_email_failures: int
     reconciliation: list[ReconciliationReport]
 
 
 async def run_lifecycle_once(db: AsyncSession) -> LifecycleResult:
+    subscription_emails = await notify_subscription_email_reminders(db)
     expired_subscriptions = await expire_subscriptions(db)
     revoked_clients = await expire_vpn_clients(db)
     reconciliation = await reconcile_all_nodes(db)
@@ -29,5 +34,8 @@ async def run_lifecycle_once(db: AsyncSession) -> LifecycleResult:
         expired_subscriptions=expired_subscriptions,
         revoked_clients=revoked_clients,
         expired_debug_sessions=expired_debug,
+        subscription_expiring_emails=subscription_emails["subscription_expiring_emails"],
+        subscription_expired_emails=subscription_emails["subscription_expired_emails"],
+        subscription_email_failures=subscription_emails["subscription_email_failures"],
         reconciliation=reconciliation,
     )

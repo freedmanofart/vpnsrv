@@ -1,19 +1,28 @@
 import asyncio
 import logging
 import smtplib
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.db.models.audit import AuditLog
 from app.db.models.payment import Payment
 from app.db.models.payment_method import PaymentMethod
 from app.db.models.plan import Plan
+from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.vpn_node import VPNNode
-from app.services.email import _send
+from app.services.audit import write_audit
+from app.services.email import (
+    EmailDeliveryError,
+    _send,
+    send_subscription_expired,
+    send_subscription_expiring,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -131,3 +140,153 @@ async def notify_payment_receipt(db: AsyncSession, payment: Payment) -> None:
         card,
         attachment=(filename, mime_type, payment.receipt_data),
     )
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+async def _notification_was_sent(
+    db: AsyncSession,
+    *,
+    action: str,
+    subscription_id: int,
+) -> bool:
+    return bool(
+        await db.scalar(
+            select(
+                exists().where(
+                    AuditLog.action == action,
+                    AuditLog.resource_type == "subscription",
+                    AuditLog.resource_id == str(subscription_id),
+                    AuditLog.result == "success",
+                )
+            )
+        )
+    )
+
+
+async def notify_subscription_email_reminders(db: AsyncSession) -> dict[str, int]:
+    now = datetime.now(timezone.utc)
+    reminder_until = now + timedelta(days=settings.subscription_expiration_reminder_days)
+    sent_expiring = 0
+    sent_expired = 0
+    failed = 0
+
+    expiring_rows = await db.execute(
+        select(Subscription, User, Plan)
+        .join(User, User.id == Subscription.user_id)
+        .join(Plan, Plan.id == Subscription.plan_id)
+        .where(
+            Subscription.status == "active",
+            Subscription.expires_at > now,
+            Subscription.expires_at <= reminder_until,
+            User.email.is_not(None),
+        )
+    )
+    expired_rows = await db.execute(
+        select(Subscription, User, Plan)
+        .join(User, User.id == Subscription.user_id)
+        .join(Plan, Plan.id == Subscription.plan_id)
+        .where(
+            or_(
+                Subscription.status == "expired",
+                (
+                    (Subscription.status == "active")
+                    & (Subscription.expires_at <= now)
+                ),
+            ),
+            User.email.is_not(None),
+        )
+    )
+
+    for subscription, user, plan in expiring_rows:
+        if await _notification_was_sent(
+            db,
+            action="email.subscription_expiring.send",
+            subscription_id=subscription.id,
+        ):
+            continue
+        expires_at = _aware(subscription.expires_at)
+        days_remaining = max(1, int(((expires_at - now).total_seconds() + 86399) // 86400))
+        try:
+            await send_subscription_expiring(
+                user.email,
+                plan_name=plan.name,
+                expires_at=expires_at.strftime("%Y-%m-%d %H:%M"),
+                days_remaining=days_remaining,
+            )
+        except EmailDeliveryError as exc:
+            failed += 1
+            logger.warning("subscription_expiring_email_failed: %s", exc)
+            await write_audit(
+                db,
+                action="email.subscription_expiring.send",
+                result="failure",
+                resource_type="subscription",
+                resource_id=subscription.id,
+                details={"email": user.email, "expires_at": expires_at.isoformat()},
+                commit=False,
+            )
+            continue
+        sent_expiring += 1
+        await write_audit(
+            db,
+            action="email.subscription_expiring.send",
+            result="success",
+            resource_type="subscription",
+            resource_id=subscription.id,
+            details={
+                "email": user.email,
+                "expires_at": expires_at.isoformat(),
+                "days_remaining": days_remaining,
+            },
+            commit=False,
+        )
+
+    for subscription, user, plan in expired_rows:
+        if await _notification_was_sent(
+            db,
+            action="email.subscription_expired.send",
+            subscription_id=subscription.id,
+        ):
+            continue
+        expires_at = _aware(subscription.expires_at)
+        try:
+            await send_subscription_expired(
+                user.email,
+                plan_name=plan.name,
+                expires_at=expires_at.strftime("%Y-%m-%d %H:%M"),
+            )
+        except EmailDeliveryError as exc:
+            failed += 1
+            logger.warning("subscription_expired_email_failed: %s", exc)
+            await write_audit(
+                db,
+                action="email.subscription_expired.send",
+                result="failure",
+                resource_type="subscription",
+                resource_id=subscription.id,
+                details={"email": user.email, "expires_at": expires_at.isoformat()},
+                commit=False,
+            )
+            continue
+        sent_expired += 1
+        await write_audit(
+            db,
+            action="email.subscription_expired.send",
+            result="success",
+            resource_type="subscription",
+            resource_id=subscription.id,
+            details={"email": user.email, "expires_at": expires_at.isoformat()},
+            commit=False,
+        )
+
+    if sent_expiring or sent_expired or failed:
+        await db.commit()
+
+    return {
+        "subscription_expiring_emails": sent_expiring,
+        "subscription_expired_emails": sent_expired,
+        "subscription_email_failures": failed,
+    }
