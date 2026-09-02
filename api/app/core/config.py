@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +20,7 @@ class Settings(BaseSettings):
     threexui_verify_tls: bool = True
     public_base_url: str = "http://localhost:8000"
     cabinet_token_ttl_days: int = 365
+    cabinet_email_code_ttl_minutes: int = Field(default=10, ge=1, le=60)
     cabinet_allow_temporary_registration: bool = False
     smtp_host: str = ""
     smtp_port: int = 587

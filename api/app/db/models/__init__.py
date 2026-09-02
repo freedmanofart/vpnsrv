@@ -14,6 +14,7 @@ from app.db.models.audit import (
     DebugSession,
 )
 from app.db.models.cabinet_access import CabinetAccessToken
+from app.db.models.cabinet_login_code import CabinetLoginCode
 
 __all__ = [
     "User",
@@ -31,4 +32,5 @@ __all__ = [
     "ClientDevice",
     "DebugSession",
     "CabinetAccessToken",
+    "CabinetLoginCode",
 ]
