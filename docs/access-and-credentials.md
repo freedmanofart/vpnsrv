@@ -35,6 +35,36 @@ ADMIN_USERNAME=<admin-login>
 ADMIN_PASSWORD=<long-random-password>
 ```
 
+## Master 3x-ui через SSH proxy
+
+3x-ui master слушает внутренний порт сервера и открывается оператору через
+local-forward. Это отдельный доступ от VPN Admin: VPN Admin управляет
+пользователями/платежами, а 3x-ui показывает фактические inbound, клиентов и
+ноды Xray.
+
+Откройте туннель:
+
+```bash
+ssh -L 2222:127.0.0.1:41026 root@freedomvpn
+```
+
+Затем в браузере:
+
+```text
+http://localhost:2222/<private-3x-ui-base-path>/panel/clients
+```
+
+Назначение proxy:
+
+- не публиковать панель 3x-ui в интернет;
+- подключаться к master так же, как к внутренним нодам через SSH;
+- безопасно смотреть клиентов, inbound и состояние Xray;
+- отделить операторский доступ к панели от публичного сайта
+  `https://freedomvpn.taile485ac.ts.net`.
+
+Туннель живёт только пока запущена SSH-команда. Если соединение закрыто,
+`localhost:2222` перестанет открываться.
+
 ## PostgreSQL
 
 Используется один внешний контейнер `postgres` (`postgres:16-alpine`) и
