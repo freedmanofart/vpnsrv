@@ -50,6 +50,8 @@ API_URL = os.getenv("API_URL", "http://api:8000")
 SERVICE_API_TOKEN = os.environ["SERVICE_API_TOKEN"]
 TELEGRAM_CHANNEL_URL = content_link("channel")
 SUPPORT_URL = content_link("support")
+PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-09-02-66"
+TERMS_OF_USE_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-09-02-30"
 YOOMONEY_PAYMENT_URL = content_link("payment")
 TRY_PAYMENT_URL = content_link("try_payment")
 TRY_PAYMENT_AMOUNT_RUB = "50"
@@ -104,10 +106,9 @@ def main_menu() -> InlineKeyboardMarkup:
         if TELEGRAM_CHANNEL_URL
         else InlineKeyboardButton(text="📣 Наш канал", callback_data="channel_info")
     )
-    support_button = (
-        InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)
-        if SUPPORT_URL
-        else InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
+    support_button = InlineKeyboardButton(
+        text="@Freedom_VPN_Support",
+        callback_data="support_info",
     )
     site_button = (
         InlineKeyboardButton(text="🌐 Сайт", url=WEB_SITE_URL)
@@ -135,7 +136,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
-            [KeyboardButton(text="📖 Инструкции"), KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text="📖 Инструкции"), KeyboardButton(text="@Freedom_VPN_Support")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -153,6 +154,23 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [site, InlineKeyboardButton(text="✉️ Email", callback_data="cabinet_email")],
         ],
+    )
+
+
+def support_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    if SUPPORT_URL:
+        rows.append([InlineKeyboardButton(text="Написать в поддержку", url=SUPPORT_URL)])
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def policy_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Политика конфиденциальности", url=PRIVACY_POLICY_URL)],
+            [InlineKeyboardButton(text="Пользовательское соглашение", url=TERMS_OF_USE_URL)],
+        ]
     )
 
 
@@ -748,6 +766,15 @@ async def help_command_handler(message: Message):
     )
 
 
+@router.message(Command("policy"))
+async def policy_command_handler(message: Message):
+    await message.answer(
+        content_text("policy"),
+        reply_markup=policy_keyboard(),
+        parse_mode="HTML",
+    )
+
+
 @router.message(F.text.in_({"💳 Приобрести подписку", "💳 Оплатить"}))
 async def popup_buy_handler(message: Message, state: FSMContext):
     await buy_command_handler(message, state)
@@ -814,16 +841,12 @@ async def popup_try_handler(message: Message):
     await show_try_payment(message)
 
 
-@router.message(F.text == "🆘 Поддержка")
+@router.message(F.text.in_({"🆘 Поддержка", "@Freedom_VPN_Support"}))
 async def popup_support_handler(message: Message):
-    if SUPPORT_URL:
-        await message.answer(
-            f'🆘 <a href="{html.escape(SUPPORT_URL)}">Открыть поддержку</a>',
-            parse_mode="HTML",
-            reply_markup=popup_menu(),
-        )
-    else:
-        await message.answer(content_text("support_missing"), reply_markup=popup_menu())
+    await message.answer(
+        content_text("support"),
+        reply_markup=support_keyboard(),
+    )
 
 
 @router.message(F.text == "⬅️ Главное меню")
@@ -1002,7 +1025,8 @@ async def channel_info_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "support_info")
 async def support_info_handler(callback: CallbackQuery):
-    await callback.answer(content_text("support_missing"), show_alert=True)
+    await show_screen(callback, content_text("support"), support_keyboard())
+    await callback.answer()
 
 
 def access_node_keyboard(nodes: list[dict], prefix: str) -> InlineKeyboardMarkup:
@@ -1714,6 +1738,7 @@ async def main():
             BotCommand(command="vpn", description="Управление подпиской"),
             BotCommand(command="buy", description="Купить VPN"),
             BotCommand(command="help", description="Инструкция"),
+            BotCommand(command="policy", description="Документы"),
         ]
     )
     if WEB_CABINET_URL.startswith("https://"):
