@@ -118,7 +118,7 @@ def main_menu() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn"), InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
         [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
-        [InlineKeyboardButton(text="📖 Инструкции", callback_data="instructions"), support_button],
+        [InlineKeyboardButton(text="ℹ️ Информация", callback_data="information"), support_button],
         [channel_button, site_button],
     ]
     extra_buttons = [
@@ -136,7 +136,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
-            [KeyboardButton(text="📖 Инструкции"), KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -152,7 +152,7 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [site, InlineKeyboardButton(text="✉️ Email", callback_data="cabinet_email")],
+            [site, InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
         ],
     )
 
@@ -772,7 +772,7 @@ async def buy_command_handler(message: Message, state: FSMContext):
 async def help_command_handler(message: Message):
     await message.answer(
         content_text("instructions"),
-        reply_markup=main_menu(),
+        reply_markup=policy_keyboard(),
         parse_mode="HTML",
     )
 
@@ -836,7 +836,7 @@ async def cabinet_email_handler(message: Message, state: FSMContext):
         await message.answer("❌ Не удалось связаться с сервером.", reply_markup=popup_menu())
 
 
-@router.message(F.text == "📖 Инструкции")
+@router.message(F.text.in_({"ℹ️ Информация", "📖 Инструкции"}))
 async def popup_help_handler(message: Message):
     await help_command_handler(message)
 
@@ -986,9 +986,9 @@ async def reply_plan_handler(message: Message, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "instructions")
+@router.callback_query(F.data.in_({"information", "instructions"}))
 async def instructions_handler(callback: CallbackQuery):
-    await show_screen(callback, content_text("instructions"), back_menu())
+    await show_screen(callback, content_text("instructions"), policy_keyboard())
     await callback.answer()
 
 
@@ -1745,7 +1745,7 @@ async def main():
             BotCommand(command="menu", description="Главное меню"),
             BotCommand(command="vpn", description="Управление подпиской"),
             BotCommand(command="buy", description="Купить VPN"),
-            BotCommand(command="help", description="Инструкция"),
+            BotCommand(command="help", description="Информация"),
         ]
     )
     if WEB_CABINET_URL.startswith("https://"):
