@@ -33,6 +33,7 @@ services:
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      VPN_BACKUP_DIR: ${VPN_BACKUP_DIR:-/var/backups/vpn-service}
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -41,6 +42,7 @@ services:
       - ./api/app:/app/app
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
+      - /var/backups/vpn-service:/var/backups/vpn-service
 
     ports:
       - "127.0.0.1:8000:8000"

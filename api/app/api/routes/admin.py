@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
 import logging
+import os
+from pathlib import Path
 import smtplib
+import subprocess
 import time
 from urllib.parse import quote
 from uuid import uuid4
@@ -81,6 +84,8 @@ HOST_COMMANDS = {
     "tailscale_funnel": "tailscale funnel status",
 }
 
+BACKUP_DIR = Path(os.getenv("VPN_BACKUP_DIR", "/var/backups/vpn-service"))
+
 
 async def _public_probe(path: str = "/", timeout: float = 5.0) -> dict:
     url = f"{settings.public_base_url.rstrip('/')}{path}"
@@ -89,14 +94,14 @@ async def _public_probe(path: str = "/", timeout: float = 5.0) -> dict:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.get(url)
         return {
-            "name": f"Public {path}",
+            "name": f"Сайт {path}",
             "status": "online" if response.status_code < 500 else "degraded",
             "details": f"HTTP {response.status_code}",
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
     except httpx.HTTPError as exc:
         return {
-            "name": f"Public {path}",
+            "name": f"Сайт {path}",
             "status": "offline",
             "details": str(exc),
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
@@ -182,6 +187,77 @@ def _host_script_result(script_id: str) -> dict:
         "message": "Эта операция должна выполняться на SSH-хосте, а не внутри API-контейнера.",
         "command": f"cd /home/freedman/vpn-service && {command}",
     }
+
+
+def _run_command(command: list[str], timeout: int = 120) -> dict:
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "status": "failed",
+            "output": str(exc),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    output = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part)
+    return {
+        "status": "done" if completed.returncode == 0 else "failed",
+        "exit_code": completed.returncode,
+        "output": output[-6000:] if output else "",
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+    }
+
+
+def _backup_files() -> list[dict]:
+    if not BACKUP_DIR.exists():
+        return []
+    rows = []
+    for item in sorted(BACKUP_DIR.glob("vpn-db-*.dump"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+        stat = item.stat()
+        rows.append(
+            {
+                "name": item.name,
+                "path": str(item),
+                "size_bytes": stat.st_size,
+                "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+    return rows
+
+
+def _pg_url() -> str:
+    return settings.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _create_postgres_backup() -> dict:
+    BACKUP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dump_path = BACKUP_DIR / f"vpn-db-{timestamp}.dump"
+    result = _run_command(["pg_dump", _pg_url(), "-Fc", "-f", str(dump_path)], timeout=180)
+    if result["status"] == "done":
+        dump_path.chmod(0o600)
+        verify = _run_command(["pg_restore", "--list", str(dump_path)], timeout=60)
+        result["dump"] = str(dump_path)
+        result["verify"] = verify
+        result["backups"] = _backup_files()
+    return result
+
+
+def _verify_latest_postgres_backup() -> dict:
+    backups = _backup_files()
+    if not backups:
+        return {"status": "failed", "output": f"Backup-файлы не найдены в {BACKUP_DIR}"}
+    latest = backups[0]["path"]
+    result = _run_command(["pg_restore", "--list", latest], timeout=60)
+    result["dump"] = latest
+    result["backups"] = backups
+    return result
 
 
 def _aware(value: datetime) -> datetime:
@@ -306,8 +382,9 @@ async def overview(db: AsyncSession = Depends(get_db)):
             {"id": "smtp_check", "name": "Проверить SMTP-логин и отправку писем", "command": "выполняется из админки", "runnable": True},
             {"id": "online_apis", "name": "Все online-тесты ключевых API", "command": "scripts/check_online_apis.sh", "runnable": True},
             {"id": "mail_chain_recover", "name": "Проверить почту и быстро переподнять api/bot", "command": "scripts/check_mail_chain.sh", "runnable": True},
-            {"id": "backup_postgres", "name": "Создать backup PostgreSQL и конфигурации", "command": "scripts/backup.sh", "runnable": True},
-            {"id": "verify_latest_backup", "name": "Проверить последний backup восстановлением во временную БД", "command": "scripts/verify_backup.sh /path/to/vpn-db-TIMESTAMP.dump", "runnable": True},
+            {"id": "backup_postgres", "name": "Создать PostgreSQL backup сейчас", "command": "pg_dump -Fc в /var/backups/vpn-service", "runnable": True},
+            {"id": "verify_latest_backup", "name": "Проверить последний PostgreSQL backup", "command": "pg_restore --list для последнего dump", "runnable": True},
+            {"id": "list_backups", "name": "Показать последние PostgreSQL backup-файлы", "command": "ls -lh /var/backups/vpn-service/vpn-db-*.dump", "runnable": True},
             {"id": "restore_postgres", "name": "Восстановить PostgreSQL из backup", "command": "scripts/restore_postgres.sh /var/backups/vpn-service/vpn-db-TIMESTAMP.dump", "runnable": True},
             {"id": "tailscale_funnel", "name": "Проверить Tailscale Funnel", "command": "tailscale funnel status", "runnable": True},
             {"name": "Обновить Tailscale certificate", "command": "systemctl start vpn-tailscale-cert.service", "runnable": False},
@@ -338,6 +415,8 @@ async def health_dashboard(db: AsyncSession = Depends(get_db)):
         checks.append({"name": "PostgreSQL", "status": "offline", "details": str(exc)})
     public_results = await asyncio.gather(
         _public_probe("/"),
+        _public_probe("/cabinet"),
+        _public_probe("/admin"),
         _public_probe("/plans"),
         _public_probe("/payment-methods"),
     )
@@ -357,6 +436,12 @@ async def run_admin_script(script_id: str, db: AsyncSession = Depends(get_db)):
         return await health_dashboard(db)
     if script_id == "smtp_check":
         return {"status": "done", "checks": [await asyncio.to_thread(_check_smtp)]}
+    if script_id == "backup_postgres":
+        return await asyncio.to_thread(_create_postgres_backup)
+    if script_id == "verify_latest_backup":
+        return await asyncio.to_thread(_verify_latest_postgres_backup)
+    if script_id == "list_backups":
+        return {"status": "done", "backups": _backup_files()}
     return _host_script_result(script_id)
 
 

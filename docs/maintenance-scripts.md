@@ -56,6 +56,8 @@ web-админку.
 - API-контейнера;
 - PostgreSQL (`SELECT 1`);
 - публичного сайта через `PUBLIC_BASE_URL`;
+- web-кабинета `/cabinet`;
+- админки `/admin`;
 - `/plans` и `/payment-methods`;
 - SMTP-логина для писем web-кабинета;
 - каждой активной VPN-ноды через её `api_address` master 3x-ui.
@@ -64,6 +66,9 @@ web-админку.
 помечается как внутренний/proxy SSH адрес. Для ноды важен именно `api_address`
 из `vpn_node_configs`: health проверяет этот VPN API и обновляет
 `health_status`, `latency_ms`, `last_seen_at` у ноды.
+
+`401` на `/admin` или защищённых API считается рабочим ответом: endpoint
+доступен снаружи, а авторизация корректно закрывает данные.
 
 ## Быстрая проверка почты и переподнятие цепочки
 
@@ -197,6 +202,16 @@ python3 scripts/configctl.py apply --services api worker
 мастер-узлом 3x-ui.
 
 ## Backup
+
+В `/admin` → `Скрипты` есть активные кнопки:
+
+- `Создать PostgreSQL backup сейчас` — запускает `pg_dump -Fc` из
+  API-контейнера и кладёт dump в `/var/backups/vpn-service`;
+- `Проверить последний PostgreSQL backup` — запускает `pg_restore --list`;
+- `Показать последние PostgreSQL backup-файлы` — выводит список dump-файлов.
+
+Для этого API-контейнер имеет `postgresql-client` и volume
+`/var/backups/vpn-service:/var/backups/vpn-service`.
 
 `backup.sh` создаёт два вида backup за один запуск:
 
