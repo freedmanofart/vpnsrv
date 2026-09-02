@@ -37,6 +37,7 @@ async def run_locked_cycle() -> bool:
                     "subscription_expiring_emails": result.subscription_expiring_emails,
                     "subscription_expired_emails": result.subscription_expired_emails,
                     "subscription_email_failures": result.subscription_email_failures,
+                    "subscription_email_skipped": result.subscription_email_skipped,
                     "xray_restored": restored,
                     "xray_removed": removed,
                     "xray_errors": errors,

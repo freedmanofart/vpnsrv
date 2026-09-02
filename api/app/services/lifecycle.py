@@ -19,6 +19,7 @@ class LifecycleResult:
     subscription_expiring_emails: int
     subscription_expired_emails: int
     subscription_email_failures: int
+    subscription_email_skipped: int
     reconciliation: list[ReconciliationReport]
 
 
@@ -37,5 +38,6 @@ async def run_lifecycle_once(db: AsyncSession) -> LifecycleResult:
         subscription_expiring_emails=subscription_emails["subscription_expiring_emails"],
         subscription_expired_emails=subscription_emails["subscription_expired_emails"],
         subscription_email_failures=subscription_emails["subscription_email_failures"],
+        subscription_email_skipped=subscription_emails["subscription_email_skipped"],
         reconciliation=reconciliation,
     )

@@ -166,12 +166,32 @@ async def _notification_was_sent(
     )
 
 
+async def _notification_was_recorded(
+    db: AsyncSession,
+    *,
+    action: str,
+    subscription_id: int,
+) -> bool:
+    return bool(
+        await db.scalar(
+            select(
+                exists().where(
+                    AuditLog.action == action,
+                    AuditLog.resource_type == "subscription",
+                    AuditLog.resource_id == str(subscription_id),
+                )
+            )
+        )
+    )
+
+
 async def notify_subscription_email_reminders(db: AsyncSession) -> dict[str, int]:
     now = datetime.now(timezone.utc)
     reminder_until = now + timedelta(days=settings.subscription_expiration_reminder_days)
     sent_expiring = 0
     sent_expired = 0
     failed = 0
+    skipped = 0
 
     expiring_rows = await db.execute(
         select(Subscription, User, Plan)
@@ -181,7 +201,6 @@ async def notify_subscription_email_reminders(db: AsyncSession) -> dict[str, int
             Subscription.status == "active",
             Subscription.expires_at > now,
             Subscription.expires_at <= reminder_until,
-            User.email.is_not(None),
         )
     )
     expired_rows = await db.execute(
@@ -196,18 +215,39 @@ async def notify_subscription_email_reminders(db: AsyncSession) -> dict[str, int
                     & (Subscription.expires_at <= now)
                 ),
             ),
-            User.email.is_not(None),
         )
     )
 
     for subscription, user, plan in expiring_rows:
+        expires_at = _aware(subscription.expires_at)
+        if not user.email:
+            if not await _notification_was_recorded(
+                db,
+                action="email.subscription_expiring.skip",
+                subscription_id=subscription.id,
+            ):
+                skipped += 1
+                await write_audit(
+                    db,
+                    action="email.subscription_expiring.skip",
+                    result="skipped",
+                    resource_type="subscription",
+                    resource_id=subscription.id,
+                    details={
+                        "reason": "user_email_missing",
+                        "user_id": user.id,
+                        "telegram_id": user.telegram_id,
+                        "expires_at": expires_at.isoformat(),
+                    },
+                    commit=False,
+                )
+            continue
         if await _notification_was_sent(
             db,
             action="email.subscription_expiring.send",
             subscription_id=subscription.id,
         ):
             continue
-        expires_at = _aware(subscription.expires_at)
         days_remaining = max(1, int(((expires_at - now).total_seconds() + 86399) // 86400))
         try:
             await send_subscription_expiring(
@@ -225,7 +265,12 @@ async def notify_subscription_email_reminders(db: AsyncSession) -> dict[str, int
                 result="failure",
                 resource_type="subscription",
                 resource_id=subscription.id,
-                details={"email": user.email, "expires_at": expires_at.isoformat()},
+                details={
+                    "email": user.email,
+                    "error": str(exc),
+                    "expires_at": expires_at.isoformat(),
+                    "user_id": user.id,
+                },
                 commit=False,
             )
             continue
@@ -240,18 +285,41 @@ async def notify_subscription_email_reminders(db: AsyncSession) -> dict[str, int
                 "email": user.email,
                 "expires_at": expires_at.isoformat(),
                 "days_remaining": days_remaining,
+                "user_id": user.id,
             },
             commit=False,
         )
 
     for subscription, user, plan in expired_rows:
+        expires_at = _aware(subscription.expires_at)
+        if not user.email:
+            if not await _notification_was_recorded(
+                db,
+                action="email.subscription_expired.skip",
+                subscription_id=subscription.id,
+            ):
+                skipped += 1
+                await write_audit(
+                    db,
+                    action="email.subscription_expired.skip",
+                    result="skipped",
+                    resource_type="subscription",
+                    resource_id=subscription.id,
+                    details={
+                        "reason": "user_email_missing",
+                        "user_id": user.id,
+                        "telegram_id": user.telegram_id,
+                        "expires_at": expires_at.isoformat(),
+                    },
+                    commit=False,
+                )
+            continue
         if await _notification_was_sent(
             db,
             action="email.subscription_expired.send",
             subscription_id=subscription.id,
         ):
             continue
-        expires_at = _aware(subscription.expires_at)
         try:
             await send_subscription_expired(
                 user.email,
@@ -267,7 +335,12 @@ async def notify_subscription_email_reminders(db: AsyncSession) -> dict[str, int
                 result="failure",
                 resource_type="subscription",
                 resource_id=subscription.id,
-                details={"email": user.email, "expires_at": expires_at.isoformat()},
+                details={
+                    "email": user.email,
+                    "error": str(exc),
+                    "expires_at": expires_at.isoformat(),
+                    "user_id": user.id,
+                },
                 commit=False,
             )
             continue
@@ -278,15 +351,20 @@ async def notify_subscription_email_reminders(db: AsyncSession) -> dict[str, int
             result="success",
             resource_type="subscription",
             resource_id=subscription.id,
-            details={"email": user.email, "expires_at": expires_at.isoformat()},
+            details={
+                "email": user.email,
+                "expires_at": expires_at.isoformat(),
+                "user_id": user.id,
+            },
             commit=False,
         )
 
-    if sent_expiring or sent_expired or failed:
+    if sent_expiring or sent_expired or failed or skipped:
         await db.commit()
 
     return {
         "subscription_expiring_emails": sent_expiring,
         "subscription_expired_emails": sent_expired,
         "subscription_email_failures": failed,
+        "subscription_email_skipped": skipped,
     }

@@ -76,6 +76,7 @@
 Журнал:
 
 - audit action `email.subscription_expiring.send`
+- если у пользователя нет email: `email.subscription_expiring.skip` с причиной `user_email_missing`
 
 ### Услуга закончилась
 
@@ -99,6 +100,7 @@
 Журнал:
 
 - audit action `email.subscription_expired.send`
+- если у пользователя нет email: `email.subscription_expired.skip` с причиной `user_email_missing`
 
 ## Админские уведомления
 
@@ -152,18 +154,20 @@ Email-тема:
 
 Email-уведомления по окончанию подписок защищены от повторной отправки через `audit_logs`.
 
-Если письмо отправлено успешно, worker больше не отправляет такой же тип письма для этой подписки. Если отправка завершилась ошибкой, в audit пишется failure, и worker попробует снова в следующем цикле.
+Если письмо отправлено успешно, worker больше не отправляет такой же тип письма для этой подписки. Если у пользователя нет email, worker пишет `skipped` и тоже не повторяет этот пропуск каждый цикл. Если отправка завершилась ошибкой, в audit пишется failure, и worker попробует снова в следующем цикле.
 
 ## Где смотреть историю
 
 Историю можно смотреть в админке:
 
 - VPN Admin -> Audit
-- VPN Admin -> Email logs, если таблица отображает последние email-события из текущей сборки админки.
+- VPN Admin -> Email logs
 
 Основные action-коды:
 
 - `email.cabinet_code.send`
 - `email.subscription_expiring.send`
+- `email.subscription_expiring.skip`
 - `email.subscription_expired.send`
+- `email.subscription_expired.skip`
 - `lifecycle.cycle`

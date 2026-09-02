@@ -383,9 +383,9 @@ async def overview(db: AsyncSession = Depends(get_db)):
     audit_logs = audit_result.scalars().all()
     email_result = await db.execute(
         select(AuditLog)
-        .where(AuditLog.action == "email.cabinet_code.send")
+        .where(AuditLog.action.like("email.%"))
         .order_by(AuditLog.id.desc())
-        .limit(100)
+        .limit(200)
     )
     email_logs = email_result.scalars().all()
     config_result = await db.execute(
@@ -475,7 +475,24 @@ async def overview(db: AsyncSession = Depends(get_db)):
             {"name": "VPN Admin", "url": f"{settings.public_base_url.rstrip('/')}/admin"},
             *[{"name": f"VPN API / Master 3x-ui #{index + 1}", "url": url, "note": "Внутренний/proxy SSH адрес"} for index, url in enumerate(xui_links)],
         ],
-        "email_logs": [{"id": x.id, "created_at": x.created_at, "user_id": x.resource_id, "email": (x.details or {}).get("email"), "result": x.result, "event": (x.details or {}).get("event_type"), "error": (x.details or {}).get("error"), "expires_at": (x.details or {}).get("expires_at")} for x in email_logs],
+        "email_logs": [
+            {
+                "id": x.id,
+                "created_at": x.created_at,
+                "action": x.action,
+                "subscription_id": x.resource_id if x.resource_type == "subscription" else None,
+                "user_id": (x.details or {}).get("user_id") or (x.resource_id if x.resource_type == "user" else None),
+                "telegram_id": (x.details or {}).get("telegram_id"),
+                "email": (x.details or {}).get("email"),
+                "result": x.result,
+                "reason": (x.details or {}).get("reason"),
+                "event": (x.details or {}).get("event_type"),
+                "error": (x.details or {}).get("error"),
+                "expires_at": (x.details or {}).get("expires_at"),
+                "days_remaining": (x.details or {}).get("days_remaining"),
+            }
+            for x in email_logs
+        ],
         "debug": [{"id": x.id, "created_by": x.created_by, "reason": x.reason, "status": x.status, "expires_at": x.expires_at} for x in debug_sessions],
         "audit": [{"id": x.id, "created_at": x.created_at, "actor": f"{x.actor_type}:{x.actor_id or '-'}", "action": x.action, "resource": f"{x.resource_type or '-'}:{x.resource_id or '-'}", "result": x.result, "node_id": x.node_id, "sensitive": x.sensitive, "details": x.details} for x in audit_logs],
     }
@@ -974,7 +991,7 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="payment_methods" class="hidden"><h2>Способы оплаты</h2><form onsubmit="createPaymentMethod(event)"><input name="code" placeholder="Код: sber_qr" required><input name="name" placeholder="Название кнопки" required><input name="url" placeholder="Ссылка на QR или реквизиты/телефон"><input name="sort_order" type="number" value="100" required><button>Добавить способ</button></form><p>Для Сбербанка, Т-Банка и перевода по телефону поле URL используется как ссылка на QR или текст реквизитов. Порядок и активность управляют кнопками Telegram.</p><div class="table"></div></section>
 <section id="devices" class="hidden"><h2>Устройства</h2><div class="table"></div></section>
 <section id="login_codes" class="hidden"><h2>Коды входа в web-кабинет</h2><p class="bad">Коды дают доступ к аккаунту до истечения срока. Не пересылайте их пользователям в открытых чатах без проверки владельца.</p><div class="table"></div></section>
-<section id="email_logs" class="hidden"><h2>Email-логи</h2><p class="muted">Последние отправки почтовых кодов: успехи и ошибки SMTP.</p><div class="table"></div></section>
+<section id="email_logs" class="hidden"><h2>Email-логи</h2><p class="muted">Последние почтовые уведомления: коды входа, рассылки по подпискам, ошибки SMTP и пропуски без email.</p><div class="table"></div></section>
 <section id="docs" class="hidden"><h2>Документация</h2><p class="muted">Единая точка входа в основные инструкции проекта. Пути открываются на сервере из каталога репозитория.</p><div class="doc-list"></div></section>
 <section id="health" class="hidden"><h2>Health-dashboard</h2><p class="muted">Проверка API, публичного Tailscale URL, PostgreSQL, SMTP и VPN API / 3x-ui нод.</p><button onclick="loadHealth()">Проверить сейчас</button><div class="health-grid" id="health-grid"></div></section>
 <section id="scripts" class="hidden"><h2>Запуск ключевых скриптов</h2><p class="muted">Кнопки запускают безопасные проверки из админки. Host-only операции для PostgreSQL backup/restore возвращают точную команду для SSH-хоста.</p><div class="script-list"></div></section>
