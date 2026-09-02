@@ -221,41 +221,6 @@ async def _issue_code(user: User, email_address: str, db: AsyncSession) -> datet
     except EmailDeliveryError as exc:
         await db.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    body = body.replace(
-        "<section><h2>Приобрести или продлить</h2>",
-        '<section id="payment"><h2>Приобрести или продлить</h2>',
-    )
-    body += f'''<script>
-const initialPlanId='{initial_plan_id}';
-function selectOrderPlan(button){{
-  document.querySelectorAll('[data-order-plan]').forEach(item=>item.classList.remove('selected'));
-  document.querySelectorAll('.tier-group').forEach(item=>item.classList.remove('selected'));
-  button.classList.add('selected');
-  button.closest('.tier-group').classList.add('selected','expanded');
-  document.getElementById('order-plan').value=button.dataset.orderPlan;
-}}
-document.querySelectorAll('[data-order-plan]').forEach(button=>button.onclick=()=>selectOrderPlan(button));
-const initialPlanButton=document.querySelector(`[data-order-plan="${{initialPlanId}}"]`);
-if(initialPlanButton)selectOrderPlan(initialPlanButton);
-window.createOrder=async function(){{
-  const out=document.getElementById('order-result');
-  const methodSelect=document.getElementById('order-method');
-  const methodCode=methodSelect.value;
-  const paymentUrl=methodSelect.selectedOptions[0]?.dataset.url||'';
-  if(methodCode==='payment_safety'){{out.className='';out.textContent='Платёжная страница не получает ваш VPN-ключ. Доступ выдаётся только после подтверждения платежа VPN API.';return}}
-  if(methodCode==='telegram_stars'){{out.className='error';out.textContent='Цена в Telegram Stars ещё не настроена для этого тарифа.';return}}
-  if(!['sber_qr','tbank_qr','phone_transfer'].includes(methodCode)){{
-    if(paymentUrl){{location.href=paymentUrl;return}}
-    out.className='error';out.textContent='Для этого способа оплаты не настроена ссылка.';return
-  }}
-  out.className='';out.textContent='Создаём платёж…';
-  const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:methodCode}})}});
-  const d=await r.json();
-  if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}
-  out.className='';
-  out.innerHTML=d.qr_url?`<p>Оплатите указанную сумму и загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`;
-}};
-</script>'''
     await db.commit()
     return expires
 
@@ -516,6 +481,41 @@ async def cabinet(
             '<div class="actions"><button class="button" onclick="copyKey(this)">Копировать ключ</button></div>'
         )
     body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><div class="links"><form method="post" action="/cabinet/logout"><button class="button">Выйти</button></form></div></nav><main class="cabinet"><div class="eyebrow">Управление подпиской</div><h2>{html.escape(user.email or "Ваш кабинет")}</h2><div class="cabinet-grid"><section class="panel"><h3>Подписка <span class="status">{'активна' if active else 'не активна'}</span></h3><p><b>{html.escape(_clean_plan_name(plan.name)) if plan else 'Тариф не выбран'}</b></p><div class="stats"><div class="stat"><small class="muted">Осталось</small><br><b>{days} дн.</b></div><div class="stat"><small class="muted">Трафик</small><br><b>{traffic}</b></div><div class="stat"><small class="muted">Подключения</small><br><b>{devices}</b></div></div></section><section class="panel"><h3>Ключ доступа</h3>{key_block}<p class="muted">Сервер назначается автоматически: {html.escape(node.region or node.name) if node else 'после оплаты'}</p></section></div><section><h2>Приобрести или продлить</h2><div class="tier-groups">{tier_selector}</div><input type="hidden" id="order-plan" value="{initial_plan_id}"><div class="cabinet-grid"><div class="panel"><label>Способ оплаты<select id="order-method">{method_options}</select></label><button class="button primary" onclick="createOrder()">Создать платёж</button><div id="order-result"></div></div><div class="panel"><h3>Последние платежи</h3><ul>{payment_rows}</ul></div></div></section><section><h2>Приложения</h2><div class="actions"><a class="button" href="https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_windows_x64.exe">Windows</a><a class="button" href="https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_macos.zip">macOS</a><a class="button" href="https://play.google.com/store/apps/details?id=org.amnezia.vpn">Android</a><a class="button" href="https://apps.apple.com/ru/app/defaultvpn/id6744725017">iOS</a></div></section></main></div><script>document.querySelectorAll('[data-order-plan]').forEach(button=>button.onclick=()=>{{document.querySelectorAll('[data-order-plan]').forEach(item=>item.classList.remove('selected'));document.querySelectorAll('.tier-group').forEach(item=>item.classList.remove('selected'));button.classList.add('selected');button.closest('.tier-group').classList.add('selected');document.getElementById('order-plan').value=button.dataset.orderPlan}});document.querySelector('[data-order-plan]')?.click();function copyKey(button){{navigator.clipboard.writeText(document.getElementById('vpn-key').textContent);button.textContent='Скопировано ✓'}}async function createOrder(){{const out=document.getElementById('order-result');out.textContent='Создаём платёж…';const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:document.getElementById('order-method').value}})}});const d=await r.json();if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}out.className='';out.innerHTML=d.qr_url?`<p>Оплатите указанную сумму и загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`}}async function uploadReceipt(id){{const file=document.getElementById('receipt').files[0];if(!file)return alert('Выберите файл чека');const data=await new Promise(ok=>{{const reader=new FileReader();reader.onload=()=>ok(reader.result.split(',')[1]);reader.readAsDataURL(file)}});const r=await fetch(`/web/payments/${{id}}/receipt`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{filename:file.name,mime_type:file.type,data_base64:data}})}});const d=await r.json();if(r.ok){{alert('Чек отправлен. Платёж ожидает проверки администратора.');location.reload()}}else alert(d.detail||'Ошибка загрузки')}};</script>'''
+    body = body.replace(
+        "<section><h2>Приобрести или продлить</h2>",
+        '<section id="payment"><h2>Приобрести или продлить</h2>',
+    )
+    body += f'''<script>
+const initialPlanId='{initial_plan_id}';
+function selectOrderPlan(button){{
+  document.querySelectorAll('[data-order-plan]').forEach(item=>item.classList.remove('selected'));
+  document.querySelectorAll('.tier-group').forEach(item=>item.classList.remove('selected'));
+  button.classList.add('selected');
+  button.closest('.tier-group').classList.add('selected','expanded');
+  document.getElementById('order-plan').value=button.dataset.orderPlan;
+}}
+document.querySelectorAll('[data-order-plan]').forEach(button=>button.onclick=()=>selectOrderPlan(button));
+const initialPlanButton=document.querySelector(`[data-order-plan="${{initialPlanId}}"]`);
+if(initialPlanButton)selectOrderPlan(initialPlanButton);
+window.createOrder=async function(){{
+  const out=document.getElementById('order-result');
+  const methodSelect=document.getElementById('order-method');
+  const methodCode=methodSelect.value;
+  const paymentUrl=methodSelect.selectedOptions[0]?.dataset.url||'';
+  if(methodCode==='payment_safety'){{out.className='';out.textContent='Платёжная страница не получает ваш VPN-ключ. Доступ выдаётся только после подтверждения платежа VPN API.';return}}
+  if(methodCode==='telegram_stars'){{out.className='error';out.textContent='Цена в Telegram Stars ещё не настроена для этого тарифа.';return}}
+  if(!['sber_qr','tbank_qr','phone_transfer'].includes(methodCode)){{
+    if(paymentUrl){{location.href=paymentUrl;return}}
+    out.className='error';out.textContent='Для этого способа оплаты не настроена ссылка.';return
+  }}
+  out.className='';out.textContent='Создаём платёж…';
+  const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:methodCode}})}});
+  const d=await r.json();
+  if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}
+  out.className='';
+  out.innerHTML=d.qr_url?`<p>Оплатите указанную сумму и загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`;
+}};
+</script>'''
     await db.commit()
     return HTMLResponse(_shell(body, title="Управление подпиской — Freedom VPN"), headers=_headers())
 
@@ -533,6 +533,8 @@ async def web_manual_payment(data: WebOrder, cabinet_token: str | None = Cookie(
     method = await db.scalar(select(PaymentMethod).where(PaymentMethod.code == data.method_code, PaymentMethod.is_active.is_(True)))
     if method is None:
         raise HTTPException(status_code=404, detail="Способ оплаты не найден")
+    if method.code not in MANUAL_PAYMENT_METHODS:
+        raise HTTPException(status_code=400, detail="Этот способ оплаты открывается отдельной платёжной страницей")
     node_id = data.node_id
     if node_id is None:
         active_client = await db.scalar(
