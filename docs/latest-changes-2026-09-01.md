@@ -105,10 +105,11 @@ Callback data и обработчики не менялись. Тёмный Tele
 
 ## Почта, публикация и сертификаты
 
-Публичный адрес текущего стенда — `https://fedora.taile485ac.ts.net`. Tailscale
+Публичный адрес текущего стенда — `https://freedomvpn.taile485ac.ts.net`. Tailscale
 Funnel проксирует его на `127.0.0.1:8000`; API не открывает порт напрямую во
-внешнюю сеть. Postfix слушает только loopback и Docker bridge и используется
-API через `host.docker.internal:25`.
+внешнюю сеть. Автоподъём Funnel оформлен unit-файлом
+`deploy/systemd/vpn-tailscale-funnel.service`. Postfix слушает только loopback
+и Docker bridge и используется API через `host.docker.internal:25`.
 
 `scripts/renew_tailscale_cert.sh` атомарно обновляет файловый сертификат для
 внешних listeners. Таймер `vpn-tailscale-cert.timer` запускает проверку
@@ -130,11 +131,11 @@ docker compose up -d --force-recreate api bot
 ```bash
 docker compose run --rm api alembic current
 curl -fsS http://127.0.0.1:8000/health
-curl -fsS https://fedora.taile485ac.ts.net/
+curl -fsS https://freedomvpn.taile485ac.ts.net/
 docker compose ps api bot worker
 docker compose logs --tail=100 api bot worker
 tailscale funnel status
-systemctl is-active postfix vpn-tailscale-cert.timer
+systemctl is-active postfix vpn-tailscale-funnel.service vpn-tailscale-cert.timer
 ```
 
 Ожидаемая миграция: `b74e2c31a190 (head)`. `/cabinet` без cookie намеренно
