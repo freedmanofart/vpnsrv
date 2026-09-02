@@ -134,6 +134,27 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         authenticated = await self.client.get("/admin", auth=self.admin_auth)
         self.assertEqual(200, authenticated.status_code)
 
+    async def test_admin_docs_and_infrastructure_resources_are_available(self) -> None:
+        overview = await self.client.get("/admin/overview", auth=self.admin_auth)
+        self.assertEqual(200, overview.status_code, overview.text)
+        data = overview.json()
+        doc_ids = {item["id"] for item in data["docs"]}
+        self.assertIn("notifications", doc_ids)
+        self.assertIn("vpn_lifecycle", doc_ids)
+        doc = await self.client.get("/admin/docs/notifications", auth=self.admin_auth)
+        self.assertEqual(200, doc.status_code, doc.text)
+        self.assertIn("Уведомления", doc.text)
+
+        resources = {item["name"]: item for item in data["resources"]}
+        self.assertIn("Swagger UI", resources)
+        self.assertIn("PostgreSQL", resources)
+        self.assertIn("PostgreSQL backups", resources)
+        self.assertIn("Tailscale Funnel", resources)
+        self.assertIn("3x-ui master SSH forward", resources)
+        self.assertIn("target", resources["PostgreSQL"])
+        self.assertIn("command", resources["Tailscale Funnel"])
+        self.assertIn("path", resources["PostgreSQL backups"])
+
     async def test_web_registration_emails_one_time_code_and_opens_cabinet(self) -> None:
         with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
             registered = await self.client.post(

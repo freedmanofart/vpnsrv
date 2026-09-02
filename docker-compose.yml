@@ -43,6 +43,7 @@ services:
 
     volumes:
       - ./api/app:/app/app
+      - ./docs:/app/docs:ro
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
       - /var/backups/vpn-service:/var/backups/vpn-service

@@ -94,15 +94,73 @@ HOST_COMMANDS = {
 }
 
 BACKUP_DIR = Path(os.getenv("VPN_BACKUP_DIR", "/var/backups/vpn-service"))
-REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _repo_root() -> Path:
+    env_root = os.getenv("VPN_REPO_ROOT")
+    candidates = []
+    if env_root:
+        candidates.append(Path(env_root).resolve())
+    candidates.extend(Path(__file__).resolve().parents)
+    for candidate in candidates:
+        if (candidate / "docs").is_dir() and (candidate / "alembic.ini").is_file():
+            return candidate
+    return Path(__file__).resolve().parents[4]
+
+
+REPO_ROOT = _repo_root()
+
+
+def _safe_database_target() -> str:
+    match = re.match(r"^[^:]+://(?:[^:@/]+(?::[^@/]*)?@)?([^/]+)/(.+)$", settings.database_url)
+    if not match:
+        return "DATABASE_URL настроен; значение скрыто"
+    return f"{match.group(1)}/{match.group(2).split('?', 1)[0]}"
+
+
+def _resource_rows(xui_links: list[str]) -> list[dict]:
+    base = settings.public_base_url.rstrip("/")
+    return [
+        {"name": "Публичный сайт", "url": settings.public_base_url},
+        {"name": "Web-кабинет", "url": f"{base}/cabinet"},
+        {"name": "VPN Admin", "url": f"{base}/admin", "note": "HTTP Basic; логин и пароль задаются ADMIN_USERNAME/ADMIN_PASSWORD"},
+        {"name": "API health", "url": f"{base}/health"},
+        {"name": "Swagger UI", "url": f"{base}/docs", "note": "По документации сейчас публичен в FastAPI; закрывайте на reverse proxy, если нужно"},
+        {"name": "OpenAPI schema", "url": f"{base}/openapi.json"},
+        {"name": "DB health", "url": f"{base}/db-health", "note": "Требует авторизацию"},
+        {"name": "Local API на сервере", "url": "http://127.0.0.1:8000"},
+        {"name": "PostgreSQL", "target": _safe_database_target(), "note": "Общий контейнер postgres; VPN использует отдельную БД vpn"},
+        {"name": "PostgreSQL backups", "path": str(BACKUP_DIR)},
+        {"name": "Production repo", "path": "/home/freedman/vpn-service"},
+        {"name": "Tailscale Funnel", "command": "tailscale funnel status"},
+        {"name": "Tailscale certificate timer", "command": "systemctl status vpn-tailscale-cert.timer --no-pager"},
+        {"name": "PostgreSQL backup timer", "command": "systemctl status vpn-backup.timer --no-pager"},
+        {
+            "name": "3x-ui master SSH forward",
+            "command": "ssh -L 2222:127.0.0.1:41026 root@freedomvpn",
+            "url": "http://localhost:2222/<private-3x-ui-base-path>/panel/clients",
+            "note": "Откройте URL после запуска SSH-туннеля на операторской машине",
+        },
+        *[
+            {"name": f"VPN API / Master 3x-ui #{index + 1}", "url": url, "note": "Адрес из vpn_node_configs.api_address"}
+            for index, url in enumerate(xui_links)
+        ],
+    ]
+
+
 ADMIN_DOCS = [
     {"id": "frontend", "name": "Frontend-структура сайта и web-кабинета", "path": "docs/frontend-site-structure.md"},
     {"id": "web_cabinet", "name": "Web-кабинет, почта, коды и пароли", "path": "docs/web-cabinet.md"},
+    {"id": "notifications", "name": "Уведомления: email, bot, lifecycle", "path": "docs/notifications.md"},
+    {"id": "vpn_lifecycle", "name": "Жизненный цикл VPN API", "path": "docs/vpn-api-lifecycle.md"},
     {"id": "latest_changes", "name": "Последние изменения", "path": "docs/latest-changes-2026-09-01.md"},
     {"id": "access", "name": "Доступы и переменные", "path": "docs/access-and-credentials.md"},
     {"id": "bot", "name": "Редактирование Telegram-бота", "path": "docs/editing-telegram-bot.md"},
     {"id": "maintenance", "name": "Скрипты обслуживания", "path": "docs/maintenance-scripts.md"},
     {"id": "xui_master", "name": "3x-ui master и SSH proxy", "path": "docs/3x-ui-master.md"},
+    {"id": "add_node", "name": "Добавление 3x-ui ноды", "path": "docs/add-3x-ui-node.md"},
+    {"id": "admin_3xui", "name": "Администрирование 3x-ui API", "path": "docs/admin-3xui-api.md"},
+    {"id": "remediation", "name": "План восстановления и исправлений", "path": "docs/remediation-plan.md"},
 ]
 
 
@@ -480,12 +538,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
             {"name": "Проверить пользователя Telegram", "command": "scripts/check_online_apis.sh TELEGRAM_ID", "runnable": False},
             {"name": "Проверить последние ошибки API/бота", "command": "docker compose logs --tail=200 api bot worker | grep -i -E \"error|failed|exception|traceback|503\" || true", "runnable": False},
         ],
-        "resources": [
-            {"name": "Публичный сайт", "url": settings.public_base_url},
-            {"name": "Web-кабинет", "url": f"{settings.public_base_url.rstrip('/')}/cabinet"},
-            {"name": "VPN Admin", "url": f"{settings.public_base_url.rstrip('/')}/admin"},
-            *[{"name": f"VPN API / Master 3x-ui #{index + 1}", "url": url, "note": "Внутренний/proxy SSH адрес"} for index, url in enumerate(xui_links)],
-        ],
+        "resources": _resource_rows(xui_links),
         "email_logs": [
             {
                 "id": x.id,
@@ -1061,7 +1114,7 @@ function renderAdminContacts(){let f=document.getElementById('adminContactsForm'
 async function saveAdminContacts(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let out=document.getElementById('settings-result');out.className='';out.textContent='Сохраняю…';try{state.admin_contacts=await request('/admin/settings/admin-contacts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_notification_email:f.admin_notification_email||'',bot_admin_chat_id:Number(f.bot_admin_chat_id||0)})});renderAdminContacts();out.className='ok';out.textContent='Контакты сохранены'}catch(err){out.className='bad';out.textContent=err.message}}
 function renderDocs(){document.querySelector('#docs .doc-list').innerHTML=(state.docs||[]).map(d=>`<div class="doc-item"><b>${esc(d.name)}</b><br><code>${esc(d.path)}</code><p><a class="action" href="/admin/docs/${esc(d.id)}" target="_blank" rel="noopener">Открыть</a></p></div>`).join('')||'Нет данных'}
 function renderScripts(){document.querySelector('#scripts .script-list').innerHTML=(state.scripts||[]).map(s=>`<div class="script-item"><b>${esc(s.name)}</b><code>${esc(s.command)}</code>${s.runnable&&s.id?`<p><button onclick="runScript('${esc(s.id)}',this)">Запустить</button></p><pre class="script-output" id="script-output-${esc(s.id)}"></pre>`:''}</div>`).join('')||'Нет данных'}
-function renderResources(){document.querySelector('#resources .resource-list').innerHTML=(state.resources||[]).map(r=>`<div class="resource-item"><b>${esc(r.name)}</b><br><a class="action" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>${r.note?`<p class="muted">${esc(r.note)}</p>`:''}</div>`).join('')||'Нет данных'}
+function renderResources(){document.querySelector('#resources .resource-list').innerHTML=(state.resources||[]).map(r=>{let link=r.url?`<br><a class="action" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>`:'';let target=r.target?`<br><code>${esc(r.target)}</code>`:'';let path=r.path?`<br><code>${esc(r.path)}</code>`:'';let command=r.command?`<br><code>${esc(r.command)}</code>`:'';let note=r.note?`<p class="muted">${esc(r.note)}</p>`:'';return `<div class="resource-item"><b>${esc(r.name)}</b>${link}${target}${path}${command}${note}</div>`}).join('')||'Нет данных'}
 function renderHealth(data){let box=document.getElementById('health-grid');box.innerHTML=(data.checks||[]).map(h=>{let cls=h.status==='online'?'ok':(h.status==='offline'?'bad':'warn');return `<div class="health-item ${cls}"><b>${esc(h.name)}</b><p class="${cls}">${esc(h.status)}</p><p>${esc(h.details||'')}</p>${h.latency_ms?`<p class="muted">${esc(h.latency_ms)} мс</p>`:''}</div>`}).join('')||'Нет данных'}
 async function loadHealth(){try{let data=await request('/admin/health-dashboard');renderHealth(data);document.getElementById('notice').innerHTML=data.status==='online'?'<span class="ok">Health OK</span>':'<span class="warn">Health требует внимания</span>'}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function runScript(id,btn){let out=document.getElementById('script-output-'+id);btn.disabled=true;out.textContent='Выполняю…';try{let data=await request('/admin/scripts/'+id+'/run',{method:'POST'});out.textContent=JSON.stringify(data,null,2);if(data.checks)renderHealth(data)}catch(e){out.textContent=e.message}finally{btn.disabled=false}}
