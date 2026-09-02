@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
+import html
 import logging
 import os
 from pathlib import Path
+import re
 import smtplib
 import subprocess
 import time
@@ -85,6 +87,16 @@ HOST_COMMANDS = {
 }
 
 BACKUP_DIR = Path(os.getenv("VPN_BACKUP_DIR", "/var/backups/vpn-service"))
+REPO_ROOT = Path(__file__).resolve().parents[4]
+ADMIN_DOCS = [
+    {"id": "frontend", "name": "Frontend-структура сайта и web-кабинета", "path": "docs/frontend-site-structure.md"},
+    {"id": "web_cabinet", "name": "Web-кабинет, почта, коды и пароли", "path": "docs/web-cabinet.md"},
+    {"id": "latest_changes", "name": "Последние изменения", "path": "docs/latest-changes-2026-09-01.md"},
+    {"id": "access", "name": "Доступы и переменные", "path": "docs/access-and-credentials.md"},
+    {"id": "bot", "name": "Редактирование Telegram-бота", "path": "docs/editing-telegram-bot.md"},
+    {"id": "maintenance", "name": "Скрипты обслуживания", "path": "docs/maintenance-scripts.md"},
+    {"id": "xui_master", "name": "3x-ui master и SSH proxy", "path": "docs/3x-ui-master.md"},
+]
 
 
 async def _public_probe(path: str = "/", timeout: float = 5.0) -> dict:
@@ -235,6 +247,14 @@ def _pg_url() -> str:
     return settings.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
+def _doc_html(markdown: str) -> str:
+    body = html.escape(markdown)
+    body = re.sub(r"^# (.+)$", r"<h1>\1</h1>", body, flags=re.MULTILINE)
+    body = re.sub(r"^## (.+)$", r"<h2>\1</h2>", body, flags=re.MULTILINE)
+    body = re.sub(r"^### (.+)$", r"<h3>\1</h3>", body, flags=re.MULTILINE)
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Документация</title><style>body{{max-width:980px;margin:0 auto;padding:28px;font:16px/1.6 system-ui,sans-serif;color:#111827}}pre{{white-space:pre-wrap;background:#f5f7fb;border:1px solid #e6eaf2;border-radius:12px;padding:16px}}code{{background:#f5f7fb;padding:2px 5px;border-radius:6px}}a{{color:#175cff}}</style></head><body><a href="/admin">← Админка</a><pre>{body}</pre></body></html>"""
+
+
 def _create_postgres_backup() -> dict:
     BACKUP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -331,6 +351,17 @@ async def admin_page(_: APIPrincipal = Depends(require_admin)):
     return HTMLResponse(ADMIN_HTML)
 
 
+@router.get("/docs/{doc_id}", response_class=HTMLResponse, include_in_schema=False)
+async def admin_doc(doc_id: str, _: APIPrincipal = Depends(require_admin)):
+    doc = next((item for item in ADMIN_DOCS if item["id"] == doc_id), None)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    path = (REPO_ROOT / doc["path"]).resolve()
+    if not path.is_file() or REPO_ROOT not in path.parents:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    return HTMLResponse(_doc_html(path.read_text(encoding="utf-8")))
+
+
 @router.get("/overview", dependencies=[Depends(require_admin)])
 async def overview(db: AsyncSession = Depends(get_db)):
     async def rows(model):
@@ -349,6 +380,13 @@ async def overview(db: AsyncSession = Depends(get_db)):
     login_codes = await rows(CabinetLoginCode)
     audit_result = await db.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(300))
     audit_logs = audit_result.scalars().all()
+    email_result = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.action == "email.cabinet_code.send")
+        .order_by(AuditLog.id.desc())
+        .limit(100)
+    )
+    email_logs = email_result.scalars().all()
     config_result = await db.execute(
         select(VPNNodeConfig).where(VPNNodeConfig.protocol == "vless")
     )
@@ -413,14 +451,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "payment_methods": [{"id": x.id, "code": x.code, "name": x.name, "url": x.url, "sort_order": x.sort_order, "is_active": x.is_active, "has_image": x.image_data is not None} for x in sorted(payment_methods, key=lambda item: (item.sort_order, item.id))],
         "devices": [{"id": x.id, "user_id": x.user_id, "name": x.name, "platform": x.platform, "status": x.status, "last_seen_at": x.last_seen_at, "expires_at": x.expires_at} for x in devices],
         "login_codes": [{"id": x.id, "user_id": x.user_id, "code": x.plain_code or "legacy_hash_only", "status": "used" if x.used_at else ("expired" if _aware(x.expires_at) <= datetime.now(timezone.utc) else "active"), "attempts": x.attempts, "created_at": x.created_at, "expires_at": x.expires_at, "used_at": x.used_at} for x in login_codes],
-        "docs": [
-            {"name": "Frontend-структура сайта и web-кабинета", "path": "docs/frontend-site-structure.md"},
-            {"name": "Web-кабинет, почта, коды и пароли", "path": "docs/web-cabinet.md"},
-            {"name": "Последние изменения", "path": "docs/latest-changes-2026-09-01.md"},
-            {"name": "Доступы и переменные", "path": "docs/access-and-credentials.md"},
-            {"name": "Редактирование Telegram-бота", "path": "docs/editing-telegram-bot.md"},
-            {"name": "Скрипты обслуживания", "path": "docs/maintenance-scripts.md"},
-        ],
+        "docs": ADMIN_DOCS,
         "scripts": [
             {"id": "health_dashboard", "name": "Health-dashboard: API, сайт, почта, 3x-ui", "command": "выполняется из админки", "runnable": True},
             {"id": "smtp_check", "name": "Проверить SMTP-логин и отправку писем", "command": "выполняется из админки", "runnable": True},
@@ -442,6 +473,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
             {"name": "VPN Admin", "url": f"{settings.public_base_url.rstrip('/')}/admin"},
             *[{"name": f"VPN API / Master 3x-ui #{index + 1}", "url": url, "note": "Внутренний/proxy SSH адрес"} for index, url in enumerate(xui_links)],
         ],
+        "email_logs": [{"id": x.id, "created_at": x.created_at, "user_id": x.resource_id, "email": (x.details or {}).get("email"), "result": x.result, "event": (x.details or {}).get("event_type"), "error": (x.details or {}).get("error"), "expires_at": (x.details or {}).get("expires_at")} for x in email_logs],
         "debug": [{"id": x.id, "created_by": x.created_by, "reason": x.reason, "status": x.status, "expires_at": x.expires_at} for x in debug_sessions],
         "audit": [{"id": x.id, "created_at": x.created_at, "actor": f"{x.actor_type}:{x.actor_id or '-'}", "action": x.action, "resource": f"{x.resource_type or '-'}:{x.resource_id or '-'}", "result": x.result, "node_id": x.node_id, "sensitive": x.sensitive, "details": x.details} for x in audit_logs],
     }
@@ -940,6 +972,7 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="payment_methods" class="hidden"><h2>Способы оплаты</h2><form onsubmit="createPaymentMethod(event)"><input name="code" placeholder="Код: sber_qr" required><input name="name" placeholder="Название кнопки" required><input name="url" placeholder="Ссылка на QR или реквизиты/телефон"><input name="sort_order" type="number" value="100" required><button>Добавить способ</button></form><p>Для Сбербанка, Т-Банка и перевода по телефону поле URL используется как ссылка на QR или текст реквизитов. Порядок и активность управляют кнопками Telegram.</p><div class="table"></div></section>
 <section id="devices" class="hidden"><h2>Устройства</h2><div class="table"></div></section>
 <section id="login_codes" class="hidden"><h2>Коды входа в web-кабинет</h2><p class="bad">Коды дают доступ к аккаунту до истечения срока. Не пересылайте их пользователям в открытых чатах без проверки владельца.</p><div class="table"></div></section>
+<section id="email_logs" class="hidden"><h2>Email-логи</h2><p class="muted">Последние отправки почтовых кодов: успехи и ошибки SMTP.</p><div class="table"></div></section>
 <section id="docs" class="hidden"><h2>Документация</h2><p class="muted">Единая точка входа в основные инструкции проекта. Пути открываются на сервере из каталога репозитория.</p><div class="doc-list"></div></section>
 <section id="health" class="hidden"><h2>Health-dashboard</h2><p class="muted">Проверка API, публичного Tailscale URL, PostgreSQL, SMTP и VPN API / 3x-ui нод.</p><button onclick="loadHealth()">Проверить сейчас</button><div class="health-grid" id="health-grid"></div></section>
 <section id="scripts" class="hidden"><h2>Запуск ключевых скриптов</h2><p class="muted">Кнопки запускают безопасные проверки из админки. Host-only операции для PostgreSQL backup/restore возвращают точную команду для SSH-хоста.</p><div class="script-list"></div></section>
@@ -948,8 +981,8 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="audit" class="hidden"><h2>Audit log</h2><div class="table"></div></section>
 </main></div>
 <dialog id="accessDialog"><h2>Управление доступом</h2><form id="accessForm" onsubmit="saveAccess(event)"><input name="user_id" type="hidden"><label>Тариф<select name="plan_id" required></select></label><label>VPN-нода<select name="node_id" required></select></label><label>Статус<select name="active"><option value="true">Активен</option><option value="false">Не активен</option></select></label><label>Действует до<input name="expires_at" type="datetime-local" required></label><label class="wide">Выданная VPN-ссылка<textarea name="vpn_link" rows="6" placeholder="Пусто — генерировать автоматически"></textarea></label><div class="wide" id="activityInfo"></div><div class="dialog-actions"><button type="button" class="danger" onclick="resetAccess()">Сбросить план и ссылку</button><button type="button" onclick="document.getElementById('accessDialog').close()">Отмена</button><button>Сохранить</button></div></form></dialog><script>
-let state={};const sections=['health','plans','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','docs','scripts','resources','debug','audit'];
-const labels={health:'Health',plans:'Тарифы',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
+let state={};const sections=['health','plans','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','email_logs','docs','scripts','resources','debug','audit'];
+const labels={health:'Health',plans:'Тарифы',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',email_logs:'Email-логи',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
 const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',expires_at:'Действует до',client_id:'Клиент ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
 function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===id))}
@@ -958,9 +991,9 @@ function formatCell(k,v){if(v===true)return '<span class="badge ok">да</span>'
 function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(columnLabels[k]||k)}</th>`).join('')}<th>Действия</th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${formatCell(k,r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
 function paymentActions(p){let receipt=p.receipt_url?`<a class="action" href="${esc(p.receipt_url)}" target="_blank" rel="noopener">Открыть чек</a> `:'';if(['pending','processing'].includes(p.status))return receipt+`<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return receipt+`<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return receipt}
-async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button data-section="${x}" onclick="show('${x}')">${labels[x]}</button>`).join('');
-function renderDocs(){document.querySelector('#docs .doc-list').innerHTML=(state.docs||[]).map(d=>`<div class="doc-item"><b>${esc(d.name)}</b><br><code>${esc(d.path)}</code></div>`).join('')||'Нет данных'}
+function renderDocs(){document.querySelector('#docs .doc-list').innerHTML=(state.docs||[]).map(d=>`<div class="doc-item"><b>${esc(d.name)}</b><br><code>${esc(d.path)}</code><p><a class="action" href="/admin/docs/${esc(d.id)}" target="_blank" rel="noopener">Открыть</a></p></div>`).join('')||'Нет данных'}
 function renderScripts(){document.querySelector('#scripts .script-list').innerHTML=(state.scripts||[]).map(s=>`<div class="script-item"><b>${esc(s.name)}</b><code>${esc(s.command)}</code>${s.runnable&&s.id?`<p><button onclick="runScript('${esc(s.id)}',this)">Запустить</button></p><pre class="script-output" id="script-output-${esc(s.id)}"></pre>`:''}</div>`).join('')||'Нет данных'}
 function renderResources(){document.querySelector('#resources .resource-list').innerHTML=(state.resources||[]).map(r=>`<div class="resource-item"><b>${esc(r.name)}</b><br><a class="action" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>${r.note?`<p class="muted">${esc(r.note)}</p>`:''}</div>`).join('')||'Нет данных'}
 function renderHealth(data){let box=document.getElementById('health-grid');box.innerHTML=(data.checks||[]).map(h=>{let cls=h.status==='online'?'ok':(h.status==='offline'?'bad':'warn');return `<div class="health-item ${cls}"><b>${esc(h.name)}</b><p class="${cls}">${esc(h.status)}</p><p>${esc(h.details||'')}</p>${h.latency_ms?`<p class="muted">${esc(h.latency_ms)} мс</p>`:''}</div>`}).join('')||'Нет данных'}

@@ -35,6 +35,7 @@ from app.services.email import EmailDeliveryError, send_cabinet_code
 from app.services.payments import PaymentError, create_payment
 from app.schemas.payment import PaymentCreate
 from app.core.security import hash_password, require_api_access, verify_password
+from app.services.audit import write_audit
 
 
 router = APIRouter(tags=["Web cabinet"])
@@ -226,6 +227,21 @@ async def _issue_code(user: User, email_address: str, db: AsyncSession) -> datet
         )
     except EmailDeliveryError as exc:
         await db.rollback()
+        await write_audit(
+            db,
+            action="email.cabinet_code.send",
+            result="failed",
+            actor_type="web",
+            actor_id=str(user.id),
+            resource_type="user",
+            resource_id=user.id,
+            details={
+                "event_type": "cabinet_login_code_email_failed",
+                "email": email_address,
+                "ttl_minutes": settings.cabinet_email_code_ttl_minutes,
+                "error": str(exc),
+            },
+        )
         logger.exception(
             "cabinet_login_code_email_failed",
             extra={
@@ -249,6 +265,21 @@ async def _issue_code(user: User, email_address: str, db: AsyncSession) -> datet
                 "ttl_minutes": settings.cabinet_email_code_ttl_minutes,
                 "expires_at": expires.isoformat(),
             }
+        },
+    )
+    await write_audit(
+        db,
+        action="email.cabinet_code.send",
+        result="success",
+        actor_type="web",
+        actor_id=str(user.id),
+        resource_type="user",
+        resource_id=user.id,
+        details={
+            "event_type": "cabinet_login_code_sent",
+            "email": email_address,
+            "ttl_minutes": settings.cabinet_email_code_ttl_minutes,
+            "expires_at": expires.isoformat(),
         },
     )
     return expires
