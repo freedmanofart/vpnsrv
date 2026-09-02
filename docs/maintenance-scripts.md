@@ -151,6 +151,44 @@ tailscale funnel status
 `cabinet_login_code_sent`. При ошибке отправки — `cabinet_login_code_email_failed`.
 Пароли в логи не пишутся.
 
+## Быстрое переподнятие Tailscale
+
+Если сайт открывается внутри tailnet, но не открывается снаружи, чаще всего
+нужно проверить связку `tailscaled` → Funnel → публичный HTTPS-адрес. Для этого
+добавлен host-only скрипт:
+
+```bash
+cd /home/freedman/vpn-service
+sudo scripts/recover_tailscale.sh
+```
+
+Скрипт использует домен `freedomvpn.taile485ac.ts.net` по умолчанию и делает:
+
+- перезапуск `tailscaled.service`;
+- вывод короткого `tailscale status`;
+- сброс старой публикации `tailscale funnel reset`;
+- запуск `vpn-tailscale-cert.service` или прямое обновление сертификата через
+  `scripts/renew_tailscale_cert.sh`;
+- перезапуск `vpn-tailscale-funnel.service` или прямой запуск Funnel на
+  `http://127.0.0.1:8000`;
+- вывод `tailscale funnel status`;
+- проверку локального `/health`;
+- проверку публичного `https://freedomvpn.taile485ac.ts.net/`.
+
+Переопределяемые переменные:
+
+```bash
+TAILSCALE_CERT_DOMAIN=freedomvpn.taile485ac.ts.net
+PUBLIC_BASE_URL=https://freedomvpn.taile485ac.ts.net
+TAILSCALE_FUNNEL_TARGET=http://127.0.0.1:8000
+TAILSCALE_CERT_SERVICE=vpn-tailscale-cert.service
+TAILSCALE_FUNNEL_SERVICE=vpn-tailscale-funnel.service
+```
+
+В `/admin` → `Скрипты` кнопка `Быстро переподнять Tailscale, Funnel и сертификат`
+возвращает готовую SSH-команду. Она не выполняется внутри API-контейнера, потому
+что контейнер не должен управлять host-level `systemd`, `tailscaled` и Funnel.
+
 ## Конфигурация
 
 ```bash

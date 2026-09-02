@@ -83,6 +83,7 @@ HOST_COMMANDS = {
     "restore_postgres": "scripts/restore_postgres.sh /var/backups/vpn-service/vpn-db-TIMESTAMP.dump",
     "mail_chain_recover": "scripts/check_mail_chain.sh",
     "online_apis": "scripts/check_online_apis.sh",
+    "tailscale_recover": "scripts/recover_tailscale.sh",
     "tailscale_funnel": "tailscale funnel status",
 }
 
@@ -457,6 +458,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
             {"id": "smtp_check", "name": "Проверить SMTP-логин и отправку писем", "command": "выполняется из админки", "runnable": True},
             {"id": "online_apis", "name": "Все online-тесты ключевых API", "command": "scripts/check_online_apis.sh", "runnable": True},
             {"id": "mail_chain_recover", "name": "Проверить почту и быстро переподнять api/bot", "command": "scripts/check_mail_chain.sh", "runnable": True},
+            {"id": "tailscale_recover", "name": "Быстро переподнять Tailscale, Funnel и сертификат", "command": "scripts/recover_tailscale.sh", "runnable": True},
             {"id": "backup_postgres", "name": "Создать PostgreSQL backup сейчас", "command": "pg_dump -Fc в /var/backups/vpn-service", "runnable": True},
             {"id": "verify_latest_backup", "name": "Проверить последний PostgreSQL backup", "command": "pg_restore --list для последнего dump", "runnable": True},
             {"id": "list_backups", "name": "Показать последние PostgreSQL backup-файлы", "command": "ls -lh /var/backups/vpn-service/vpn-db-*.dump", "runnable": True},
