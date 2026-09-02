@@ -53,6 +53,8 @@ SUPPORT_URL = content_link("support")
 YOOMONEY_PAYMENT_URL = content_link("payment")
 TRY_PAYMENT_URL = content_link("try_payment")
 TRY_PAYMENT_AMOUNT_RUB = "50"
+PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-09-02-66"
+TERMS_OF_USE_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-09-02-30"
 WEB_CABINET_URL = os.getenv("WEB_CABINET_URL", "").strip()
 WEB_SITE_URL = os.getenv("WEB_SITE_URL", "").strip()
 if not WEB_SITE_URL and WEB_CABINET_URL:
@@ -238,13 +240,13 @@ def policy_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="Политика конфиденциальности",
-                    url=f"{POLICY_BASE_URL}/static/privacy.html",
+                    url=PRIVACY_POLICY_URL,
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="Пользовательское соглашение",
-                    url=f"{POLICY_BASE_URL}/static/terms.html",
+                    url=TERMS_OF_USE_URL,
                 )
             ],
         ],
