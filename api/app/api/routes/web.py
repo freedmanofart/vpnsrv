@@ -221,41 +221,6 @@ async def _issue_code(user: User, email_address: str, db: AsyncSession) -> datet
     except EmailDeliveryError as exc:
         await db.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    body = body.replace(
-        "<section><h2>Приобрести или продлить</h2>",
-        '<section id="payment"><h2>Приобрести или продлить</h2>',
-    )
-    body += f'''<script>
-const initialPlanId='{initial_plan_id}';
-function selectOrderPlan(button){{
-  document.querySelectorAll('[data-order-plan]').forEach(item=>item.classList.remove('selected'));
-  document.querySelectorAll('.tier-group').forEach(item=>item.classList.remove('selected'));
-  button.classList.add('selected');
-  button.closest('.tier-group').classList.add('selected','expanded');
-  document.getElementById('order-plan').value=button.dataset.orderPlan;
-}}
-document.querySelectorAll('[data-order-plan]').forEach(button=>button.onclick=()=>selectOrderPlan(button));
-const initialPlanButton=document.querySelector(`[data-order-plan="${{initialPlanId}}"]`);
-if(initialPlanButton)selectOrderPlan(initialPlanButton);
-window.createOrder=async function(){{
-  const out=document.getElementById('order-result');
-  const methodSelect=document.getElementById('order-method');
-  const methodCode=methodSelect.value;
-  const paymentUrl=methodSelect.selectedOptions[0]?.dataset.url||'';
-  if(methodCode==='payment_safety'){{out.className='';out.textContent='Платёжная страница не получает ваш VPN-ключ. Доступ выдаётся только после подтверждения платежа VPN API.';return}}
-  if(methodCode==='telegram_stars'){{out.className='error';out.textContent='Цена в Telegram Stars ещё не настроена для этого тарифа.';return}}
-  if(!['sber_qr','tbank_qr','phone_transfer'].includes(methodCode)){{
-    if(paymentUrl){{location.href=paymentUrl;return}}
-    out.className='error';out.textContent='Для этого способа оплаты не настроена ссылка.';return
-  }}
-  out.className='';out.textContent='Создаём платёж…';
-  const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:methodCode}})}});
-  const d=await r.json();
-  if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}
-  out.className='';
-  out.innerHTML=d.qr_url?`<p>Оплатите указанную сумму и загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`;
-}};
-</script>'''
     await db.commit()
     return expires
 
