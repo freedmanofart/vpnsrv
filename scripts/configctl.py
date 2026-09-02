@@ -60,6 +60,7 @@ VARIABLES: dict[str, Variable] = {
     "LIFECYCLE_INTERVAL_SECONDS": Variable(),
     "LIFECYCLE_ADVISORY_LOCK_KEY": Variable(),
     "WORKER_RUN_ONCE": Variable(),
+    "CABINET_EMAIL_CODE_TTL_MINUTES": Variable(),
     # Этот bearer выдаёт мастер 3x-ui. Локально сгенерированное значение там
     # неизвестно и лишь оборвёт синхронизацию, поэтому оно не ротируется здесь.
     "THREEXUI_API_TOKEN": Variable(secret=True, required=True),

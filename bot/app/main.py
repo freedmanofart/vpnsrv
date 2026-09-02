@@ -392,7 +392,7 @@ async def get_vpn_status(telegram_id: int) -> dict:
         return response.json()
 
 
-async def send_cabinet_link_to_email(telegram_id: int, email_address: str) -> dict:
+async def send_cabinet_code_to_email(telegram_id: int, email_address: str) -> dict:
     async with api_client(base_url=API_URL, timeout=20.0) as client:
         response = await client.post(
             "/web/telegram-cabinet-link",
@@ -724,7 +724,7 @@ async def site_missing_handler(callback: CallbackQuery):
 async def welcome_email_handler(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EmailCabinetFlow.waiting_email)
     await callback.message.answer(
-        "✉️ Введите email. На него будет отправлена персональная ссылка на web-кабинет с вашей текущей подпиской.",
+        "✉️ Введите email. На него будет отправлен одноразовый код для входа в web-кабинет с вашей текущей подпиской.",
         reply_markup=popup_menu(),
     )
     await callback.answer()
@@ -737,14 +737,14 @@ async def cabinet_email_handler(message: Message, state: FSMContext):
         await message.answer("Введите корректный email, например name@example.com.")
         return
     try:
-        await send_cabinet_link_to_email(message.from_user.id, email_address)
+        await send_cabinet_code_to_email(message.from_user.id, email_address)
         await state.clear()
         await message.answer(
-            "✅ Ссылка на web-кабинет отправлена на почту. Проверьте также папку «Спам».",
+            "✅ Код для входа в web-кабинет отправлен на почту. Он действует 10 минут. Проверьте также папку «Спам».",
             reply_markup=popup_menu(),
         )
     except httpx.HTTPStatusError as exc:
-        detail = "Не удалось отправить ссылку. Проверьте email или попробуйте позже."
+        detail = "Не удалось отправить код. Проверьте email или попробуйте позже."
         try:
             detail = exc.response.json().get("detail") or detail
         except ValueError:

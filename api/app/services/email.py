@@ -19,7 +19,7 @@ def _send(message: EmailMessage) -> None:
         client.send_message(message)
 
 
-async def send_cabinet_link(email: str, link: str) -> None:
+async def send_cabinet_code(email: str, code: str, ttl_minutes: int) -> None:
     if not settings.smtp_host or not settings.smtp_from:
         raise EmailDeliveryError("Отправка почты пока не настроена")
     message = EmailMessage()
@@ -27,9 +27,11 @@ async def send_cabinet_link(email: str, link: str) -> None:
     message["From"] = settings.smtp_from
     message["To"] = email
     message.set_content(
-        "Ваша резервная ссылка для управления подпиской Freedom VPN:\n\n"
-        f"{link}\n\n"
-        "Не пересылайте эту ссылку другим людям. Она действует как пароль."
+        "Код для входа в кабинет Freedom VPN:\n\n"
+        f"{code}\n\n"
+        f"Код действует {ttl_minutes} минут и может быть использован один раз.\n"
+        "Никому не сообщайте этот код. Если вы его не запрашивали, "
+        "просто проигнорируйте письмо."
     )
     try:
         await asyncio.to_thread(_send, message)

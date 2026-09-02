@@ -114,6 +114,8 @@ FastAPI, если схема API не должна публиковаться. �
 | `POST` | `/v1/client/activation-codes` | Код активации клиентского устройства |
 | `GET` | `/` | Публичный лендинг |
 | `GET` | `/cabinet` | Резервный кабинет по защищённой cookie |
+| `POST` | `/web/register` | Отправить одноразовый email-код |
+| `POST` | `/web/code/login` | Погасить email-код и создать сессию |
 | `POST` | `/web/password/login` | Вход в кабинет по email и паролю |
 | `POST` | `/web/password` | Установка пароля с действующей cookie |
 | `GET` | `/admin` | Web admin с HTTP Basic |
@@ -133,7 +135,7 @@ webhook. Telegram-регистрация `/users` не публична. Мар�
 
 ## Недавние изменения
 
-- добавлены публичный лендинг и резервный web-кабинет с magic-link по email;
+- добавлены публичный лендинг и резервный web-кабинет с одноразовым email-кодом;
 - Telegram-кнопки сайта и кабинета разделены через `WEB_SITE_URL` и
   `WEB_CABINET_URL`;
 - из бота можно доверенно привязать email к существующему Telegram-пользователю;

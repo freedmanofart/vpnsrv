@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hmac
 import re
 import secrets
 import base64
@@ -12,13 +13,14 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.client import build_client_uri
 from app.core.config import settings
 from app.db.models.cabinet_access import CabinetAccessToken
+from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.models.plan import Plan
 from app.db.models.payment import Payment
 from app.db.models.payment_method import PaymentMethod
@@ -28,7 +30,7 @@ from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.session import get_db
-from app.services.email import EmailDeliveryError, send_cabinet_link
+from app.services.email import EmailDeliveryError, send_cabinet_code
 from app.services.payments import PaymentError, create_payment
 from app.schemas.payment import PaymentCreate
 from app.core.security import hash_password, require_api_access, verify_password
@@ -47,6 +49,11 @@ class Registration(BaseModel):
 class PasswordLogin(BaseModel):
     email: str = Field(min_length=5, max_length=320)
     password: str = Field(min_length=8, max_length=128)
+
+
+class EmailCodeLogin(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    code: str = Field(pattern=r"^\d{6}$")
 
 
 class PasswordSet(BaseModel):
@@ -173,20 +180,38 @@ async def landing(db: AsyncSession = Depends(get_db)):
     plans = [plan for plan in await _plans(db) if plan.duration_days == 30 and _tier(plan)]
     body = f"""<div class=\"site-top\"><div class=\"f-wrap\"><nav class=\"f-nav\" aria-label=\"Основная навигация\"><a class=\"f-brand\" href=\"/\"><img class=\"f-mark\" src=\"/static/freedom-vpn-logo-web.webp\" width=\"42\" height=\"42\" alt=\"\"><span>Freedom VPN</span></a><div class=\"f-links\"><a href=\"#advantages\">Возможности</a><a href=\"#plans\">Тарифы</a></div><div class=\"f-actions\"><a class=\"f-btn\" href=\"/cabinet\">Кабинет</a><button class=\"f-btn primary\" type=\"button\" data-choose-plan>Подключить</button></div></nav></div><section class=\"f-hero\"><div><div class=\"f-kicker\"><i></i>Свободный интернет без лишнего</div><h1>Быстрый и приватный интернет</h1><p class=\"f-lead\">Freedom VPN защищает ваше соединение и открывает доступ к сайтам и сервисам. Один аккаунт — все устройства, без рекламы и слежки.</p><div class=\"f-hero-actions\"><button class=\"f-btn primary\" type=\"button\" data-choose-plan>Выбрать подписку ↗</button><a class=\"f-btn\" href=\"#advantages\">Как это работает</a></div><div class=\"f-trust\"><span><b class=\"f-dot\"></b>Сервера в 12 странах</span><span><b class=\"f-dot\"></b>Поддержка 24/7</span><span><b class=\"f-dot\"></b>Без логов</span></div></div><div class=\"f-visual\"><div class=\"f-preview\" aria-label=\"Предпросмотр личного кабинета\"><div class=\"f-preview-inner\"><div class=\"f-preview-top\"><div class=\"f-preview-brand\"><img class=\"f-mark\" src=\"/static/freedom-vpn-logo-web.webp\" width=\"32\" height=\"32\" alt=\"\">Freedom VPN</div><div class=\"f-status\"><b></b>Подключено</div></div><div class=\"f-key\"><div class=\"f-label\">Ключ доступа</div><div class=\"f-code\">freedom://vpn_7b91••••••••••••••••••••</div></div><div class=\"f-statrow\"><div class=\"f-stat\"><span class=\"f-label\">Локация</span><strong>Германия</strong></div><div class=\"f-stat\"><span class=\"f-label\">Задержка</span><strong>24 мс</strong></div></div><div class=\"f-devices\"><span class=\"f-device\">iOS</span><span class=\"f-device\">Android</span><span class=\"f-device\">Windows</span><span class=\"f-device\">Роутер</span></div></div></div></div></section></div>
 <main><section id=\"plans\"><div class=\"wrap\"><h2>Выберите свой формат</h2><div class=\"plans\">{_plan_cards(plans)}</div></div></section><section id=\"advantages\" class=\"alt\"><div class=\"wrap features\"><article class=\"feature\"><h3>Быстро везде</h3><p class=\"muted\">Оптимальные маршруты и стабильная скорость на всех устройствах.</p></article><article class=\"feature\"><h3>Приватность по умолчанию</h3><p class=\"muted\">Шифрование трафика защищает данные в любой сети.</p></article><article class=\"feature\"><h3>Все устройства</h3><p class=\"muted\">iOS, Android, Windows, macOS и роутеры.</p></article></div></section></main><footer><div class=\"wrap\">Freedom VPN · Свобода быть собой в интернете</div></footer>
-<div class=\"modal\" id=\"register\"><div class=\"modal-card plan-modal\"><h3>Выберите подписку</h3><p class=\"muted\">Сначала выберите уровень, затем оформите доступ по email.</p><div class=\"tier-groups\">{_tier_selector(plans)}</div><input id=\"plan\" type=\"hidden\"><label>Email<input id=\"email\" type=\"email\" autocomplete=\"email\" placeholder=\"you@example.com\"></label><p id=\"result\"></p><div class=\"actions\"><button class=\"button\" onclick=\"closeModal()\">Отмена</button><button class=\"button primary\" onclick=\"register()\">Получить ссылку на вход</button></div></div></div>
-<script>const modal=document.getElementById('register'),plan=document.getElementById('plan');function openPlans(id=''){{modal.classList.add('open');if(id)selectPlan(id)}}function selectPlan(id){{plan.value=id;document.querySelectorAll('[data-order-plan]').forEach(x=>x.classList.toggle('selected',x.dataset.orderPlan===String(id)));document.querySelectorAll('.tier-group').forEach(x=>x.classList.toggle('selected',!!x.querySelector('.selected')))}}document.querySelectorAll('[data-choose-plan]').forEach(b=>b.onclick=()=>openPlans());document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>openPlans(b.dataset.plan));document.querySelectorAll('[data-order-plan]').forEach(b=>b.onclick=()=>selectPlan(b.dataset.orderPlan));function closeModal(){{modal.classList.remove('open')}}async function register(){{const out=document.getElementById('result');if(!plan.value){{out.className='error';out.textContent='Выберите подписку';return}}out.className='';out.textContent='Отправляем…';const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('email').value,plan_id:Number(plan.value)}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка регистрации')}};</script>"""
+<div class=\"modal\" id=\"register\"><div class=\"modal-card plan-modal\"><h3>Выберите подписку</h3><p class=\"muted\">Сначала выберите уровень, затем оформите доступ по email.</p><div class=\"tier-groups\">{_tier_selector(plans)}</div><input id=\"plan\" type=\"hidden\"><label>Email<input id=\"email\" type=\"email\" autocomplete=\"email\" placeholder=\"you@example.com\"></label><button class=\"button primary gradient\" type=\"button\" onclick=\"register()\">Получить код на email</button><div id=\"registration-code-step\" hidden><label>Код из письма<input id=\"registration-code\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"6\" pattern=\"[0-9]{{6}}\" placeholder=\"000000\"></label><button class=\"button primary gradient\" type=\"button\" onclick=\"verifyRegistrationCode()\">Войти по коду</button></div><p id=\"result\"></p><div class=\"actions\"><button class=\"button\" onclick=\"closeModal()\">Отмена</button></div></div></div>
+<script>const modal=document.getElementById('register'),plan=document.getElementById('plan');function openPlans(id=''){{modal.classList.add('open');if(id)selectPlan(id)}}function selectPlan(id){{plan.value=id;document.querySelectorAll('[data-order-plan]').forEach(x=>x.classList.toggle('selected',x.dataset.orderPlan===String(id)));document.querySelectorAll('.tier-group').forEach(x=>x.classList.toggle('selected',!!x.querySelector('.selected')))}}document.querySelectorAll('[data-choose-plan]').forEach(b=>b.onclick=()=>openPlans());document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>openPlans(b.dataset.plan));document.querySelectorAll('[data-order-plan]').forEach(b=>b.onclick=()=>selectPlan(b.dataset.orderPlan));function closeModal(){{modal.classList.remove('open')}}async function register(){{const out=document.getElementById('result');if(!plan.value){{out.className='error';out.textContent='Выберите подписку';return}}out.className='';out.textContent='Отправляем код…';const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('email').value,plan_id:Number(plan.value)}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка регистрации');if(r.ok){{document.getElementById('registration-code-step').hidden=false;document.getElementById('registration-code').focus()}}}}async function verifyRegistrationCode(){{const out=document.getElementById('result');out.className='';out.textContent='Проверяем код…';const r=await fetch('/web/code/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('email').value,code:document.getElementById('registration-code').value}})}});const d=await r.json();if(r.ok){{location.href=d.next_url||'/cabinet';return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}};</script>"""
     return HTMLResponse(_shell(body), headers=_headers())
 
 
-async def _issue_link(user: User, email_address: str, db: AsyncSession) -> datetime:
-    raw = secrets.token_urlsafe(32)
-    expires = datetime.now(timezone.utc) + timedelta(days=settings.cabinet_token_ttl_days)
-    access = CabinetAccessToken(user_id=user.id, token_hash=_digest(raw), expires_at=expires)
-    db.add(access)
-    base = settings.public_base_url.rstrip("/")
-    link = f"{base}/cabinet/access/{raw}"
+def _code_digest(user_id: int, code: str) -> str:
+    return hmac.new(
+        settings.service_api_token.encode(),
+        f"cabinet-login:{user_id}:{code}".encode(),
+        sha256,
+    ).hexdigest()
+
+
+async def _issue_code(user: User, email_address: str, db: AsyncSession) -> datetime:
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.cabinet_email_code_ttl_minutes
+    )
+    await db.execute(delete(CabinetLoginCode).where(CabinetLoginCode.user_id == user.id))
+    db.add(
+        CabinetLoginCode(
+            user_id=user.id,
+            code_hash=_code_digest(user.id, code),
+            expires_at=expires,
+        )
+    )
     try:
-        await send_cabinet_link(email_address, link)
+        await send_cabinet_code(
+            email_address,
+            code,
+            settings.cabinet_email_code_ttl_minutes,
+        )
     except EmailDeliveryError as exc:
         await db.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -227,8 +252,63 @@ async def register(data: Registration, db: AsyncSession = Depends(get_db)):
             user = await db.scalar(select(User).where(User.email == email_address))
             if user is None:
                 raise HTTPException(status_code=409, detail="Не удалось создать пользователя")
-    expires = await _issue_link(user, email_address, db)
-    return {"message": "Ссылка для входа отправлена на почту", "expires_at": expires}
+    expires = await _issue_code(user, email_address, db)
+    return {"message": "Код для входа отправлен на почту", "expires_at": expires}
+
+
+@router.post("/web/code/login")
+async def email_code_login(data: EmailCodeLogin, db: AsyncSession = Depends(get_db)):
+    email_address = data.email.strip().lower()
+    user = await db.scalar(select(User).where(User.email == email_address))
+    login_code = None
+    if user is not None:
+        login_code = await db.scalar(
+            select(CabinetLoginCode)
+            .where(CabinetLoginCode.user_id == user.id)
+            .order_by(CabinetLoginCode.id.desc())
+            .with_for_update()
+        )
+
+    now = datetime.now(timezone.utc)
+    expires_at = None if login_code is None else login_code.expires_at.replace(
+        tzinfo=login_code.expires_at.tzinfo or timezone.utc
+    )
+    submitted_hash = _code_digest(user.id if user is not None else 0, data.code)
+    valid = (
+        user is not None
+        and user.status == "active"
+        and login_code is not None
+        and login_code.used_at is None
+        and login_code.attempts < 5
+        and expires_at is not None
+        and expires_at > now
+        and secrets.compare_digest(login_code.code_hash, submitted_hash)
+    )
+    if not valid:
+        if login_code is not None and login_code.used_at is None:
+            login_code.attempts += 1
+            if login_code.attempts >= 5 or (expires_at is not None and expires_at <= now):
+                login_code.used_at = now
+            await db.commit()
+        raise HTTPException(status_code=401, detail="Неверный или просроченный код")
+
+    login_code.used_at = now
+    raw = secrets.token_urlsafe(32)
+    session_expires = now + timedelta(days=settings.cabinet_token_ttl_days)
+    db.add(
+        CabinetAccessToken(
+            user_id=user.id,
+            token_hash=_digest(raw),
+            expires_at=session_expires,
+        )
+    )
+    await db.commit()
+    response = JSONResponse(
+        {"message": "Вход выполнен", "next_url": "/cabinet"},
+        headers=_headers(),
+    )
+    _set_cabinet_cookie(response, raw)
+    return response
 
 
 @router.post("/web/password/login")
@@ -258,8 +338,8 @@ async def telegram_cabinet_link(data: TelegramCabinetLink, db: AsyncSession = De
     if owner is not None:
         raise HTTPException(status_code=409, detail="Этот email уже связан с другим аккаунтом")
     user.email = email_address
-    expires = await _issue_link(user, email_address, db)
-    return {"message": "Ссылка для входа отправлена на почту", "expires_at": expires}
+    expires = await _issue_code(user, email_address, db)
+    return {"message": "Код для входа отправлен на почту", "expires_at": expires}
 
 
 @router.post("/web/temporary-register")
@@ -351,7 +431,7 @@ async def cabinet_access(token: str, db: AsyncSession = Depends(get_db)):
 async def cabinet(cabinet_token: str | None = Cookie(default=None, alias=COOKIE), db: AsyncSession = Depends(get_db)):
     found = await _access(cabinet_token, db)
     if found is None:
-        body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><a class="button" href="/">На главную</a></nav></div><main class="login-page"><section class="login-card"><h1>Вход в аккаунт</h1><p class="muted">Рады видеть вас снова.</p><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="email" placeholder="you@example.com"><div class="login-tabs"><button class="active" type="button" data-login-mode="email">Код из письма</button><button type="button" data-login-mode="password">Пароль</button></div><div class="login-mode" data-mode-panel="email"><p class="muted" style="margin-top:22px">Пришлём одноразовую ссылку на почту — пароль не нужен.</p><button class="button gradient" type="button" onclick="requestLogin()">Получить код на email</button></div><div class="login-mode" data-mode-panel="password" hidden><div class="password-heading"><label for="login-password">Пароль</label><button type="button" onclick="requestLogin()">Забыли пароль?</button></div><input id="login-password" type="password" autocomplete="current-password" minlength="8" placeholder="••••••••"><button class="button gradient" type="button" onclick="passwordLogin()">Войти</button></div><p id="login-result"></p>{_temporary_registration_button()}</section><p class="login-footer">Нет аккаунта? <a href="/#plans">Зарегистрироваться</a></p></main><script>const tabs=document.querySelectorAll('[data-login-mode]');tabs.forEach(tab=>tab.onclick=()=>{{tabs.forEach(x=>x.classList.toggle('active',x===tab));document.querySelectorAll('[data-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.modePanel!==tab.dataset.loginMode)}});async function requestLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Отправляем…';const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка отправки')}}async function passwordLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем…';const r=await fetch('/web/password/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,password:document.getElementById('login-password').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}};</script>'''
+        body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><a class="button" href="/">На главную</a></nav></div><main class="login-page"><section class="login-card"><h1>Вход в аккаунт</h1><p class="muted">Рады видеть вас снова.</p><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="email" placeholder="you@example.com"><div class="login-tabs"><button class="active" type="button" data-login-mode="email">Код из письма</button><button type="button" data-login-mode="password">Пароль</button></div><div class="login-mode" data-mode-panel="email"><p class="muted" style="margin-top:22px">Пришлём шестизначный одноразовый код — пароль не нужен.</p><button class="button gradient" type="button" onclick="requestLogin()">Получить код на email</button><label for="login-code">Код из письма</label><input id="login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{{6}}" placeholder="000000"><button class="button gradient" type="button" onclick="codeLogin()">Войти по коду</button></div><div class="login-mode" data-mode-panel="password" hidden><div class="password-heading"><label for="login-password">Пароль</label><button type="button" onclick="requestPasswordReset()">Получить код</button></div><input id="login-password" type="password" autocomplete="current-password" minlength="8" placeholder="••••••••"><button class="button gradient" type="button" onclick="passwordLogin()">Войти</button></div><p id="login-result"></p>{_temporary_registration_button()}</section><p class="login-footer">Нет аккаунта? <a href="/#plans">Зарегистрироваться</a></p></main><script>const tabs=document.querySelectorAll('[data-login-mode]');function selectLoginMode(mode){{tabs.forEach(x=>x.classList.toggle('active',x.dataset.loginMode===mode));document.querySelectorAll('[data-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.modePanel!==mode)}}tabs.forEach(tab=>tab.onclick=()=>selectLoginMode(tab.dataset.loginMode));async function requestLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Отправляем код…';const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка отправки');if(r.ok)document.getElementById('login-code').focus()}}async function requestPasswordReset(){{selectLoginMode('email');await requestLogin()}}async function codeLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем код…';const r=await fetch('/web/code/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,code:document.getElementById('login-code').value}})}});const d=await r.json();if(r.ok){{location.href=d.next_url||'/cabinet';return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}}async function passwordLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем…';const r=await fetch('/web/password/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,password:document.getElementById('login-password').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}};</script>'''
         return HTMLResponse(_shell(body, title="Вход — Freedom VPN"), status_code=401, headers=_headers())
     user, access = found
     access.last_used_at = datetime.now(timezone.utc)

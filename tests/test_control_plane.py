@@ -134,28 +134,45 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         authenticated = await self.client.get("/admin", auth=self.admin_auth)
         self.assertEqual(200, authenticated.status_code)
 
-    async def test_web_registration_emails_hashed_magic_link_and_opens_cabinet(self) -> None:
-        with patch("app.api.routes.web.send_cabinet_link", new=AsyncMock()) as send:
+    async def test_web_registration_emails_one_time_code_and_opens_cabinet(self) -> None:
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
             registered = await self.client.post(
                 "/web/register",
                 json={"email": "Web.User@example.com", "plan_id": 1},
             )
         self.assertEqual(200, registered.status_code, registered.text)
-        link = send.await_args.args[1]
-        self.assertIn("/cabinet/access/", link)
-        raw_token = link.rsplit("/", 1)[-1]
+        code = send.await_args.args[1]
+        self.assertRegex(code, r"^\d{6}$")
+        self.assertEqual(10, send.await_args.args[2])
 
-        from app.db.models.cabinet_access import CabinetAccessToken
+        from app.db.models.cabinet_login_code import CabinetLoginCode
 
         async with self.session_factory() as db:
             web_user = await db.scalar(select(User).where(User.email == "web.user@example.com"))
             self.assertIsNotNone(web_user)
-            access = await db.scalar(select(CabinetAccessToken).where(CabinetAccessToken.user_id == web_user.id))
-            self.assertNotEqual(raw_token, access.token_hash)
+            login_code = await db.scalar(
+                select(CabinetLoginCode).where(CabinetLoginCode.user_id == web_user.id)
+            )
+            self.assertNotEqual(code, login_code.code_hash)
 
-        opened = await self.client.get(f"/cabinet/access/{raw_token}", follow_redirects=False)
-        self.assertEqual(303, opened.status_code)
-        self.assertEqual("/cabinet/password", opened.headers["location"])
+        wrong_code = "000000" if code != "000000" else "000001"
+        rejected_code = await self.client.post(
+            "/web/code/login",
+            json={"email": "web.user@example.com", "code": wrong_code},
+        )
+        self.assertEqual(401, rejected_code.status_code)
+        code_login = await self.client.post(
+            "/web/code/login",
+            json={"email": "WEB.USER@example.com", "code": code},
+        )
+        self.assertEqual(200, code_login.status_code, code_login.text)
+        self.assertEqual("/cabinet", code_login.json()["next_url"])
+        replayed = await self.client.post(
+            "/web/code/login",
+            json={"email": "web.user@example.com", "code": code},
+        )
+        self.assertEqual(401, replayed.status_code)
+
         password_saved = await self.client.post(
             "/web/password", json={"password": "correct-horse-123"}
         )
@@ -203,7 +220,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual("processing", receipt.json()["status"])
 
     async def test_bot_can_link_existing_telegram_user_to_email(self) -> None:
-        with patch("app.api.routes.web.send_cabinet_link", new=AsyncMock()) as send:
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
             response = await self.client.post(
                 "/web/telegram-cabinet-link",
                 headers=self.service_headers,
@@ -211,6 +228,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             )
         self.assertEqual(200, response.status_code, response.text)
         self.assertEqual("owner@example.com", send.await_args.args[0])
+        self.assertRegex(send.await_args.args[1], r"^\d{6}$")
         async with self.session_factory() as db:
             user = await db.get(User, self.user_id)
             self.assertEqual("owner@example.com", user.email)
