@@ -699,15 +699,13 @@ def qr_file(value: str) -> BufferedInputFile:
 
 async def show_try_payment(target: Message | CallbackQuery) -> None:
     method = await sber_payment_method()
-    rows = []
-    if SUPPORT_URL:
-        rows.append([InlineKeyboardButton(text="✅ Я оплатил — поддержка", url=SUPPORT_URL)])
+    rows = [[InlineKeyboardButton(text="✅ Я оплатил", callback_data="try_paid_support")]]
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
     keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
     text = (
         "🧪 <b>Попробовать VPN</b>\n\n"
         f"К оплате: <b>{TRY_PAYMENT_AMOUNT_RUB} ₽</b>\n"
-        "Оплатите по QR Сбербанка и нажмите «Я оплатил — поддержка» "
+        "Оплатите по QR Сбербанка и нажмите «Я оплатил» "
         "или отправьте чек в чат. Тестовый доступ будет выдан после проверки."
     )
     message = target.message if isinstance(target, CallbackQuery) else target
@@ -1205,6 +1203,22 @@ async def device_handler(callback: CallbackQuery):
 @router.callback_query(F.data == "try_start")
 async def try_start_handler(callback: CallbackQuery):
     await show_try_payment(callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "try_paid_support")
+async def try_paid_support_handler(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SupportFlow.waiting_message)
+    await callback.message.answer(
+        "✅ Напишите «Я оплатил пробный доступ» и приложите чек одним сообщением.\n"
+        "Сообщение уйдёт администратору в новый чат для проверки.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Главное меню")]],
+            resize_keyboard=True,
+            is_persistent=True,
+            input_field_placeholder="Прикрепите чек или напишите сообщение",
+        ),
+    )
     await callback.answer()
 
 
