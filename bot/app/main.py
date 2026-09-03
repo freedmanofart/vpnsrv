@@ -98,13 +98,6 @@ def web_app_button(text: str, url: str, fallback: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=fallback)
 
 
-def cabinet_keyboard_button(text: str, path: str = "") -> KeyboardButton:
-    url = web_app_url(path)
-    if url:
-        return KeyboardButton(text=text, web_app=WebAppInfo(url=url))
-    return KeyboardButton(text=text)
-
-
 class PromoFlow(StatesGroup):
     waiting_code = State()
 
@@ -169,7 +162,6 @@ def popup_menu() -> ReplyKeyboardMarkup:
     """Постоянное раскрывающееся меню рядом с полем ввода Telegram."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [cabinet_keyboard_button("🌐 Web кабинет")],
             [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
             [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
@@ -2120,7 +2112,13 @@ async def main():
             BotCommand(command="chatid", description="ID чата для админ-уведомлений"),
         ]
     )
-    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    cabinet_url = web_app_url()
+    if cabinet_url:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="Web кабинет", web_app=WebAppInfo(url=cabinet_url))
+        )
+    else:
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
     dp = Dispatcher()
 
