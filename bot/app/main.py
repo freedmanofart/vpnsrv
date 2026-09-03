@@ -951,6 +951,44 @@ async def welcome_email_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+MENU_BUTTON_TEXTS = {
+    "💳 Приобрести подписку",
+    "💳 Оплатить",
+    "👤 Управление подпиской",
+    "👤 Личный кабинет",
+    "ℹ️ Информация",
+    "📖 Инструкции",
+    "🏷 Промокод",
+    "🧪 Попробовать",
+    "🆘 Поддержка",
+    "⬅️ Главное меню",
+}
+
+
+async def handle_menu_button(message: Message, state: FSMContext) -> None:
+    text = message.text or ""
+    await state.clear()
+    if text in {"💳 Приобрести подписку", "💳 Оплатить"}:
+        await buy_command_handler(message, state)
+    elif text in {"👤 Управление подпиской", "👤 Личный кабинет"}:
+        await vpn_command_handler(message)
+    elif text in {"ℹ️ Информация", "📖 Инструкции"}:
+        await help_command_handler(message)
+    elif text == "🏷 Промокод":
+        await popup_promo_handler(message, state)
+    elif text == "🧪 Попробовать":
+        await show_try_payment(message)
+    elif text == "🆘 Поддержка":
+        await popup_support_handler(message)
+    else:
+        await message.answer(content_text("main_menu"), parse_mode="HTML", reply_markup=popup_menu())
+
+
+@router.message(EmailCabinetFlow.waiting_email, F.text.in_(MENU_BUTTON_TEXTS))
+async def menu_button_during_email_handler(message: Message, state: FSMContext):
+    await handle_menu_button(message, state)
+
+
 @router.message(EmailCabinetFlow.waiting_email)
 async def cabinet_email_handler(message: Message, state: FSMContext):
     email_address = (message.text or "").strip().lower()
@@ -1199,6 +1237,11 @@ async def support_start_handler(callback: CallbackQuery, state: FSMContext):
         ),
     )
     await callback.answer()
+
+
+@router.message(SupportFlow.waiting_message, F.text.in_(MENU_BUTTON_TEXTS))
+async def menu_button_during_support_handler(message: Message, state: FSMContext):
+    await handle_menu_button(message, state)
 
 
 @router.message(SupportFlow.waiting_message)
