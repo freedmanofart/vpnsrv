@@ -147,7 +147,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn"), InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
         [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
         [InlineKeyboardButton(text="ℹ️ Информация", callback_data="information"), support_button],
-        [channel_button, cabinet_button("🌐 Web-кабинет")],
+        [channel_button],
     ]
     extra_buttons = [
         InlineKeyboardButton(text=item["text"], url=item["url"])
@@ -176,7 +176,9 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
     site = web_app_button("🌐 Сайт", WEB_SITE_URL, "site_missing")
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [site, InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
+            [site],
+            [cabinet_button("🌐 Web-кабинет")],
+            [InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
         ],
     )
 
