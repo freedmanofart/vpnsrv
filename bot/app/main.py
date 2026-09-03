@@ -92,13 +92,6 @@ def cabinet_button(text: str, path: str = "") -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data="cabinet_email")
 
 
-def cabinet_keyboard_button(text: str, path: str = "") -> KeyboardButton:
-    url = web_app_url(path)
-    if url:
-        return KeyboardButton(text=text, web_app=WebAppInfo(url=url))
-    return KeyboardButton(text=text)
-
-
 class PromoFlow(StatesGroup):
     waiting_code = State()
 
@@ -145,7 +138,7 @@ def main_menu() -> InlineKeyboardMarkup:
     )
     support_button = InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
     rows = [
-        [cabinet_button("💳 Приобрести подписку", "?checkout=1#payment"), cabinet_button("👤 Управление подпиской")],
+        [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn"), InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
         [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
         [InlineKeyboardButton(text="ℹ️ Информация", callback_data="information"), support_button],
         [channel_button, cabinet_button("🌐 Web-кабинет")],
@@ -163,7 +156,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
     """Постоянное раскрывающееся меню рядом с полем ввода Telegram."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [cabinet_keyboard_button("💳 Приобрести подписку", "?checkout=1#payment"), cabinet_keyboard_button("👤 Управление подпиской")],
+            [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
             [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
         ],
@@ -2103,15 +2096,7 @@ async def main():
             BotCommand(command="chatid", description="ID чата для админ-уведомлений"),
         ]
     )
-    if WEB_CABINET_URL.startswith("https://"):
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="Web кабинет",
-                web_app=WebAppInfo(url=WEB_CABINET_URL),
-            )
-        )
-    else:
-        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
     dp = Dispatcher()
 
