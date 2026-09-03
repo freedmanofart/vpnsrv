@@ -882,6 +882,16 @@ async def policy_command_handler(message: Message):
     )
 
 
+@router.message(Command("chatid"))
+async def chat_id_command_handler(message: Message):
+    await message.answer(
+        "ID этого чата для админ-уведомлений:\n\n"
+        f"<code>{message.chat.id}</code>\n\n"
+        "Вставьте это число в VPN Admin → Настройки → Telegram admin chat ID.",
+        parse_mode="HTML",
+    )
+
+
 @router.message(F.text.in_({"💳 Приобрести подписку", "💳 Оплатить"}))
 async def popup_buy_handler(message: Message, state: FSMContext):
     await buy_command_handler(message, state)
@@ -1971,6 +1981,7 @@ async def main():
             BotCommand(command="vpn", description="Управление подпиской"),
             BotCommand(command="buy", description="Купить VPN"),
             BotCommand(command="help", description="Информация"),
+            BotCommand(command="chatid", description="ID чата для админ-уведомлений"),
         ]
     )
     if WEB_CABINET_URL.startswith("https://"):
