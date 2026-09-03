@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 SUPPORT_NOTIFICATION_CHAT = "@Freedom_VPN_Support"
 
 
+def _telegram_error_details(exc: httpx.HTTPError) -> tuple[str, int | None, str]:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.__class__.__name__, exc.response.status_code, exc.response.text[:500]
+    return exc.__class__.__name__, None, str(exc)[:500]
+
+
 def _support_chat_id() -> str:
     return SUPPORT_NOTIFICATION_CHAT
 
@@ -160,10 +166,14 @@ async def _send_telegram_message(
                 )
                 response.raise_for_status()
             except httpx.HTTPError as exc:
-                details = ""
-                if isinstance(exc, httpx.HTTPStatusError):
-                    details = exc.response.text[:500]
-                logger.warning("admin_telegram_notification_failed chat_id=%s: %s %s", chat_id, exc, details)
+                error_type, status_code, details = _telegram_error_details(exc)
+                logger.warning(
+                    "admin_telegram_notification_failed chat_id=%s error=%s status=%s body=%s",
+                    chat_id,
+                    error_type,
+                    status_code,
+                    details,
+                )
 
 
 async def _send_telegram_receipt(
@@ -195,10 +205,14 @@ async def _send_telegram_receipt(
                 )
                 response.raise_for_status()
             except httpx.HTTPError as exc:
-                details = ""
-                if isinstance(exc, httpx.HTTPStatusError):
-                    details = exc.response.text[:500]
-                logger.warning("admin_telegram_receipt_failed chat_id=%s: %s %s", chat_id, exc, details)
+                error_type, status_code, details = _telegram_error_details(exc)
+                logger.warning(
+                    "admin_telegram_receipt_failed chat_id=%s error=%s status=%s body=%s",
+                    chat_id,
+                    error_type,
+                    status_code,
+                    details,
+                )
 
 
 async def notify_payment_created(db: AsyncSession, payment: Payment) -> None:
