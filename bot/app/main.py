@@ -167,9 +167,14 @@ def popup_menu() -> ReplyKeyboardMarkup:
 
 
 def welcome_keyboard() -> InlineKeyboardMarkup:
+    site = (
+        InlineKeyboardButton(text="🌐 Сайт", url=WEB_SITE_URL)
+        if WEB_SITE_URL
+        else InlineKeyboardButton(text="🌐 Сайт", callback_data="site_missing")
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [cabinet_button("🌐 Web-кабинет"), cabinet_button("⚡ Быстрый доступ")],
+            [site, InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
         ],
     )
 
