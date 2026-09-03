@@ -152,6 +152,7 @@ ADMIN_DOCS = [
     {"id": "frontend", "name": "Frontend-структура сайта и web-кабинета", "path": "docs/frontend-site-structure.md"},
     {"id": "web_cabinet", "name": "Web-кабинет, почта, коды и пароли", "path": "docs/web-cabinet.md"},
     {"id": "notifications", "name": "Уведомления: email, bot, lifecycle", "path": "docs/notifications.md"},
+    {"id": "platega", "name": "Подключение Platega: бот и web-кабинет", "path": "docs/platega-bot-payment-integration.md"},
     {"id": "vpn_lifecycle", "name": "Жизненный цикл VPN API", "path": "docs/vpn-api-lifecycle.md"},
     {"id": "latest_changes", "name": "Последние изменения", "path": "docs/latest-changes-2026-09-01.md"},
     {"id": "access", "name": "Доступы и переменные", "path": "docs/access-and-credentials.md"},
