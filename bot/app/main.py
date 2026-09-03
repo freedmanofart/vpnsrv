@@ -92,6 +92,19 @@ def cabinet_button(text: str, path: str = "") -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data="cabinet_email")
 
 
+def web_app_button(text: str, url: str, fallback: str) -> InlineKeyboardButton:
+    if url.startswith("https://"):
+        return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=url))
+    return InlineKeyboardButton(text=text, callback_data=fallback)
+
+
+def cabinet_keyboard_button(text: str, path: str = "") -> KeyboardButton:
+    url = web_app_url(path)
+    if url:
+        return KeyboardButton(text=text, web_app=WebAppInfo(url=url))
+    return KeyboardButton(text=text)
+
+
 class PromoFlow(StatesGroup):
     waiting_code = State()
 
@@ -159,6 +172,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
             [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
+            [cabinet_keyboard_button("🌐 Web-кабинет")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -167,11 +181,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
 
 
 def welcome_keyboard() -> InlineKeyboardMarkup:
-    site = (
-        InlineKeyboardButton(text="🌐 Сайт", url=WEB_SITE_URL)
-        if WEB_SITE_URL
-        else InlineKeyboardButton(text="🌐 Сайт", callback_data="site_missing")
-    )
+    site = web_app_button("🌐 Сайт", WEB_SITE_URL, "site_missing")
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [site, InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
@@ -923,6 +933,15 @@ async def popup_buy_handler(message: Message, state: FSMContext):
 @router.message(F.text.in_({"👤 Управление подпиской", "👤 Личный кабинет"}))
 async def popup_vpn_handler(message: Message):
     await vpn_command_handler(message)
+
+
+@router.message(F.text == "🌐 Web-кабинет")
+async def popup_web_cabinet_handler(message: Message, state: FSMContext):
+    await state.set_state(EmailCabinetFlow.waiting_email)
+    await message.answer(
+        "✉️ Введите email. На него будет отправлен одноразовый код для входа в web-кабинет.",
+        reply_markup=popup_menu(),
+    )
 
 
 @router.callback_query(F.data == "site_missing")
