@@ -209,7 +209,7 @@ def _code_digest(user_id: int, code: str) -> str:
     ).hexdigest()
 
 
-async def _issue_code(user: User, email_address: str, db: AsyncSession) -> datetime:
+async def _issue_code(user: User, email_address: str, db: AsyncSession) -> tuple[datetime, str]:
     code = f"{secrets.randbelow(1_000_000):06d}"
     expires = datetime.now(timezone.utc) + timedelta(
         minutes=settings.cabinet_email_code_ttl_minutes
@@ -286,7 +286,7 @@ async def _issue_code(user: User, email_address: str, db: AsyncSession) -> datet
             "expires_at": expires.isoformat(),
         },
     )
-    return expires
+    return expires, code
 
 
 def _set_cabinet_cookie(response: Response, raw: str) -> None:
@@ -322,7 +322,7 @@ async def register(data: Registration, db: AsyncSession = Depends(get_db)):
             user = await db.scalar(select(User).where(User.email == email_address))
             if user is None:
                 raise HTTPException(status_code=409, detail="Не удалось создать пользователя")
-    expires = await _issue_code(user, email_address, db)
+    expires, _ = await _issue_code(user, email_address, db)
     return {"message": "Код для входа отправлен на почту", "expires_at": expires}
 
 
@@ -408,8 +408,8 @@ async def telegram_cabinet_link(data: TelegramCabinetLink, db: AsyncSession = De
     if owner is not None:
         raise HTTPException(status_code=409, detail="Этот email уже связан с другим аккаунтом")
     user.email = email_address
-    expires = await _issue_code(user, email_address, db)
-    return {"message": "Код для входа отправлен на почту", "expires_at": expires}
+    expires, code = await _issue_code(user, email_address, db)
+    return {"message": "Код для входа отправлен на почту", "expires_at": expires, "code": code, "cabinet_url": "/cabinet"}
 
 
 @router.post("/web/temporary-register")

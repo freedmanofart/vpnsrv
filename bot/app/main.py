@@ -56,6 +56,8 @@ SUPPORT_URL = content_link("support")
 YOOMONEY_PAYMENT_URL = content_link("payment")
 TRY_PAYMENT_URL = content_link("try_payment")
 TRY_PAYMENT_AMOUNT_RUB = "50"
+REVIEWS_CHANNEL = os.getenv("REVIEWS_CHANNEL", "@FreedmanVPNreviews")
+REVIEWS_CHANNEL_URL = os.getenv("REVIEWS_CHANNEL_URL", "https://t.me/FreedmanVPNreviews")
 TELEGRAM_STARS_RATE = Decimal(os.getenv("TELEGRAM_STARS_RATE", "0.6"))
 PRIVACY_POLICY_URL = "https://telegra.ph/Politika-konfidencialnosti-09-02-66"
 TERMS_OF_USE_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-09-02-30"
@@ -122,7 +124,12 @@ class SupportFlow(StatesGroup):
 
 
 class PaidTrialFlow(StatesGroup):
+    waiting_email = State()
     waiting_receipt = State()
+
+
+class ReviewFlow(StatesGroup):
+    waiting_text = State()
 
 
 def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.AsyncClient:
@@ -147,10 +154,12 @@ def main_menu() -> InlineKeyboardMarkup:
         else InlineKeyboardButton(text="📣 Наш канал", callback_data="channel_info")
     )
     support_button = InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
+    reviews_button = InlineKeyboardButton(text="⭐ Отзывы", callback_data="reviews")
     rows = [
         [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn"), InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
         [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
         [InlineKeyboardButton(text="ℹ️ Информация", callback_data="information"), support_button],
+        [reviews_button],
         [channel_button],
     ]
     extra_buttons = [
@@ -169,6 +178,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
             [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
+            [KeyboardButton(text="⭐ Отзывы")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -181,6 +191,7 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [site, InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
+            [cabinet_button("🌐 Web кабинет")],
         ],
     )
 
@@ -260,6 +271,16 @@ def support_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def reviews_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👀 Посмотреть отзывы", url=REVIEWS_CHANNEL_URL)],
+            [InlineKeyboardButton(text="✍️ Оставить отзыв", callback_data="review_write")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+        ],
+    )
+
+
 def policy_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -302,6 +323,15 @@ def cabinet_payment_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [cabinet_button("💳 Оплатить подписку", "?checkout=1#payment")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+        ]
+    )
+
+
+def cabinet_open_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [cabinet_button("🌐 Открыть web-кабинет")],
             [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
         ]
     )
@@ -480,6 +510,27 @@ async def send_cabinet_code_to_email(telegram_id: int, email_address: str) -> di
         )
         response.raise_for_status()
         return response.json()
+
+
+def cabinet_public_url(path: str = "") -> str:
+    base = WEB_CABINET_URL.rstrip("/") if WEB_CABINET_URL else f"{POLICY_BASE_URL.rstrip('/')}/cabinet"
+    if not path:
+        return base
+    return f"{base}{path}"
+
+
+def cabinet_credentials_text(email_address: str, payload: dict) -> str:
+    code = payload.get("code") or "проверьте письмо"
+    expires_at = str(payload.get("expires_at") or "").replace("T", " ").replace("+00:00", " UTC")
+    return (
+        "✅ Доступ в личный кабинет отправлен на email.\n\n"
+        "<b>Креды для входа:</b>\n"
+        f"Email: <code>{html.escape(email_address)}</code>\n"
+        f"Код: <code>{html.escape(str(code))}</code>\n"
+        f"Web-кабинет: {html.escape(cabinet_public_url())}\n"
+        + (f"Код действует до: <b>{html.escape(expires_at)}</b>\n\n" if expires_at else "\n")
+        + "Теперь пришлите чек фотографией или файлом."
+    )
 
 
 async def get_admin_chat_id() -> int:
@@ -976,6 +1027,7 @@ MENU_BUTTON_TEXTS = {
     "🏷 Промокод",
     "🧪 Попробовать",
     "🆘 Поддержка",
+    "⭐ Отзывы",
     "⬅️ Главное меню",
 }
 
@@ -995,6 +1047,8 @@ async def handle_menu_button(message: Message, state: FSMContext) -> None:
         await show_try_payment(message)
     elif text == "🆘 Поддержка":
         await popup_support_handler(message)
+    elif text == "⭐ Отзывы":
+        await reviews_message(message)
     else:
         await message.answer(content_text("main_menu"), parse_mode="HTML", reply_markup=popup_menu())
 
@@ -1052,6 +1106,48 @@ async def popup_support_handler(message: Message):
         parse_mode="HTML",
         reply_markup=support_keyboard(),
     )
+
+
+@router.message(F.text == "⭐ Отзывы")
+async def reviews_message(message: Message):
+    await message.answer(
+        "⭐ <b>Отзывы Freedom VPN</b>\n\nМожно посмотреть отзывы других клиентов или оставить свой отзыв.",
+        parse_mode="HTML",
+        reply_markup=reviews_keyboard(),
+    )
+
+
+@router.message(ReviewFlow.waiting_text, F.text.in_(MENU_BUTTON_TEXTS))
+async def menu_button_during_review_handler(message: Message, state: FSMContext):
+    await handle_menu_button(message, state)
+
+
+@router.message(ReviewFlow.waiting_text)
+async def review_text_handler(message: Message, state: FSMContext, bot: Bot):
+    if not message.from_user:
+        await message.answer("Не удалось определить пользователя.", reply_markup=popup_menu())
+        return
+    text = (message.text or message.caption or "").strip()
+    if len(text) < 5:
+        await message.answer("Напишите отзыв чуть подробнее — минимум 5 символов.")
+        return
+    if len(text) > 1200:
+        await message.answer("Отзыв слишком длинный. Сократите, пожалуйста, до 1200 символов.")
+        return
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
+    review = (
+        "⭐ <b>Отзыв клиента Freedom VPN</b>\n\n"
+        f"{html.escape(text)}\n\n"
+        f"— {html.escape(username or 'клиент')}"
+    )
+    try:
+        await bot.send_message(REVIEWS_CHANNEL, review, parse_mode="HTML")
+    except Exception:
+        logging.exception("Failed to publish review")
+        await message.answer("❌ Не удалось опубликовать отзыв. Проверьте, что бот админ канала отзывов.", reply_markup=popup_menu())
+        return
+    await state.clear()
+    await message.answer("✅ Спасибо! Отзыв опубликован в канале.", reply_markup=reviews_keyboard())
 
 
 @router.message(F.text == "⬅️ Главное меню")
@@ -1225,15 +1321,15 @@ async def try_start_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "try_paid_support")
 async def try_paid_support_handler(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(PaidTrialFlow.waiting_receipt)
+    await state.set_state(PaidTrialFlow.waiting_email)
     await callback.message.answer(
-        "✅ Пришлите чек по оплате пробного доступа фотографией или файлом.\n"
-        "После проверки администратор нажмёт кнопку апрува, и бот автоматически выдаст VPN на 3 часа.",
+        "✉️ Введите email для личного кабинета.\n"
+        "На него придёт ссылка/код входа, а в сообщении я сразу покажу креды доступа.",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="⬅️ Главное меню")]],
             resize_keyboard=True,
             is_persistent=True,
-            input_field_placeholder="Прикрепите чек",
+            input_field_placeholder="Введите email",
         ),
     )
     await callback.answer()
@@ -1270,6 +1366,31 @@ async def support_start_handler(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data == "reviews")
+async def reviews_handler(callback: CallbackQuery):
+    await show_screen(
+        callback,
+        "⭐ <b>Отзывы Freedom VPN</b>\n\nМожно посмотреть отзывы других клиентов или оставить свой отзыв.",
+        reviews_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "review_write")
+async def review_write_handler(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ReviewFlow.waiting_text)
+    await callback.message.answer(
+        "✍️ Напишите отзыв одним сообщением. После отправки он появится в канале отзывов Freedom VPN.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Главное меню")]],
+            resize_keyboard=True,
+            is_persistent=True,
+            input_field_placeholder="Ваш отзыв",
+        ),
+    )
+    await callback.answer()
+
+
 @router.message(SupportFlow.waiting_message, F.text.in_(MENU_BUTTON_TEXTS))
 async def menu_button_during_support_handler(message: Message, state: FSMContext):
     await handle_menu_button(message, state)
@@ -1278,6 +1399,49 @@ async def menu_button_during_support_handler(message: Message, state: FSMContext
 @router.message(PaidTrialFlow.waiting_receipt, F.text.in_(MENU_BUTTON_TEXTS))
 async def menu_button_during_paid_trial_handler(message: Message, state: FSMContext):
     await handle_menu_button(message, state)
+
+
+@router.message(PaidTrialFlow.waiting_email, F.text.in_(MENU_BUTTON_TEXTS))
+async def menu_button_during_paid_trial_email_handler(message: Message, state: FSMContext):
+    await handle_menu_button(message, state)
+
+
+@router.message(PaidTrialFlow.waiting_email)
+async def paid_trial_email_handler(message: Message, state: FSMContext):
+    if not message.from_user:
+        await message.answer("Не удалось определить пользователя.", reply_markup=popup_menu())
+        return
+    email_address = (message.text or "").strip().lower()
+    if not email_address or "@" not in email_address or len(email_address) > 320:
+        await message.answer("Введите корректный email, например name@example.com.")
+        return
+    try:
+        payload = await send_cabinet_code_to_email(message.from_user.id, email_address)
+    except httpx.HTTPStatusError as exc:
+        detail = "Не удалось отправить код. Проверьте email или попробуйте позже."
+        try:
+            detail = exc.response.json().get("detail") or detail
+        except ValueError:
+            pass
+        await message.answer(f"❌ {html.escape(detail)}", reply_markup=popup_menu())
+        return
+    except httpx.HTTPError:
+        logging.exception("Failed to send paid trial cabinet email")
+        await message.answer("❌ Не удалось связаться с сервером.", reply_markup=popup_menu())
+        return
+    await state.update_data(email=email_address)
+    await state.set_state(PaidTrialFlow.waiting_receipt)
+    await message.answer(
+        cabinet_credentials_text(email_address, payload)
+        + "\n\nПосле проверки администратор выдаст VPN на 3 часа.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Главное меню")]],
+            resize_keyboard=True,
+            is_persistent=True,
+            input_field_placeholder="Прикрепите чек",
+        ),
+    )
 
 
 @router.message(PaidTrialFlow.waiting_receipt, F.photo | F.document)
@@ -1296,12 +1460,15 @@ async def paid_trial_receipt_handler(message: Message, state: FSMContext, bot: B
         return
 
     username = f"@{message.from_user.username}" if message.from_user.username else "—"
+    data = await state.get_data()
+    email_address = data.get("email") or "—"
     full_name = html.escape(message.from_user.full_name or "—")
     header = (
         "🧪 Оплата пробного доступа Freedom VPN\n\n"
         f"Клиент: {full_name}\n"
         f"Telegram ID: <code>{message.from_user.id}</code>\n"
         f"Username: {html.escape(username)}\n"
+        f"Email: <code>{html.escape(email_address)}</code>\n"
         f"Сумма: <b>{TRY_PAYMENT_AMOUNT_RUB} ₽</b>\n\n"
         "Проверьте чек и нажмите кнопку ниже, чтобы выдать доступ на 3 часа."
     )
@@ -1325,7 +1492,7 @@ async def paid_trial_receipt_handler(message: Message, state: FSMContext, bot: B
 
     await state.clear()
     await message.answer(
-        "✅ Чек отправлен администратору. После подтверждения бот автоматически выдаст доступ на 3 часа.",
+        "✅ Чек отправлен администратору. После проверки администратор выдаст VPN на 3 часа.",
         reply_markup=popup_menu(),
     )
 
@@ -1380,29 +1547,15 @@ async def trial_approve_handler(callback: CallbackQuery, bot: Bot):
             nodes[0]["id"],
             duration_hours=3,
         )
-        status = await get_vpn_status(telegram_id)
-        client = status.get("vpn_client")
         expires_at = subscription["expires_at"].replace("T", " ").replace("+00:00", "")
         await bot.send_message(
             telegram_id,
-            f"✅ <b>Пробный VPN активирован на 3 часа.</b>\n\nДоступ действует до <b>{expires_at} UTC</b>.",
+            "✅ <b>Ваша подписка выслана на почту.</b>\n\n"
+            f"Пробный VPN активирован на 3 часа, доступ действует до <b>{expires_at} UTC</b>.\n"
+            "Откройте web-кабинет, чтобы забрать ключ.",
             parse_mode="HTML",
-            reply_markup=vpn_ready_keyboard(),
+            reply_markup=cabinet_open_keyboard(),
         )
-        if client:
-            data = await get_vpn_client_config(client["id"])
-            value = data["config"]
-            await bot.send_photo(
-                telegram_id,
-                photo=qr_file(value),
-                caption=(
-                    "🔑 <b>Ваш VPN-ключ</b>\n\n"
-                    f"<code>{html.escape(value)}</code>\n\n"
-                    "Импортируйте ссылку или QR-код в совместимое VLESS-приложение."
-                ),
-                parse_mode="HTML",
-                reply_markup=active_vpn_keyboard(),
-            )
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest:

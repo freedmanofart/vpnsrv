@@ -27,7 +27,7 @@ from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.models.payment import Payment
 from app.db.models.payment_method import PaymentMethod
-from app.db.models.audit import AuditLog, ClientDevice, DebugSession
+from app.db.models.audit import AccessGrant, AuditLog, ClientDevice, DebugSession
 from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.session import get_db
 from app.core.security import APIPrincipal, hash_password, require_admin, require_api_access
@@ -35,7 +35,7 @@ from app.services.audit import write_audit
 from app.services.admin_settings import get_admin_contacts, set_admin_contacts
 from app.services.node_health import node_accepts_clients
 from app.services.vless import build_vless_url
-from app.services.threexui import ThreeXUIClient, ThreeXUIError
+from app.services.threexui import ThreeXUIClient, ThreeXUIError, ThreeXUIClientNotFound
 from app.services.payments import PaymentError, process_payment_event
 from app.schemas.subscription import VPNClientRotate
 from app.api.routes.subscriptions import rotate_subscription_client
@@ -445,6 +445,12 @@ async def overview(db: AsyncSession = Depends(get_db)):
     login_codes = await rows(CabinetLoginCode)
     audit_result = await db.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(300))
     audit_logs = audit_result.scalars().all()
+    paid_trial_result = await db.execute(
+        select(AccessGrant)
+        .where(AccessGrant.kind == "paid_trial", AccessGrant.code == "PAID_TRIAL_3H")
+        .order_by(AccessGrant.id.desc())
+    )
+    paid_trial_grants = paid_trial_result.scalars().all()
     email_result = await db.execute(
         select(AuditLog)
         .where(AuditLog.action.like("email.%"))
@@ -475,6 +481,9 @@ async def overview(db: AsyncSession = Depends(get_db)):
     for item in clients:
         if item.status in {"active", "disabled"}:
             client_map.setdefault(item.subscription_id, item)
+    paid_trial_map = {}
+    for grant in paid_trial_grants:
+        paid_trial_map.setdefault(grant.user_id, grant)
 
     user_rows = []
     for user in users:
@@ -484,6 +493,14 @@ async def overview(db: AsyncSession = Depends(get_db)):
         node = node_map.get(client.node_id) if client else None
         config = config_map.get(client.node_id) if client else None
         link = _client_link(client, node, config) if client and node and config else None
+        paid_trial = paid_trial_map.get(user.id)
+        paid_trial_active = bool(
+            paid_trial
+            and subscription
+            and paid_trial.subscription_id == subscription.id
+            and subscription.status == "active"
+            and _aware(subscription.expires_at) > datetime.now(timezone.utc)
+        )
         user_rows.append(
             {
                 "id": user.id,
@@ -492,6 +509,11 @@ async def overview(db: AsyncSession = Depends(get_db)):
                 "account_status": user.status,
                 "email": user.email,
                 "password": "set" if user.password_hash else "not_set",
+                "paid_trial": (
+                    f"активен до {paid_trial_active and subscription.expires_at or ''}"
+                    if paid_trial_active
+                    else ("использован" if paid_trial else "не использован")
+                ),
                 "access_active": bool(subscription and subscription.status == "active" and client and client.status == "active"),
                 "subscription_id": subscription.id if subscription else None,
                 "plan_id": plan.id if plan else None,
@@ -902,6 +924,95 @@ async def reset_user_access(
     return {"user_id": user.id, "reset": True}
 
 
+@router.delete("/users/{user_id}/paid-trial", dependencies=[Depends(require_admin)])
+async def reset_user_paid_trial(
+    user_id: int,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    grant_result = await db.execute(
+        select(AccessGrant)
+        .where(
+            AccessGrant.user_id == user_id,
+            AccessGrant.kind == "paid_trial",
+            AccessGrant.code == "PAID_TRIAL_3H",
+        )
+        .order_by(AccessGrant.id.desc())
+        .limit(1)
+    )
+    grant = grant_result.scalar_one_or_none()
+    if grant is None:
+        return {"user_id": user.id, "reset": False, "detail": "Paid trial was not used"}
+
+    grant_id = grant.id
+    grant_subscription_id = grant.subscription_id
+    now = datetime.now(timezone.utc)
+    revoked_clients = 0
+    removed_from_panel = 0
+    panel_errors: list[str] = []
+    if grant_subscription_id:
+        subscription = await db.get(Subscription, grant_subscription_id)
+        if subscription and subscription.status in {"active", "disabled"}:
+            subscription.status = "expired"
+            subscription.expires_at = min(_aware(subscription.expires_at), now)
+        client_result = await db.execute(
+            select(VPNClient).where(VPNClient.subscription_id == grant_subscription_id)
+        )
+        for client in client_result.scalars():
+            if client.status in {"active", "disabled"}:
+                config_result = await db.execute(
+                    select(VPNNodeConfig).where(
+                        VPNNodeConfig.node_id == client.node_id,
+                        VPNNodeConfig.protocol == client.protocol,
+                    )
+                )
+                node_config = config_result.scalar_one_or_none()
+                if client.protocol == "vless" and node_config and node_config.config.get("api_address"):
+                    try:
+                        await ThreeXUIClient(address=node_config.config.get("api_address")).remove_vless_user(
+                            inbound_tag=node_config.config.get("inbound_tag", "vless-reality"),
+                            email=f"vpn-{client.id}",
+                        )
+                        removed_from_panel += 1
+                    except ThreeXUIClientNotFound:
+                        pass
+                    except ThreeXUIError as exc:
+                        panel_errors.append(str(exc))
+                client.status = "revoked"
+                client.revoked_at = now
+                revoked_clients += 1
+            client.config_override = None
+
+    await db.delete(grant)
+    await db.commit()
+    await write_audit(
+        db,
+        action="user.paid_trial.reset",
+        result="success" if not panel_errors else "partial",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="user",
+        resource_id=user.id,
+        details={
+            "grant_id": grant_id,
+            "subscription_id": grant_subscription_id,
+            "revoked_clients": revoked_clients,
+            "removed_from_panel": removed_from_panel,
+            "panel_errors": panel_errors,
+        },
+    )
+    return {
+        "user_id": user.id,
+        "reset": True,
+        "revoked_clients": revoked_clients,
+        "removed_from_panel": removed_from_panel,
+        "panel_errors": panel_errors,
+    }
+
+
 @router.post("/debug-sessions", dependencies=[Depends(require_admin)])
 async def create_debug_session(
     data: DebugSessionCreate,
@@ -1086,7 +1197,7 @@ async def get_payment_receipt(payment_id: int, db: AsyncSession = Depends(get_db
 ADMIN_HTML = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VPN Admin</title><style>
-:root{color-scheme:dark;--bg:#0b1020;--card:#141b2d;--line:#29334d;--accent:#61dafb;--bad:#ff6b6b;--ok:#55d187;--warn:#ffd166}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#edf2ff;font:14px system-ui,sans-serif}.layout{min-height:100vh;display:grid;grid-template-columns:280px 1fr}.sidebar{position:sticky;top:0;height:100vh;padding:22px 18px;border-right:1px solid var(--line);background:#0f1729;overflow:auto}.sidebar h1{font-size:24px;margin:0 0 8px}.sidebar-actions{display:grid;gap:10px;margin:18px 0}.content{min-width:0;padding:24px 3vw;display:grid;gap:22px;align-content:start}.card,section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;min-width:0}nav{display:grid;gap:8px}button,.action{background:#263454;color:white;border:1px solid #3c4c73;border-radius:8px;padding:9px 13px;cursor:pointer;text-decoration:none;display:inline-block;white-space:nowrap}button:hover,.action:hover,button.active{border-color:var(--accent)}button.active{background:#1b3a61}button.danger{color:#ffb1b1}input,select,textarea{width:100%;background:#0d1425;color:white;border:1px solid var(--line);border-radius:8px;padding:9px}form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}form button{align-self:end}.table{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#0d1425}table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow-wrap:normal;word-break:normal}th{position:sticky;top:0;z-index:1;background:#101a2e;color:#9fb0d0;font-size:12px;text-transform:uppercase;letter-spacing:.04em}td{max-width:340px}.cell-clip{display:inline-block;max-width:300px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}.cell-long{white-space:normal;word-break:break-word;overflow-wrap:anywhere}details.cell-long{max-width:420px}summary{cursor:pointer;color:var(--accent)}.badge{display:inline-block;border:1px solid #3c4c73;border-radius:999px;padding:3px 8px;background:#17233a}.badge.ok{border-color:#2d8f66;background:#113528}.badge.bad{border-color:#9a3d45;background:#3a1720}.hidden{display:none}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}code{color:#b9e9ff}.muted{color:#9fb0d0}#notice{min-height:20px}dialog{width:min(850px,94vw);background:var(--card);color:#edf2ff;border:1px solid var(--line);border-radius:14px;padding:20px}dialog::backdrop{background:#000a}.wide{grid-column:1/-1}.dialog-actions{display:flex;gap:10px;justify-content:flex-end;grid-column:1/-1}.script-list,.resource-list,.doc-list,.health-grid{display:grid;gap:10px}.health-grid{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}.script-item,.resource-item,.doc-item,.health-item{border:1px solid var(--line);border-radius:12px;padding:12px;background:#0d1425}.health-item.ok{border-color:#2d8f66}.health-item.bad{border-color:#9a3d45}.health-item.warn{border-color:#8a7230}.script-item code,.script-output{display:block;margin-top:7px;white-space:pre-wrap}.script-output{padding:10px;border-radius:10px;background:#080d18;color:#cfe7ff;overflow:auto;max-height:260px}@media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{position:static;height:auto}.content{padding:16px}.sidebar-actions{grid-template-columns:1fr 1fr}nav{grid-template-columns:1fr 1fr}}</style></head>
+:root{color-scheme:dark;--bg:#0b1020;--card:#141b2d;--line:#29334d;--accent:#61dafb;--bad:#ff6b6b;--ok:#55d187;--warn:#ffd166}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#edf2ff;font:14px system-ui,sans-serif}.layout{min-height:100vh;display:grid;grid-template-columns:280px 1fr}.sidebar{position:sticky;top:0;height:100vh;padding:22px 18px;border-right:1px solid var(--line);background:#0f1729;overflow:auto}.sidebar h1{font-size:24px;margin:0 0 8px}.sidebar-actions{display:grid;gap:10px;margin:18px 0}.content{min-width:0;padding:24px 3vw;display:grid;gap:22px;align-content:start}.card,section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;min-width:0}nav{display:grid;gap:8px}button,.action{background:#263454;color:white;border:1px solid #3c4c73;border-radius:8px;padding:9px 13px;cursor:pointer;text-decoration:none;display:inline-block;white-space:nowrap}button:hover,.action:hover,button.active{border-color:var(--accent)}button.active{background:#1b3a61}button.danger{color:#ffb1b1}input,select,textarea{width:100%;background:#0d1425;color:white;border:1px solid var(--line);border-radius:8px;padding:9px}form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}form button{align-self:end}.table{overflow:auto;border:1px solid var(--line);border-radius:12px;background:#0d1425}table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow-wrap:normal;word-break:normal}th{position:sticky;top:0;z-index:1;background:#101a2e;color:#9fb0d0;font-size:12px;text-transform:uppercase;letter-spacing:.04em}.filter-row th{top:38px;background:#0d1425;text-transform:none;letter-spacing:0}.filter-row input{min-width:120px;padding:6px 8px;font-size:12px}td{max-width:340px}.cell-clip{display:inline-block;max-width:300px;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}.cell-long{white-space:normal;word-break:break-word;overflow-wrap:anywhere}details.cell-long{max-width:420px}summary{cursor:pointer;color:var(--accent)}.badge{display:inline-block;border:1px solid #3c4c73;border-radius:999px;padding:3px 8px;background:#17233a}.badge.ok{border-color:#2d8f66;background:#113528}.badge.bad{border-color:#9a3d45;background:#3a1720}.hidden{display:none}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}code{color:#b9e9ff}.muted{color:#9fb0d0}#notice{min-height:20px}dialog{width:min(850px,94vw);background:var(--card);color:#edf2ff;border:1px solid var(--line);border-radius:14px;padding:20px}dialog::backdrop{background:#000a}.wide{grid-column:1/-1}.dialog-actions{display:flex;gap:10px;justify-content:flex-end;grid-column:1/-1}.script-list,.resource-list,.doc-list,.health-grid{display:grid;gap:10px}.health-grid{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}.script-item,.resource-item,.doc-item,.health-item{border:1px solid var(--line);border-radius:12px;padding:12px;background:#0d1425}.health-item.ok{border-color:#2d8f66}.health-item.bad{border-color:#9a3d45}.health-item.warn{border-color:#8a7230}.script-item code,.script-output{display:block;margin-top:7px;white-space:pre-wrap}.script-output{padding:10px;border-radius:10px;background:#080d18;color:#cfe7ff;overflow:auto;max-height:260px}@media(max-width:900px){.layout{grid-template-columns:1fr}.sidebar{position:static;height:auto}.content{padding:16px}.sidebar-actions{grid-template-columns:1fr 1fr}nav{grid-template-columns:1fr 1fr}}</style></head>
 <body><div class="layout"><aside class="sidebar"><h1>VPN Admin</h1><div id="notice">Загрузка…</div><div class="sidebar-actions"><button onclick="load()">Обновить</button><a class="action" href="/" target="_blank" rel="noopener">Открыть сайт</a></div><nav id="nav"></nav></aside><main class="content">
 <section id="plans"><h2>Тарифы</h2><form onsubmit="createPlan(event)"><input name="code" placeholder="Код" required><input name="name" placeholder="Название" required><input name="duration_days" type="number" placeholder="Дней" required><input name="max_connections" type="number" min="0" max="100" value="5" title="0 — без ограничений" required><input name="traffic_limit_gb" type="number" min="0" value="250" title="0 — без ограничений" required><input name="price" type="number" step="0.01" placeholder="Цена" required><input name="currency" value="RUB" required><button>Создать тариф</button></form><p>Лимиты: количество одновременных IP и трафик в ГБ; 0 снимает соответствующее ограничение.</p><div class="table"></div></section>
 <section id="nodes" class="hidden"><h2>VPN-ноды</h2><form onsubmit="createNode(event)"><input name="name" placeholder="Имя" required><input name="provider" placeholder="Провайдер" required><input name="ip_address" placeholder="Публичный IP" required><input name="hostname" placeholder="Hostname"><input name="capacity" type="number" value="100"><button>Создать ноду</button></form><p>Страна определяется автоматически по публичному IP.</p><details><summary>Привязать inbound из 3x-ui master</summary><form onsubmit="createConfig(event)"><input name="node_id" type="number" placeholder="Node ID в VPN Admin" required><input name="api_address" placeholder="https://master.example/base-path" required><input name="host" placeholder="Публичный адрес ноды" required><input name="port" type="number" value="443" required><input name="sni" placeholder="Reality SNI" required><input name="fingerprint" placeholder="Fingerprint" value="chrome" required><input name="pbk" placeholder="Reality public key" required><input name="sid" placeholder="Reality short ID" required><input name="inbound_tag" type="number" min="1" placeholder="3x-ui inbound ID" required><button>Привязать</button></form></details><div class="table"></div></section>
@@ -1109,15 +1220,18 @@ ADMIN_HTML = r"""<!doctype html>
 <dialog id="accessDialog"><h2>Управление доступом</h2><form id="accessForm" onsubmit="saveAccess(event)"><input name="user_id" type="hidden"><label>Тариф<select name="plan_id" required></select></label><label>VPN-нода<select name="node_id" required></select></label><label>Статус<select name="active"><option value="true">Активен</option><option value="false">Не активен</option></select></label><label>Действует до<input name="expires_at" type="datetime-local" required></label><label class="wide">Выданная VPN-ссылка<textarea name="vpn_link" rows="6" placeholder="Пусто — генерировать автоматически"></textarea></label><div class="wide" id="activityInfo"></div><div class="dialog-actions"><button type="button" class="danger" onclick="resetAccess()">Сбросить план и ссылку</button><button type="button" onclick="document.getElementById('accessDialog').close()">Отмена</button><button>Сохранить</button></div></form></dialog><script>
 let state={};const sections=['health','plans','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','email_logs','settings','docs','scripts','resources','debug','audit'];
 const labels={health:'Health',plans:'Тарифы',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',email_logs:'Email-логи',settings:'Настройки',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
-const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',expires_at:'Действует до',client_id:'Клиент ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
+const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',paid_trial:'Пробный доступ',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',expires_at:'Действует до',client_id:'Клиент ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
 function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===id))}
 function prettyDate(v){if(!v)return '';let d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString('ru-RU',{year:'2-digit',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}
 function formatCell(k,v){if(v===true)return '<span class="badge ok">да</span>';if(v===false)return '<span class="badge bad">нет</span>';if(v===null||v===undefined||v==='')return '<span class="muted">—</span>';if(k.endsWith('_at')||k==='expires_at')return esc(prettyDate(v));if(typeof v==='object'){let s=JSON.stringify(v,null,2);return `<details class="cell-long"><summary>показать</summary><code>${esc(s)}</code></details>`}let s=String(v);if(s.length>42)return `<span class="cell-clip" title="${esc(s)}">${esc(s)}</span>`;return esc(s)}
-function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[];document.querySelector('#'+id+' .table').innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(columnLabels[k]||k)}</th>`).join('')}<th>Действия</th></tr></thead><tbody>${rows.map(r=>`<tr>${keys.map(k=>`<td>${formatCell(k,r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных'}
+function rawCell(v){if(v!==null&&typeof v==='object')return JSON.stringify(v);return String(v??'')}
+function applyTableFilters(tableEl){let filters=[...tableEl.querySelectorAll('[data-filter-key]')].map(i=>({key:i.dataset.filterKey,value:i.value.trim().toLowerCase()}));tableEl.querySelectorAll('tbody tr').forEach(row=>{let ok=filters.every(f=>!f.value||String(row.getAttribute('data-filter-'+f.key)||'').toLowerCase().includes(f.value));row.style.display=ok?'':'none'})}
+function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[],box=document.querySelector('#'+id+' .table');box.innerHTML=rows.length?`<table><thead><tr>${keys.map(k=>`<th>${esc(columnLabels[k]||k)}</th>`).join('')}<th>Действия</th></tr><tr class="filter-row">${keys.map(k=>`<th><input data-filter-key="${esc(k)}" placeholder="фильтр"></th>`).join('')}<th><button type="button" onclick="clearTableFilters(this)">Сброс</button></th></tr></thead><tbody>${rows.map(r=>`<tr ${keys.map(k=>`data-filter-${esc(k)}="${esc(rawCell(r[k]))}"`).join(' ')}>${keys.map(k=>`<td>${formatCell(k,r[k])}</td>`).join('')}<td>${actions?actions(r):''}</td></tr>`).join('')}</tbody></table>`:'Нет данных';box.querySelectorAll('[data-filter-key]').forEach(i=>i.addEventListener('input',()=>applyTableFilters(i.closest('table'))))}
+function clearTableFilters(btn){let tableEl=btn.closest('table');tableEl.querySelectorAll('[data-filter-key]').forEach(i=>i.value='');applyTableFilters(tableEl)}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
 function paymentActions(p){let receipt=p.receipt_url?`<a class="action" href="${esc(p.receipt_url)}" target="_blank" rel="noopener">Открыть чек</a> `:'';if(['pending','processing'].includes(p.status))return receipt+`<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return receipt+`<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return receipt}
-async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderAdminContacts();renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''} ${r.paid_trial&&r.paid_trial!=='не использован'?`<button class="danger" onclick="resetPaidTrial(${r.id})">Сбросить пробник</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderAdminContacts();renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button data-section="${x}" onclick="show('${x}')">${labels[x]}</button>`).join('');
 function renderAdminContacts(){let f=document.getElementById('adminContactsForm'),c=state.admin_contacts||{};if(!f)return;f.admin_notification_email.value=c.admin_notification_email||'';f.bot_admin_chat_id.value=c.bot_admin_chat_id||0}
 async function saveAdminContacts(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let out=document.getElementById('settings-result');out.className='';out.textContent='Сохраняю…';try{state.admin_contacts=await request('/admin/settings/admin-contacts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_notification_email:f.admin_notification_email||'',bot_admin_chat_id:Number(f.bot_admin_chat_id||0)})});renderAdminContacts();out.className='ok';out.textContent='Контакты сохранены'}catch(err){out.className='bad';out.textContent=err.message}}
@@ -1152,6 +1266,7 @@ async function saveAccess(e){e.preventDefault();let f=Object.fromEntries(new For
 async function rotateUser(id){let u=state.users.find(x=>x.id===id),available=state.nodes.filter(n=>n.status==='active'&&n.health!=='offline');if(!available.length){alert('Нет доступных нод');return}let hint=available.map(n=>`${n.id}: ${n.name} (${n.region||'—'})`).join('\n');let raw=prompt('ID целевой ноды:\n'+hint,String(u.node_id||available[0].id));if(raw===null)return;let nodeId=Number(raw);if(!available.some(n=>n.id===nodeId)){alert('Нода недоступна');return}if(!confirm('Создать новый ключ на выбранной ноде? Старый будет отозван после успешного создания.'))return;let body={node_id:nodeId,client_type:u.client_type||'universal',flow:u.flow||'',fingerprint:'chrome'};try{await request('/admin/users/'+id+'/rotate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load();alert('Ключ перевыпущен')}catch(err){alert(err.message)}}
 async function setUserPassword(id){let password=prompt('Новый пароль для пользователя #'+id+' (минимум 8 символов)');if(password===null)return;if(password.length<8){alert('Минимум 8 символов');return}if(!confirm('Сменить пароль пользователя #'+id+'? Старый пароль перестанет работать.'))return;try{await request('/admin/users/'+id+'/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});await load();alert('Пароль обновлён')}catch(err){alert(err.message)}}
 async function resetAccess(){let id=Number(document.getElementById('accessForm').user_id.value);if(!confirm('Сбросить тариф, отключить доступ и удалить ручную ссылку?'))return;try{await request('/admin/users/'+id+'/access',{method:'DELETE'});document.getElementById('accessDialog').close();await load()}catch(err){alert(err.message)}}
+async function resetPaidTrial(id){if(!confirm('Сбросить пробный доступ пользователя #'+id+'?\n\nЭто удалит отметку использования пробника. Если активен 3-часовой пробник — он будет отозван.'))return;try{let r=await request('/admin/users/'+id+'/paid-trial',{method:'DELETE'});await load();alert(r.reset?'Пробный доступ сброшен':'Пробный доступ не был использован')}catch(err){alert(err.message)}}
 async function createDebug(e){return sendForm(e,()=>'/admin/debug-sessions',f=>({...f,duration_minutes:Number(f.duration_minutes)}))}
 async function closeDebug(id){if(confirm('Закрыть debug-сессию #'+id+'?')){await request('/admin/debug-sessions/'+id,{method:'DELETE'});await load()}}
 load();</script></body></html>"""
