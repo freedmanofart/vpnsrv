@@ -1536,6 +1536,17 @@ async def trial_approve_handler(callback: CallbackQuery, bot: Bot):
     except (ValueError, AttributeError):
         await callback.answer("Некорректная кнопка.", show_alert=True)
         return
+    async def finish_admin_button(text: str | None = None) -> None:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        if text:
+            try:
+                await callback.message.answer(text)
+            except Exception:
+                logging.exception("Failed to send paid trial admin status")
+
     try:
         nodes = await available_nodes()
         if not nodes:
@@ -1548,31 +1559,43 @@ async def trial_approve_handler(callback: CallbackQuery, bot: Bot):
             duration_hours=3,
         )
         expires_at = subscription["expires_at"].replace("T", " ").replace("+00:00", "")
-        await bot.send_message(
-            telegram_id,
-            "✅ <b>Ваша подписка выслана на почту.</b>\n\n"
-            f"Пробный VPN активирован на 3 часа, доступ действует до <b>{expires_at} UTC</b>.\n"
-            "Откройте web-кабинет, чтобы забрать ключ.",
-            parse_mode="HTML",
-            reply_markup=cabinet_open_keyboard(),
-        )
+        delivered = True
         try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except TelegramBadRequest:
-            pass
+            await bot.send_message(
+                telegram_id,
+                "✅ <b>Ваша подписка выслана на почту.</b>\n\n"
+                f"Пробный VPN активирован на 3 часа, доступ действует до <b>{expires_at} UTC</b>.\n"
+                "Откройте web-кабинет, чтобы забрать ключ.",
+                parse_mode="HTML",
+                reply_markup=cabinet_open_keyboard(),
+            )
+        except Exception:
+            delivered = False
+            logging.exception("Failed to notify user about paid trial approval")
+        await finish_admin_button(
+            "✅ Доступ выдан. Клиент уведомлён."
+            if delivered
+            else "⚠️ Доступ выдан, но сообщение клиенту не доставлено. Попросите клиента открыть web-кабинет."
+        )
         await callback.answer("Доступ выдан")
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 409:
-            await bot.send_message(
-                telegram_id,
-                "Пробный доступ уже использовался для этого Telegram. Для продолжения оплатите подписку.",
-                reply_markup=cabinet_payment_keyboard(),
-            )
+            delivered = True
             try:
-                await callback.message.edit_reply_markup(reply_markup=None)
-            except TelegramBadRequest:
-                pass
-            await callback.answer("Повторный пробник — отправлена оплата")
+                await bot.send_message(
+                    telegram_id,
+                    "Пробный доступ уже использовался для этого Telegram. Для продолжения оплатите подписку.",
+                    reply_markup=cabinet_payment_keyboard(),
+                )
+            except Exception:
+                delivered = False
+                logging.exception("Failed to notify user about repeated paid trial")
+            await finish_admin_button(
+                "↩️ Повторный пробник: клиенту отправлена ссылка на оплату."
+                if delivered
+                else "⚠️ Повторный пробник: ссылку на оплату клиенту не удалось доставить."
+            )
+            await callback.answer("Повторный пробник")
             return
         logging.exception("Paid trial approval failed")
         await callback.answer("Не удалось выдать пробный доступ.", show_alert=True)
