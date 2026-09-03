@@ -48,8 +48,8 @@ async def _telegram_destinations(db: AsyncSession) -> list[int | str]:
     destinations: list[int | str] = []
     if contacts.bot_admin_chat_id:
         destinations.append(contacts.bot_admin_chat_id)
-    support = _support_chat_id()
-    if support and support not in destinations:
+    else:
+        support = _support_chat_id()
         destinations.append(support)
     return destinations
 
