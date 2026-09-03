@@ -76,6 +76,29 @@ PUBLIC_PLAN_CODES = tuple(
 )
 
 
+def web_app_url(path: str = "") -> str:
+    if not WEB_CABINET_URL.startswith("https://"):
+        return ""
+    base = WEB_CABINET_URL.rstrip("/")
+    if not path:
+        return base
+    return f"{base}{path}"
+
+
+def cabinet_button(text: str, path: str = "") -> InlineKeyboardButton:
+    url = web_app_url(path)
+    if url:
+        return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=url))
+    return InlineKeyboardButton(text=text, callback_data="cabinet_email")
+
+
+def cabinet_keyboard_button(text: str, path: str = "") -> KeyboardButton:
+    url = web_app_url(path)
+    if url:
+        return KeyboardButton(text=text, web_app=WebAppInfo(url=url))
+    return KeyboardButton(text=text)
+
+
 class PromoFlow(StatesGroup):
     waiting_code = State()
 
@@ -121,16 +144,11 @@ def main_menu() -> InlineKeyboardMarkup:
         else InlineKeyboardButton(text="📣 Наш канал", callback_data="channel_info")
     )
     support_button = InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
-    site_button = (
-        InlineKeyboardButton(text="🌐 Сайт", url=WEB_SITE_URL)
-        if WEB_SITE_URL
-        else InlineKeyboardButton(text="🌐 Сайт", callback_data="site_missing")
-    )
     rows = [
-        [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn"), InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
+        [cabinet_button("💳 Приобрести подписку", "?checkout=1#payment"), cabinet_button("👤 Управление подпиской")],
         [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
         [InlineKeyboardButton(text="ℹ️ Информация", callback_data="information"), support_button],
-        [channel_button, site_button],
+        [channel_button, cabinet_button("🌐 Web-кабинет")],
     ]
     extra_buttons = [
         InlineKeyboardButton(text=item["text"], url=item["url"])
@@ -145,7 +163,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
     """Постоянное раскрывающееся меню рядом с полем ввода Telegram."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
+            [cabinet_keyboard_button("💳 Приобрести подписку", "?checkout=1#payment"), cabinet_keyboard_button("👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
             [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
         ],
@@ -156,14 +174,9 @@ def popup_menu() -> ReplyKeyboardMarkup:
 
 
 def welcome_keyboard() -> InlineKeyboardMarkup:
-    site = (
-        InlineKeyboardButton(text="🌐 Сайт", url=WEB_SITE_URL)
-        if WEB_SITE_URL
-        else InlineKeyboardButton(text="🌐 Сайт", callback_data="site_missing")
-    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [site, InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
+            [cabinet_button("🌐 Web-кабинет"), cabinet_button("⚡ Быстрый доступ")],
         ],
     )
 
