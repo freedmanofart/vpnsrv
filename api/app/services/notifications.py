@@ -4,7 +4,6 @@ import logging
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import exists, or_, select
@@ -31,18 +30,11 @@ from app.services.email import (
 logger = logging.getLogger(__name__)
 
 
+SUPPORT_NOTIFICATION_CHAT = "@Freedom_VPN_Support"
+
+
 def _support_chat_id() -> str:
-    value = (settings.support_url or "").strip()
-    if not value:
-        return "@Freedom_VPN_Support"
-    if value.startswith("@"):
-        return value
-    parsed = urlparse(value)
-    if parsed.netloc.lower() in {"t.me", "telegram.me"}:
-        username = parsed.path.strip("/").split("/", 1)[0]
-        if username:
-            return f"@{username}"
-    return value
+    return SUPPORT_NOTIFICATION_CHAT
 
 
 async def _telegram_destinations(db: AsyncSession) -> list[int | str]:

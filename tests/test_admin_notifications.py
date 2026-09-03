@@ -10,7 +10,6 @@ sys.path.insert(0, str(ROOT / "api"))
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
-from app.core.config import settings
 from app.services import notifications
 
 
@@ -26,10 +25,5 @@ class AdminNotificationTests(TestCase):
         )
         self.assertEqual("✅ Подтвердить", markup["inline_keyboard"][0][0]["text"])
 
-    def test_support_chat_id_is_derived_from_support_url(self) -> None:
-        previous = settings.support_url
-        settings.support_url = "https://t.me/Freedom_VPN_Support"
-        try:
-            self.assertEqual("@Freedom_VPN_Support", notifications._support_chat_id())
-        finally:
-            settings.support_url = previous
+    def test_support_chat_id_is_not_derived_from_public_links(self) -> None:
+        self.assertEqual("@Freedom_VPN_Support", notifications._support_chat_id())

@@ -35,7 +35,6 @@ services:
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
       BOT_TOKEN: ${BOT_TOKEN:-}
       BOT_ADMIN_CHAT_ID: ${BOT_ADMIN_CHAT_ID:-0}
-      SUPPORT_URL: ${SUPPORT_URL:-}
       ADMIN_NOTIFICATION_EMAIL: ${ADMIN_NOTIFICATION_EMAIL:-freedmanofart5@gmail.com}
       VPN_BACKUP_DIR: ${VPN_BACKUP_DIR:-/var/backups/vpn-service}
 
