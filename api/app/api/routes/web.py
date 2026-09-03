@@ -47,6 +47,11 @@ COOKIE = "freedom_cabinet"
 MANUAL_PAYMENT_METHODS = {"sber_qr", "tbank_qr", "phone_transfer"}
 
 
+def _normalize_email(value: str) -> str:
+    cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", value or "")
+    return cleaned.strip("<>.,;:()[]{}\"'«»").lower()
+
+
 class Registration(BaseModel):
     email: str = Field(min_length=5, max_length=320)
     plan_id: int | None = None
@@ -304,7 +309,7 @@ def _set_cabinet_cookie(response: Response, raw: str) -> None:
 
 @router.post("/web/register")
 async def register(data: Registration, db: AsyncSession = Depends(get_db)):
-    email_address = data.email.strip().lower()
+    email_address = _normalize_email(data.email)
     if not EMAIL_RE.fullmatch(email_address):
         raise HTTPException(status_code=422, detail="Укажите корректный email")
     if data.plan_id is not None:
@@ -328,7 +333,7 @@ async def register(data: Registration, db: AsyncSession = Depends(get_db)):
 
 @router.post("/web/code/login")
 async def email_code_login(data: EmailCodeLogin, db: AsyncSession = Depends(get_db)):
-    email_address = data.email.strip().lower()
+    email_address = _normalize_email(data.email)
     user = await db.scalar(select(User).where(User.email == email_address))
     login_code = None
     if user is not None:
@@ -383,7 +388,7 @@ async def email_code_login(data: EmailCodeLogin, db: AsyncSession = Depends(get_
 
 @router.post("/web/password/login")
 async def password_login(data: PasswordLogin, db: AsyncSession = Depends(get_db)):
-    email_address = data.email.strip().lower()
+    email_address = _normalize_email(data.email)
     user = await db.scalar(select(User).where(User.email == email_address))
     if user is None or user.status != "active" or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
@@ -398,7 +403,7 @@ async def password_login(data: PasswordLogin, db: AsyncSession = Depends(get_db)
 
 @router.post("/web/telegram-cabinet-link", dependencies=[Depends(require_api_access)])
 async def telegram_cabinet_link(data: TelegramCabinetLink, db: AsyncSession = Depends(get_db)):
-    email_address = data.email.strip().lower()
+    email_address = _normalize_email(data.email)
     if not EMAIL_RE.fullmatch(email_address):
         raise HTTPException(status_code=422, detail="Укажите корректный email")
     user = await db.scalar(select(User).where(User.telegram_id == data.telegram_id))

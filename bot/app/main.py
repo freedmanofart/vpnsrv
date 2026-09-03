@@ -7,6 +7,7 @@ from io import BytesIO
 import logging
 import os
 from pathlib import Path
+import re
 
 import httpx
 import qrcode
@@ -531,6 +532,23 @@ def cabinet_credentials_text(email_address: str, payload: dict) -> str:
         + (f"Код действует до: <b>{html.escape(expires_at)}</b>\n\n" if expires_at else "\n")
         + "Теперь пришлите чек фотографией или файлом."
     )
+
+
+def normalize_email_input(value: str) -> str:
+    cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", value or "")
+    return cleaned.strip("<>.,;:()[]{}\"'«»").lower()
+
+
+def email_error_message(status_code: int, detail: str) -> str:
+    lower = detail.lower()
+    if status_code == 409 or "связан" in lower or "занят" in lower:
+        return (
+            "Этот email уже привязан к другому аккаунту.\n\n"
+            "Введите другой email для пробного доступа или откройте web-кабинет с этим email."
+        )
+    if status_code == 422 or "email" in lower:
+        return "Похоже, email введён с лишним символом. Отправьте только адрес, например name@example.com."
+    return detail or "Не удалось отправить код. Проверьте email или попробуйте позже."
 
 
 async def get_admin_chat_id() -> int:
@@ -1060,7 +1078,7 @@ async def menu_button_during_email_handler(message: Message, state: FSMContext):
 
 @router.message(EmailCabinetFlow.waiting_email)
 async def cabinet_email_handler(message: Message, state: FSMContext):
-    email_address = (message.text or "").strip().lower()
+    email_address = normalize_email_input(message.text or "")
     if not email_address or "@" not in email_address or len(email_address) > 320:
         await message.answer("Введите корректный email, например name@example.com.")
         return
@@ -1077,7 +1095,7 @@ async def cabinet_email_handler(message: Message, state: FSMContext):
             detail = exc.response.json().get("detail") or detail
         except ValueError:
             pass
-        await message.answer(f"❌ {html.escape(detail)}", reply_markup=popup_menu())
+        await message.answer(f"❌ {html.escape(email_error_message(exc.response.status_code, detail))}", reply_markup=popup_menu())
     except httpx.HTTPError:
         logging.exception("Failed to send cabinet email")
         await message.answer("❌ Не удалось связаться с сервером.", reply_markup=popup_menu())
@@ -1411,7 +1429,7 @@ async def paid_trial_email_handler(message: Message, state: FSMContext):
     if not message.from_user:
         await message.answer("Не удалось определить пользователя.", reply_markup=popup_menu())
         return
-    email_address = (message.text or "").strip().lower()
+    email_address = normalize_email_input(message.text or "")
     if not email_address or "@" not in email_address or len(email_address) > 320:
         await message.answer("Введите корректный email, например name@example.com.")
         return
@@ -1423,7 +1441,7 @@ async def paid_trial_email_handler(message: Message, state: FSMContext):
             detail = exc.response.json().get("detail") or detail
         except ValueError:
             pass
-        await message.answer(f"❌ {html.escape(detail)}", reply_markup=popup_menu())
+        await message.answer(f"❌ {html.escape(email_error_message(exc.response.status_code, detail))}", reply_markup=popup_menu())
         return
     except httpx.HTTPError:
         logging.exception("Failed to send paid trial cabinet email")
