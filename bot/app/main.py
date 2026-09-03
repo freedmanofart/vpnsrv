@@ -98,6 +98,13 @@ def web_app_button(text: str, url: str, fallback: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=fallback)
 
 
+def cabinet_keyboard_button(text: str, path: str = "") -> KeyboardButton:
+    url = web_app_url(path)
+    if url:
+        return KeyboardButton(text=text, web_app=WebAppInfo(url=url))
+    return KeyboardButton(text=text)
+
+
 class PromoFlow(StatesGroup):
     waiting_code = State()
 
@@ -162,6 +169,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
     """Постоянное раскрывающееся меню рядом с полем ввода Telegram."""
     return ReplyKeyboardMarkup(
         keyboard=[
+            [cabinet_keyboard_button("🌐 Web кабинет")],
             [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
             [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
@@ -176,9 +184,7 @@ def welcome_keyboard() -> InlineKeyboardMarkup:
     site = web_app_button("🌐 Сайт", WEB_SITE_URL, "site_missing")
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [site],
-            [cabinet_button("🌐 Web-кабинет")],
-            [InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
+            [site, InlineKeyboardButton(text="⚡ Быстрый доступ", callback_data="cabinet_email")],
         ],
     )
 
@@ -929,7 +935,7 @@ async def popup_vpn_handler(message: Message):
     await vpn_command_handler(message)
 
 
-@router.message(F.text == "🌐 Web-кабинет")
+@router.message(F.text.in_({"🌐 Web кабинет", "🌐 Web-кабинет"}))
 async def popup_web_cabinet_handler(message: Message, state: FSMContext):
     await state.set_state(EmailCabinetFlow.waiting_email)
     await message.answer(
