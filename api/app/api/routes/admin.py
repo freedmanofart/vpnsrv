@@ -30,7 +30,7 @@ from app.db.models.payment_method import PaymentMethod
 from app.db.models.audit import AuditLog, ClientDevice, DebugSession
 from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.session import get_db
-from app.core.security import APIPrincipal, hash_password, require_admin
+from app.core.security import APIPrincipal, hash_password, require_admin, require_api_access
 from app.services.audit import write_audit
 from app.services.admin_settings import get_admin_contacts, set_admin_contacts
 from app.services.node_health import node_accepts_clients
@@ -633,6 +633,15 @@ async def update_admin_contacts(
             "bot_admin_chat_id": contacts.bot_admin_chat_id,
         },
     )
+    return {
+        "admin_notification_email": contacts.admin_notification_email,
+        "bot_admin_chat_id": contacts.bot_admin_chat_id,
+    }
+
+
+@router.get("/settings/admin-contacts/service", dependencies=[Depends(require_api_access)])
+async def get_admin_contacts_for_service(db: AsyncSession = Depends(get_db)):
+    contacts = await get_admin_contacts(db)
     return {
         "admin_notification_email": contacts.admin_notification_email,
         "bot_admin_chat_id": contacts.bot_admin_chat_id,

@@ -95,6 +95,10 @@ class EmailCabinetFlow(StatesGroup):
     waiting_email = State()
 
 
+class SupportFlow(StatesGroup):
+    waiting_message = State()
+
+
 def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=base_url,
@@ -103,6 +107,7 @@ def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.Async
     )
 
 router = Router()
+SUPPORT_REPLY_TARGETS: dict[int, int] = {}
 
 
 # =========================================================
@@ -232,7 +237,7 @@ def back_menu() -> InlineKeyboardMarkup:
 def support_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🆘 Написать в поддержку", url=SUPPORT_URL)],
+            [InlineKeyboardButton(text="🆘 Написать в поддержку", callback_data="support_start")],
             [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
         ],
     )
@@ -449,6 +454,13 @@ async def send_cabinet_code_to_email(telegram_id: int, email_address: str) -> di
         )
         response.raise_for_status()
         return response.json()
+
+
+async def get_admin_chat_id() -> int:
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.get("/admin/settings/admin-contacts/service")
+        response.raise_for_status()
+        return int(response.json().get("bot_admin_chat_id") or 0)
 
 
 async def get_plans() -> list[dict]:
@@ -1149,6 +1161,100 @@ async def support_info_handler(callback: CallbackQuery):
         parse_mode="HTML",
         reply_markup=support_keyboard(),
     )
+
+
+@router.callback_query(F.data == "support_start")
+async def support_start_handler(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SupportFlow.waiting_message)
+    await callback.message.answer(
+        "Напишите сообщение для техподдержки одним сообщением. "
+        "Можно приложить скриншот, ключ, устройство и описание проблемы.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Главное меню")]],
+            resize_keyboard=True,
+            is_persistent=True,
+            input_field_placeholder="Опишите проблему",
+        ),
+    )
+    await callback.answer()
+
+
+@router.message(SupportFlow.waiting_message)
+async def support_message_handler(message: Message, state: FSMContext, bot: Bot):
+    if not message.from_user:
+        await message.answer("Не удалось определить пользователя.", reply_markup=popup_menu())
+        return
+    try:
+        admin_chat_id = await get_admin_chat_id()
+    except httpx.HTTPError:
+        logging.exception("Failed to load admin chat for support")
+        await message.answer("❌ Не удалось связаться с поддержкой. Попробуйте позже.", reply_markup=popup_menu())
+        return
+    if not admin_chat_id:
+        await message.answer("❌ Чат поддержки пока не настроен.", reply_markup=popup_menu())
+        return
+
+    username = f"@{message.from_user.username}" if message.from_user.username else "—"
+    full_name = html.escape(message.from_user.full_name or "—")
+    header = (
+        "🆘 Новое обращение в поддержку Freedom VPN\n\n"
+        f"Клиент: {full_name}\n"
+        f"Telegram ID: <code>{message.from_user.id}</code>\n"
+        f"Username: {html.escape(username)}\n\n"
+        "Ответьте reply на следующее сообщение — бот отправит ответ клиенту.\n"
+        f"Или используйте: <code>/reply {message.from_user.id} текст ответа</code>"
+    )
+    try:
+        await bot.send_message(admin_chat_id, header, parse_mode="HTML")
+        copied = await bot.copy_message(
+            chat_id=admin_chat_id,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+        SUPPORT_REPLY_TARGETS[copied.message_id] = message.from_user.id
+    except Exception:
+        logging.exception("Failed to send support request to admin chat")
+        await message.answer("❌ Не удалось отправить обращение в поддержку. Попробуйте позже.", reply_markup=popup_menu())
+        return
+
+    await state.clear()
+    await message.answer("✅ Обращение отправлено в поддержку. Ответ придёт сюда.", reply_markup=popup_menu())
+
+
+@router.message(Command("reply"))
+async def admin_reply_command_handler(message: Message, bot: Bot):
+    admin_chat_id = await get_admin_chat_id()
+    if not admin_chat_id or message.chat.id != admin_chat_id:
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.reply("Формат: /reply <telegram_id> текст ответа")
+        return
+    try:
+        target_chat_id = int(parts[1])
+    except ValueError:
+        await message.reply("Telegram ID должен быть числом.")
+        return
+    await bot.send_message(target_chat_id, f"💬 Ответ поддержки Freedom VPN:\n\n{parts[2]}")
+    await message.reply("✅ Ответ отправлен клиенту.")
+
+
+@router.message(F.reply_to_message)
+async def admin_reply_to_support_handler(message: Message, bot: Bot):
+    admin_chat_id = await get_admin_chat_id()
+    if not admin_chat_id or message.chat.id != admin_chat_id:
+        return
+    target_chat_id = SUPPORT_REPLY_TARGETS.get(message.reply_to_message.message_id)
+    if not target_chat_id:
+        return
+    if not (message.text or message.caption):
+        await message.reply("Пока reply-ответ поддерживает текст или подпись к медиа.")
+        return
+    await bot.send_message(
+        target_chat_id,
+        f"💬 Ответ поддержки Freedom VPN:\n\n{message.text or message.caption}",
+    )
+    await message.reply("✅ Ответ отправлен клиенту.")
 
 
 def access_node_keyboard(nodes: list[dict], prefix: str) -> InlineKeyboardMarkup:
