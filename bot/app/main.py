@@ -98,13 +98,6 @@ def web_app_button(text: str, url: str, fallback: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=fallback)
 
 
-def cabinet_keyboard_button(text: str, path: str = "") -> KeyboardButton:
-    url = web_app_url(path)
-    if url:
-        return KeyboardButton(text=text, web_app=WebAppInfo(url=url))
-    return KeyboardButton(text=text)
-
-
 class PromoFlow(StatesGroup):
     waiting_code = State()
 
@@ -172,7 +165,6 @@ def popup_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
             [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
             [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
-            [cabinet_keyboard_button("🌐 Web-кабинет")],
         ],
         resize_keyboard=True,
         is_persistent=True,
