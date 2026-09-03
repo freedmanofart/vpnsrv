@@ -24,6 +24,7 @@ class AccessGrantCreate(BaseModel):
     kind: str
     code: str | None = None
     node_id: int
+    duration_hours: int | None = None
     client_type: str = "universal"
     flow: str = ""
     fingerprint: str = "firefox"

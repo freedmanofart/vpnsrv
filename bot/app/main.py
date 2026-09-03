@@ -121,6 +121,10 @@ class SupportFlow(StatesGroup):
     waiting_message = State()
 
 
+class PaidTrialFlow(StatesGroup):
+    waiting_receipt = State()
+
+
 def api_client(*, base_url: str = API_URL, timeout: float = 10.0) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=base_url,
@@ -290,6 +294,15 @@ def vpn_ready_keyboard() -> InlineKeyboardMarkup:
                     callback_data="main_menu",
                 ),
             ],
+        ]
+    )
+
+
+def cabinet_payment_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [cabinet_button("💳 Оплатить подписку", "?checkout=1#payment")],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
         ]
     )
 
@@ -650,19 +663,23 @@ async def create_access_grant(
     kind: str,
     node_id: int,
     code: str | None = None,
+    duration_hours: int | None = None,
 ) -> dict:
+    payload = {
+        "telegram_id": telegram_id,
+        "kind": kind,
+        "code": code,
+        "node_id": node_id,
+        "client_type": "universal",
+        "flow": "",
+        "fingerprint": "firefox",
+    }
+    if duration_hours is not None:
+        payload["duration_hours"] = duration_hours
     async with api_client(base_url=API_URL, timeout=15.0) as client:
         response = await client.post(
             "/subscriptions/access-grants",
-            json={
-                "telegram_id": telegram_id,
-                "kind": kind,
-                "code": code,
-                "node_id": node_id,
-                "client_type": "universal",
-                "flow": "",
-                "fingerprint": "firefox",
-            },
+            json=payload,
         )
         response.raise_for_status()
         return response.json()
@@ -1208,15 +1225,15 @@ async def try_start_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "try_paid_support")
 async def try_paid_support_handler(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(SupportFlow.waiting_message)
+    await state.set_state(PaidTrialFlow.waiting_receipt)
     await callback.message.answer(
-        "✅ Напишите «Я оплатил пробный доступ» и приложите чек одним сообщением.\n"
-        "Сообщение уйдёт администратору в новый чат для проверки.",
+        "✅ Пришлите чек по оплате пробного доступа фотографией или файлом.\n"
+        "После проверки администратор нажмёт кнопку апрува, и бот автоматически выдаст VPN на 3 часа.",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text="⬅️ Главное меню")]],
             resize_keyboard=True,
             is_persistent=True,
-            input_field_placeholder="Прикрепите чек или напишите сообщение",
+            input_field_placeholder="Прикрепите чек",
         ),
     )
     await callback.answer()
@@ -1256,6 +1273,159 @@ async def support_start_handler(callback: CallbackQuery, state: FSMContext):
 @router.message(SupportFlow.waiting_message, F.text.in_(MENU_BUTTON_TEXTS))
 async def menu_button_during_support_handler(message: Message, state: FSMContext):
     await handle_menu_button(message, state)
+
+
+@router.message(PaidTrialFlow.waiting_receipt, F.text.in_(MENU_BUTTON_TEXTS))
+async def menu_button_during_paid_trial_handler(message: Message, state: FSMContext):
+    await handle_menu_button(message, state)
+
+
+@router.message(PaidTrialFlow.waiting_receipt, F.photo | F.document)
+async def paid_trial_receipt_handler(message: Message, state: FSMContext, bot: Bot):
+    if not message.from_user:
+        await message.answer("Не удалось определить пользователя.", reply_markup=popup_menu())
+        return
+    try:
+        admin_chat_id = await get_admin_chat_id()
+    except httpx.HTTPError:
+        logging.exception("Failed to load admin chat for paid trial")
+        await message.answer("❌ Не удалось связаться с администратором. Попробуйте позже.", reply_markup=popup_menu())
+        return
+    if not admin_chat_id:
+        await message.answer("❌ Чат администратора пока не настроен.", reply_markup=popup_menu())
+        return
+
+    username = f"@{message.from_user.username}" if message.from_user.username else "—"
+    full_name = html.escape(message.from_user.full_name or "—")
+    header = (
+        "🧪 Оплата пробного доступа Freedom VPN\n\n"
+        f"Клиент: {full_name}\n"
+        f"Telegram ID: <code>{message.from_user.id}</code>\n"
+        f"Username: {html.escape(username)}\n"
+        f"Сумма: <b>{TRY_PAYMENT_AMOUNT_RUB} ₽</b>\n\n"
+        "Проверьте чек и нажмите кнопку ниже, чтобы выдать доступ на 3 часа."
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Выдать 3 часа", callback_data=f"trial_approve:{message.from_user.id}")],
+            [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"trial_reject:{message.from_user.id}")],
+        ]
+    )
+    try:
+        await bot.send_message(admin_chat_id, header, parse_mode="HTML", reply_markup=keyboard)
+        await bot.copy_message(
+            chat_id=admin_chat_id,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+    except Exception:
+        logging.exception("Failed to send paid trial receipt to admin chat")
+        await message.answer("❌ Не удалось отправить чек администратору. Попробуйте позже.", reply_markup=popup_menu())
+        return
+
+    await state.clear()
+    await message.answer(
+        "✅ Чек отправлен администратору. После подтверждения бот автоматически выдаст доступ на 3 часа.",
+        reply_markup=popup_menu(),
+    )
+
+
+@router.message(PaidTrialFlow.waiting_receipt)
+async def paid_trial_receipt_invalid(message: Message):
+    await message.answer("Пришлите чек фотографией или файлом PDF/изображением.")
+
+
+@router.callback_query(F.data.startswith("trial_reject:"))
+async def trial_reject_handler(callback: CallbackQuery, bot: Bot):
+    admin_chat_id = await get_admin_chat_id()
+    if not admin_chat_id or callback.message.chat.id != admin_chat_id:
+        await callback.answer("Эта кнопка только для администратора.", show_alert=True)
+        return
+    try:
+        telegram_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, AttributeError):
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    await bot.send_message(
+        telegram_id,
+        "❌ Чек по пробному доступу не подтверждён. Если это ошибка, отправьте чек ещё раз.",
+        reply_markup=cabinet_payment_keyboard(),
+    )
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Отклонено")
+
+
+@router.callback_query(F.data.startswith("trial_approve:"))
+async def trial_approve_handler(callback: CallbackQuery, bot: Bot):
+    admin_chat_id = await get_admin_chat_id()
+    if not admin_chat_id or callback.message.chat.id != admin_chat_id:
+        await callback.answer("Эта кнопка только для администратора.", show_alert=True)
+        return
+    try:
+        telegram_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, AttributeError):
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    try:
+        nodes = await available_nodes()
+        if not nodes:
+            await callback.answer("Нет доступных серверов.", show_alert=True)
+            return
+        subscription = await create_access_grant(
+            telegram_id,
+            "paid_trial",
+            nodes[0]["id"],
+            duration_hours=3,
+        )
+        status = await get_vpn_status(telegram_id)
+        client = status.get("vpn_client")
+        expires_at = subscription["expires_at"].replace("T", " ").replace("+00:00", "")
+        await bot.send_message(
+            telegram_id,
+            f"✅ <b>Пробный VPN активирован на 3 часа.</b>\n\nДоступ действует до <b>{expires_at} UTC</b>.",
+            parse_mode="HTML",
+            reply_markup=vpn_ready_keyboard(),
+        )
+        if client:
+            data = await get_vpn_client_config(client["id"])
+            value = data["config"]
+            await bot.send_photo(
+                telegram_id,
+                photo=qr_file(value),
+                caption=(
+                    "🔑 <b>Ваш VPN-ключ</b>\n\n"
+                    f"<code>{html.escape(value)}</code>\n\n"
+                    "Импортируйте ссылку или QR-код в совместимое VLESS-приложение."
+                ),
+                parse_mode="HTML",
+                reply_markup=active_vpn_keyboard(),
+            )
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await callback.answer("Доступ выдан")
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409:
+            await bot.send_message(
+                telegram_id,
+                "Пробный доступ уже использовался для этого Telegram. Для продолжения оплатите подписку.",
+                reply_markup=cabinet_payment_keyboard(),
+            )
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except TelegramBadRequest:
+                pass
+            await callback.answer("Повторный пробник — отправлена оплата")
+            return
+        logging.exception("Paid trial approval failed")
+        await callback.answer("Не удалось выдать пробный доступ.", show_alert=True)
+    except Exception:
+        logging.exception("Paid trial approval failed")
+        await callback.answer("Не удалось выдать пробный доступ.", show_alert=True)
 
 
 @router.message(SupportFlow.waiting_message)

@@ -111,6 +111,7 @@ async def provision_subscription(
     client_type: str,
     flow: str,
     fingerprint: str,
+    access_duration: timedelta | None = None,
     panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> ProvisioningResult:
     _validate_profile(client_type, flow, fingerprint)
@@ -156,7 +157,7 @@ async def provision_subscription(
     if not api_address:
         raise ProvisioningInvalid("VPN node has no Xray management address")
 
-    expires_at = now + timedelta(days=plan.duration_days)
+    expires_at = now + (access_duration or timedelta(days=plan.duration_days))
     subscription = Subscription(
         user_id=user_id,
         plan_id=plan_id,

@@ -111,14 +111,32 @@ async def grant_trial_or_promo(
     if kind == "trial":
         code = "TRIAL"
         days = 3
+        duration = timedelta(days=days)
         previous = await db.execute(
             select(Subscription.id).where(Subscription.user_id == user.id).limit(1)
         )
         if previous.scalar_one_or_none() is not None:
             raise HTTPException(status_code=409, detail="Trial is available only once before purchase")
+    elif kind == "paid_trial":
+        code = "PAID_TRIAL_3H"
+        hours = data.duration_hours or 3
+        if hours < 1 or hours > 24:
+            raise HTTPException(status_code=400, detail="Trial duration must be between 1 and 24 hours")
+        days = 0
+        duration = timedelta(hours=hours)
+        previous = await db.execute(
+            select(AccessGrant.id).where(
+                AccessGrant.user_id == user.id,
+                AccessGrant.kind == kind,
+                AccessGrant.code == code,
+            )
+        )
+        if previous.scalar_one_or_none() is not None:
+            raise HTTPException(status_code=409, detail="Paid trial is available only once")
     elif kind == "promo":
         code = (data.code or "").strip().upper()
         days = promo_catalog().get(code, 0)
+        duration = timedelta(days=days)
         if not days:
             raise HTTPException(status_code=404, detail="Promo code is invalid")
     else:
@@ -154,6 +172,8 @@ async def grant_trial_or_promo(
     if active is not None:
         if kind == "trial":
             raise HTTPException(status_code=409, detail="Active subscription already exists")
+        if kind == "paid_trial":
+            raise HTTPException(status_code=409, detail="Active subscription already exists")
         active.expires_at = max(aware(active.expires_at), now) + timedelta(days=days)
         client_result = await db.execute(
             select(VPNClient).where(
@@ -167,7 +187,7 @@ async def grant_trial_or_promo(
         await db.commit()
         subscription = active
     else:
-        plan = await system_access_plan(db, days)
+        plan = await system_access_plan(db, max(days, 1))
         try:
             result = await provision_subscription(
                 db,
@@ -177,6 +197,7 @@ async def grant_trial_or_promo(
                 client_type=data.client_type,
                 flow=data.flow,
                 fingerprint=data.fingerprint,
+                access_duration=duration,
             )
         except ProvisioningNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -198,7 +219,7 @@ async def grant_trial_or_promo(
         actor_type="service",
         resource_type="subscription",
         resource_id=subscription.id,
-        details={"days": days, "code": code},
+        details={"days": days, "hours": int(duration.total_seconds() // 3600), "code": code},
     )
     return subscription
 
