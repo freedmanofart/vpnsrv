@@ -42,14 +42,24 @@ PLATEGA_BASE_URL=https://app.platega.io
 PLATEGA_MERCHANT_ID=
 PLATEGA_SECRET=
 
-PLATEGA_RETURN_URL=https://freedomvpn.taile485ac.ts.net/cabinet?payment=success
-PLATEGA_FAILED_URL=https://freedomvpn.taile485ac.ts.net/cabinet?payment=failed
+PLATEGA_RETURN_URL=
+PLATEGA_FAILED_URL=
 PLATEGA_CALLBACK_URL=https://freedomvpn.taile485ac.ts.net/payments/webhooks/platega
 
 PLATEGA_METHOD_SBP_QR=2
 PLATEGA_METHOD_MIR_CARD=
 PLATEGA_METHOD_CRYPTO=13
+BOT_USERNAME=vpn142323srv_bot
 ```
+
+`PLATEGA_RETURN_URL` и `PLATEGA_FAILED_URL` можно оставить пустыми. Тогда:
+
+- web-кабинет передаст Platega одноразовый signed return URL
+  `/cabinet/payment-return?...&token=...`, чтобы после оплаты восстановить
+  cookie кабинета;
+- Telegram-покупка передаст return URL на бота
+  `https://t.me/<BOT_USERNAME>`, чтобы пользователь не попадал в разлогиненный
+  web-кабинет.
 
 После заполнения ключей и проверки тестового платежа можно выставить:
 
@@ -336,7 +346,8 @@ STATUS_CHECK=PENDING
    - для СБП — QR/ссылку;
    - для МИР — ссылку на оплату картой;
    - для крипты — ссылку/форму Platega.
-6. После `CONFIRMED` бот автоматически выдает или продлевает VPN.
+6. После callback `CONFIRMED` API автоматически выдаёт или продлевает VPN.
+   Ручной апрув для Platega запрещён.
 
 Текст ожидания:
 
@@ -348,7 +359,7 @@ STATUS_CHECK=PENDING
 После оплаты:
 
 ```text
-✅ Оплата получена. Подписка активирована.
+✅ Оплата Freedom VPN подтверждена.
 ```
 
 ## UX в web-кабинете
@@ -359,10 +370,11 @@ STATUS_CHECK=PENDING
 - `Карта МИР`;
 - `Криптовалюта`.
 
-После выбора метода кабинет создает платеж в Platega и открывает полученный
-`redirect` или показывает QR. После возврата на `PLATEGA_RETURN_URL` кабинет
-показывает статус заказа. Финальное подтверждение все равно должно идти через
-callback или проверку статуса.
+После выбора метода кабинет создаёт платеж в Platega и открывает полученный
+`redirect`. Для web-кабинета backend передаёт signed return URL
+`/cabinet/payment-return`, поэтому после возврата пользователь остаётся в своём
+кабинете. Финальное подтверждение и выдача доступа всё равно идут только через
+callback `CONFIRMED`.
 
 ## Админка
 
@@ -380,7 +392,8 @@ callback или проверку статуса.
 - сырые данные callback/status для диагностики.
 
 Если платеж завис в `pending`, администратор проверяет `transactionId` через
-статус Platega и при необходимости запускает ручную синхронизацию.
+статус Platega. Вручную переводить Platega-платёж в `paid` нельзя: админка и
+служебный endpoint возвращают ошибку, чтобы не обойти callback.
 
 ## Чеклист включения
 
@@ -395,23 +408,16 @@ callback или проверку статуса.
 8. Сделать тестовый платеж на минимальную сумму.
 9. Проверить callback, выдачу VPN, email/Telegram-уведомления и запись в админке.
 
-## Что нужно реализовать в коде
+## Что уже реализовано в коде
 
-1. Конфиг Platega в настройках приложения.
-2. Клиент Platega:
-   - `POST /transaction/process`;
-   - `GET /transaction/{id}`;
-   - `GET /h2h/{id}`, если H2H включен.
-3. Webhook endpoint:
-   - `POST /payments/webhooks/platega`;
-   - проверка `X-MerchantId` и `X-Secret`;
-   - идемпотентная обработка статусов.
-4. Три метода оплаты в справочнике способов оплаты.
-5. Отображение методов в боте и web-кабинете.
-6. Логи callback/status в админке.
-7. Тесты на:
-   - создание платежа;
-   - успешный callback;
-   - повторный callback;
-   - отмененный платеж;
-   - ошибку авторизации webhook.
+1. Конфиг Platega через переменные окружения `PLATEGA_*`.
+2. Клиент Platega для `POST /transaction/process`.
+3. Webhook endpoint `POST /payments/webhooks/platega` с проверкой
+   `X-MerchantId` и `X-Secret`.
+4. Идемпотентная обработка статусов `CONFIRMED`, `CANCELED`, `CHARGEBACKED`.
+5. Три метода оплаты в справочнике способов оплаты: СБП QR, МИР, криптовалюта.
+6. Отображение методов в Telegram-боте и web-кабинете.
+7. Автоматическое продление/выдача VPN после `CONFIRMED`.
+8. Уведомления админу и клиенту после подтверждённой оплаты.
+9. Логи `platega_webhook_received`, `platega_webhook_paid_notified`,
+   `payment_paid_notification_sent`.

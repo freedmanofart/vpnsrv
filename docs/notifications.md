@@ -119,7 +119,10 @@
 
 Когда отправляется:
 
-- создан новый платёж через web-кабинет или другой платежный поток, который вызывает `notify_payment_created`.
+- создан новый ручной платёж через web-кабинет, Telegram или другой платежный
+  поток, который вызывает `notify_payment_created`;
+- для Platega pending/processing платежей это уведомление не отправляется:
+  Platega уведомляет только после фактической оплаты.
 
 Каналы:
 
@@ -144,6 +147,35 @@ Email-тема:
 
 Кнопка `Подтвердить` вызывает ботом служебный endpoint `POST /payments/{id}/status`
 с Bearer token и создаёт/продлевает VPN-доступ без входа в админку.
+
+### Подтверждённая оплата Platega
+
+Когда отправляется:
+
+- Platega прислала callback `CONFIRMED`;
+- backend успешно перевёл платеж в `paid` и создал/продлил подписку.
+
+Каналы:
+
+- Telegram админу;
+- email админу;
+- Telegram клиенту, если у пользователя есть `telegram_id`;
+- email клиенту, если у пользователя есть email и настроен SMTP.
+
+Содержит:
+
+- номер платежа;
+- сумму;
+- тариф;
+- способ оплаты;
+- ссылки на web-кабинет и продление;
+- статус/дату действия подписки, если она уже привязана к платежу.
+
+Журнал:
+
+- audit action `payment_paid_notification`;
+- логи `platega_webhook_received`, `platega_webhook_paid_notified`,
+  `payment_paid_notification_sent`.
 
 ### Загружен чек
 
@@ -186,4 +218,5 @@ Email-уведомления по окончанию подписок защищ
 - `email.subscription_expiring.skip`
 - `email.subscription_expired.send`
 - `email.subscription_expired.skip`
+- `payment_paid_notification`
 - `lifecycle.cycle`
