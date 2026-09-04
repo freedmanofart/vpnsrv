@@ -18,6 +18,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
 import app.main as main_module
+from app.core.config import settings
 from app.db.base import Base
 from app.db.models import (
     AuditLog,
@@ -239,6 +240,91 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(200, receipt.status_code, receipt.text)
         self.assertEqual("processing", receipt.json()["status"])
+
+    async def test_platega_webhook_accepts_confirmed_payment(self) -> None:
+        old_merchant = settings.platega_merchant_id
+        old_secret = settings.platega_secret
+        settings.platega_merchant_id = "merchant-test"
+        settings.platega_secret = "secret-test"
+        try:
+            async with self.session_factory() as db:
+                subscription = (
+                    await db.execute(select(Subscription).where(Subscription.user_id == self.user_id))
+                ).scalar_one()
+                payment = Payment(
+                    user_id=self.user_id,
+                    plan_id=subscription.plan_id,
+                    node_id=self.node_id,
+                    subscription_id=subscription.id,
+                    provider="platega",
+                    provider_payment_id="platega-confirmed-1",
+                    idempotency_key="platega-confirmed-1",
+                    amount=Decimal("10.00"),
+                    currency="RUB",
+                    status="pending",
+                    client_type="amnezia",
+                    flow="xtls-rprx-vision",
+                    fingerprint="chrome",
+                    details={},
+                )
+                db.add(payment)
+                await db.commit()
+                payment_id = payment.id
+
+            response = await self.client.post(
+                "/payments/webhooks/platega",
+                headers={
+                    "X-MerchantId": "merchant-test",
+                    "X-Secret": "secret-test",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "id": "platega-confirmed-1",
+                    "amount": 10,
+                    "currency": "RUB",
+                    "status": "CONFIRMED",
+                    "paymentMethod": 2,
+                },
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("ok", response.json()["status"])
+            self.assertEqual("paid", response.json()["payment_status"])
+
+            async with self.session_factory() as db:
+                saved = await db.get(Payment, payment_id)
+                self.assertEqual("paid", saved.status)
+                self.assertIsNotNone(saved.paid_at)
+        finally:
+            settings.platega_merchant_id = old_merchant
+            settings.platega_secret = old_secret
+
+    async def test_platega_webhook_unknown_payment_returns_200(self) -> None:
+        old_merchant = settings.platega_merchant_id
+        old_secret = settings.platega_secret
+        settings.platega_merchant_id = "merchant-test"
+        settings.platega_secret = "secret-test"
+        try:
+            response = await self.client.post(
+                "/payments/webhooks/platega",
+                headers={
+                    "X-MerchantId": "merchant-test",
+                    "X-Secret": "secret-test",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "id": "platega-missing-1",
+                    "amount": 10,
+                    "currency": "RUB",
+                    "status": "CONFIRMED",
+                    "paymentMethod": 2,
+                },
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("ignored", response.json()["status"])
+            self.assertEqual("payment_not_found", response.json()["reason"])
+        finally:
+            settings.platega_merchant_id = old_merchant
+            settings.platega_secret = old_secret
 
     async def test_bot_can_link_existing_telegram_user_to_email(self) -> None:
         with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:

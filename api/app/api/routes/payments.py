@@ -3,6 +3,7 @@ import hmac
 import json
 import base64
 import binascii
+import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -36,6 +37,14 @@ from app.services.notifications import notify_payment_created, notify_payment_re
 
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
+logger = logging.getLogger(__name__)
+
+
+PLATEGA_STATUS_MAP = {
+    "CONFIRMED": "paid",
+    "CANCELED": "cancelled",
+    "CHARGEBACKED": "refunded",
+}
 
 
 def _payment_error(exc: PaymentError) -> HTTPException:
@@ -251,6 +260,86 @@ async def get_payment(payment_id: int, db: AsyncSession = Depends(get_db)):
     if payment is None:
         raise HTTPException(status_code=404, detail="Payment not found")
     return payment
+
+
+def _platega_field(payload: dict, *names: str):
+    lowered = {str(key).lower(): value for key, value in payload.items()}
+    for name in names:
+        value = lowered.get(name.lower())
+        if value not in (None, ""):
+            return value
+    return None
+
+
+@router.post("/webhooks/platega")
+async def platega_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    merchant_id: str | None = Header(default=None, alias="X-MerchantId"),
+    secret: str | None = Header(default=None, alias="X-Secret"),
+):
+    if not settings.platega_merchant_id or not settings.platega_secret:
+        raise HTTPException(status_code=503, detail="Platega is not configured")
+    if not hmac.compare_digest(merchant_id or "", settings.platega_merchant_id):
+        raise HTTPException(status_code=401, detail="Invalid Platega merchant")
+    if not hmac.compare_digest(secret or "", settings.platega_secret):
+        raise HTTPException(status_code=401, detail="Invalid Platega secret")
+
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Platega payload") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid Platega payload")
+
+    provider_payment_id = _platega_field(payload, "id", "transactionId", "Id", "TransactionId")
+    raw_status = _platega_field(payload, "status", "Status")
+    if not provider_payment_id or not raw_status:
+        raise HTTPException(status_code=400, detail="Invalid Platega payload")
+
+    status = str(raw_status).upper()
+    target_status = PLATEGA_STATUS_MAP.get(status)
+    if target_status is None:
+        logger.info(
+            "platega_webhook_ignored_status",
+            extra={"event_type": "platega_webhook_ignored_status", "provider_payment_id": provider_payment_id, "status": status},
+        )
+        return {"status": "ignored", "reason": "unsupported_status"}
+
+    event_id = f"platega-{provider_payment_id}-{status}"
+    try:
+        payment = await process_payment_event(
+            db,
+            provider="platega",
+            event_id=event_id,
+            provider_payment_id=str(provider_payment_id),
+            target_status=target_status,
+            payload={"details": {"source": "platega_callback", "platega": payload}},
+        )
+    except PaymentNotFound:
+        logger.warning(
+            "platega_webhook_unknown_payment",
+            extra={
+                "event_type": "platega_webhook_unknown_payment",
+                "provider_payment_id": provider_payment_id,
+                "status": status,
+            },
+        )
+        return {"status": "ignored", "reason": "payment_not_found"}
+    except PaymentInvalidTransition as exc:
+        logger.warning(
+            "platega_webhook_invalid_transition",
+            extra={
+                "event_type": "platega_webhook_invalid_transition",
+                "provider_payment_id": provider_payment_id,
+                "status": status,
+                "error": str(exc),
+            },
+        )
+        return {"status": "ignored", "reason": "invalid_transition"}
+    except PaymentError as exc:
+        raise _payment_error(exc) from exc
+    return {"status": "ok", "payment_id": payment.id, "payment_status": payment.status}
 
 
 @router.post("/webhooks/{provider}", response_model=PaymentResponse)
