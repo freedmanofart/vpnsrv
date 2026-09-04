@@ -435,7 +435,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn("0 ГБ из 10 ГБ", response.text)
-        self.assertIn('Подписка <span class="status">не активна</span>', response.text)
+        self.assertIn('Подписка <span class="status inactive">не активна</span>', response.text)
 
         with patch("app.api.routes.user_status.ThreeXUIClient") as panel:
             panel.return_value.get_client_traffic = AsyncMock(
