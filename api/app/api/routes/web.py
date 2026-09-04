@@ -720,7 +720,6 @@ async def web_manual_payment(data: WebOrder, cabinet_token: str | None = Cookie(
                 return_url=f"{base_url}/cabinet/payment-return?payment=success&token={return_token}",
                 failed_url=f"{base_url}/cabinet/payment-return?payment=failed&token={return_token}",
             )
-            await notify_payment_created(db, payment)
             platega = (payment.details or {}).get("platega") or {}
             return {
                 "payment_id": payment.id,

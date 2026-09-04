@@ -21,6 +21,8 @@ from app.services.admin_settings import get_admin_contacts
 from app.services.audit import write_audit
 from app.services.email import (
     EmailDeliveryError,
+    _cabinet_url,
+    _renew_url,
     _send,
     send_subscription_expired,
     send_subscription_expiring,
@@ -221,6 +223,99 @@ async def notify_payment_created(db: AsyncSession, payment: Payment) -> None:
     card = await _payment_card(db, payment, title="🧾 Новая покупка Freedom VPN")
     await _send_telegram_message(db, card, reply_markup=_payment_actions(payment))
     await _send_email(db, f"Новая покупка Freedom VPN #{payment.id}", card)
+
+
+async def _payment_paid_notification_was_sent(db: AsyncSession, payment_id: int) -> bool:
+    return bool(
+        await db.scalar(
+            select(
+                exists().where(
+                    AuditLog.action == "payment_paid_notification",
+                    AuditLog.resource_type == "payment",
+                    AuditLog.resource_id == str(payment_id),
+                    AuditLog.result == "success",
+                )
+            )
+        )
+    )
+
+
+async def _send_client_telegram_message(user: User, text: str) -> bool:
+    if not settings.bot_token or not user.telegram_id:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{settings.bot_token}/sendMessage",
+                json={"chat_id": user.telegram_id, "text": text[:4096]},
+            )
+            response.raise_for_status()
+        return True
+    except httpx.HTTPError as exc:
+        error_type, status_code, details = _telegram_error_details(exc)
+        logger.warning(
+            "client_telegram_payment_paid_failed telegram_id=%s error=%s status=%s body=%s",
+            user.telegram_id,
+            error_type,
+            status_code,
+            details,
+        )
+        return False
+
+
+async def _send_client_payment_paid_email(user: User, subject: str, body: str) -> bool:
+    if not user.email or not settings.smtp_host or not settings.smtp_from:
+        return False
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings.smtp_from
+    message["To"] = user.email
+    message.set_content(body)
+    try:
+        await asyncio.to_thread(_send, message)
+        return True
+    except (OSError, smtplib.SMTPException) as exc:
+        logger.warning("client_email_payment_paid_failed: %s", exc)
+        return False
+
+
+async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
+    if await _payment_paid_notification_was_sent(db, payment.id):
+        return
+    user = await db.get(User, payment.user_id)
+    plan = await db.get(Plan, payment.plan_id)
+    subscription = await db.get(Subscription, payment.subscription_id) if payment.subscription_id else None
+    card = await _payment_card(db, payment, title="✅ Оплата Freedom VPN подтверждена")
+    await _send_telegram_message(db, card)
+    await _send_email(db, f"Оплата Freedom VPN подтверждена #{payment.id}", card)
+
+    client_notified = False
+    if user is not None:
+        plan_name = plan.name if plan else "Freedom VPN"
+        expires = f"\nДействует до: {subscription.expires_at} UTC" if subscription else ""
+        client_text = (
+            "✅ Оплата Freedom VPN подтверждена.\n\n"
+            f"Тариф: {plan_name}\n"
+            f"Сумма: {payment.amount:g} {payment.currency}"
+            f"{expires}\n\n"
+            f"Web-кабинет: {_cabinet_url()}\n"
+            f"Продлить подписку: {_renew_url()}\n\n"
+            "VPN-ключ и статус подписки доступны в web-кабинете."
+        )
+        client_notified = await _send_client_telegram_message(user, client_text) or client_notified
+        client_notified = await _send_client_payment_paid_email(
+            user,
+            "Freedom VPN: оплата подтверждена",
+            client_text,
+        ) or client_notified
+    await write_audit(
+        db,
+        action="payment_paid_notification",
+        result="success",
+        resource_type="payment",
+        resource_id=payment.id,
+        details={"client_notified": client_notified},
+    )
 
 
 async def notify_payment_receipt(db: AsyncSession, payment: Payment) -> None:

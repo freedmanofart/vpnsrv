@@ -34,7 +34,7 @@ from app.services.payments import (
     process_payment_event,
 )
 from app.services.platega import PlategaError, create_platega_payment, is_platega_method
-from app.services.notifications import notify_payment_created, notify_payment_receipt
+from app.services.notifications import notify_payment_created, notify_payment_paid, notify_payment_receipt
 
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
@@ -98,7 +98,6 @@ async def start_manual_payment(data: ManualPaymentCreate, db: AsyncSession = Dep
                 method_code=data.method_code,
                 source="telegram_bot",
             )
-            await notify_payment_created(db, payment)
             return payment
         payment = await create_payment(
             db,
@@ -356,6 +355,8 @@ async def platega_webhook(
         return {"status": "ignored", "reason": "invalid_transition"}
     except PaymentError as exc:
         raise _payment_error(exc) from exc
+    if target_status == "paid":
+        await notify_payment_paid(db, payment)
     return {"status": "ok", "payment_id": payment.id, "payment_status": payment.status}
 
 

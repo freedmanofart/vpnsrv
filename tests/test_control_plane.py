@@ -286,9 +286,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             details={"platega": {"redirect": "https://platega.test/pay"}},
         )
 
+        notify_created = AsyncMock()
         with (
             patch("app.api.routes.web.create_platega_payment", new=AsyncMock(return_value=fake_payment)) as create,
-            patch("app.api.routes.web.notify_payment_created", new=AsyncMock()),
+            patch("app.api.routes.web.notify_payment_created", new=notify_created),
         ):
             created = await self.client.post(
                 "/web/payments/manual",
@@ -301,6 +302,52 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         _, kwargs = create.await_args
         self.assertIn("/cabinet/payment-return?payment=success&token=", kwargs["return_url"])
         self.assertIn("/cabinet/payment-return?payment=failed&token=", kwargs["failed_url"])
+        notify_created.assert_not_awaited()
+
+    async def test_api_platega_payment_creation_does_not_notify_before_payment(self) -> None:
+        async with self.session_factory() as db:
+            payment = Payment(
+                user_id=self.user_id,
+                plan_id=1,
+                node_id=self.node_id,
+                provider="platega",
+                provider_payment_id="platega-created-test",
+                idempotency_key="platega-created-test",
+                amount=Decimal("1.00"),
+                currency="RUB",
+                status="pending",
+                client_type="universal",
+                flow="",
+                fingerprint="firefox",
+                details={"platega": {"redirect": "https://platega.test/pay"}},
+            )
+            db.add(payment)
+            await db.commit()
+            await db.refresh(payment)
+
+        notify_created = AsyncMock()
+        with (
+            patch("app.api.routes.payments.create_platega_payment", new=AsyncMock(return_value=payment)),
+            patch("app.api.routes.payments.notify_payment_created", new=notify_created),
+        ):
+            created = await self.client.post(
+                "/payments/manual",
+                headers=self.service_headers,
+                json={
+                    "user_id": self.user_id,
+                    "plan_id": 1,
+                    "node_id": self.node_id,
+                    "client_type": "universal",
+                    "flow": "",
+                    "fingerprint": "firefox",
+                    "idempotency_key": "platega-created-test",
+                    "method_code": "platega_sbp_qr",
+                },
+            )
+
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual("platega", created.json()["provider"])
+        notify_created.assert_not_awaited()
 
     async def test_platega_webhook_accepts_confirmed_payment(self) -> None:
         old_merchant = settings.platega_merchant_id
@@ -332,24 +379,26 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
                 await db.commit()
                 payment_id = payment.id
 
-            response = await self.client.post(
-                "/payments/webhooks/platega",
-                headers={
-                    "X-MerchantId": "merchant-test",
-                    "X-Secret": "secret-test",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "id": "platega-confirmed-1",
-                    "amount": 10,
-                    "currency": "RUB",
-                    "status": "CONFIRMED",
-                    "paymentMethod": 2,
-                },
-            )
+            with patch("app.api.routes.payments.notify_payment_paid", new=AsyncMock()) as notify_paid:
+                response = await self.client.post(
+                    "/payments/webhooks/platega",
+                    headers={
+                        "X-MerchantId": "merchant-test",
+                        "X-Secret": "secret-test",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "id": "platega-confirmed-1",
+                        "amount": 10,
+                        "currency": "RUB",
+                        "status": "CONFIRMED",
+                        "paymentMethod": 2,
+                    },
+                )
             self.assertEqual(200, response.status_code, response.text)
             self.assertEqual("ok", response.json()["status"])
             self.assertEqual("paid", response.json()["payment_status"])
+            notify_paid.assert_awaited_once()
 
             async with self.session_factory() as db:
                 saved = await db.get(Payment, payment_id)
