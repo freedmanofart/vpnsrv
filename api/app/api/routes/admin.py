@@ -89,6 +89,7 @@ HOST_COMMANDS = {
     "restore_postgres": "scripts/restore_postgres.sh /var/backups/vpn-service/vpn-db-TIMESTAMP.dump",
     "mail_chain_recover": "scripts/check_mail_chain.sh",
     "online_apis": "scripts/check_online_apis.sh",
+    "platega_check": "docker cp scripts/check_platega_payment.py vpn-api:/tmp/check_platega_payment.py && docker exec vpn-api python /tmp/check_platega_payment.py --method all --amount 10 --currency RUB --description \"Freedom VPN Platega admin check\"",
     "tailscale_recover": "scripts/recover_tailscale.sh",
     "tailscale_funnel": "tailscale funnel status",
 }
@@ -549,6 +550,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
             {"id": "health_dashboard", "name": "Health-dashboard: API, сайт, почта, 3x-ui", "command": "выполняется из админки", "runnable": True},
             {"id": "smtp_check", "name": "Проверить SMTP-логин и отправку писем", "command": "выполняется из админки", "runnable": True},
             {"id": "online_apis", "name": "Все online-тесты ключевых API", "command": "scripts/check_online_apis.sh", "runnable": True},
+            {"id": "platega_check", "name": "Проверить Platega: СБП, МИР, крипта", "command": "scripts/check_platega_payment.py --method all --amount 10 --currency RUB", "runnable": True},
             {"id": "mail_chain_recover", "name": "Проверить почту и быстро переподнять api/bot", "command": "scripts/check_mail_chain.sh", "runnable": True},
             {"id": "tailscale_recover", "name": "Быстро переподнять Tailscale, Funnel и сертификат", "command": "scripts/recover_tailscale.sh", "runnable": True},
             {"id": "backup_postgres", "name": "Создать PostgreSQL backup сейчас", "command": "pg_dump -Fc в /var/backups/vpn-service", "runnable": True},

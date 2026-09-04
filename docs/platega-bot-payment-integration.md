@@ -250,6 +250,77 @@ GET /transaction/{transactionId}
 Ответ содержит статус, сумму, валюту, метод оплаты, QR/ссылку и другие поля.
 Эту проверку можно использовать как резервный механизм в worker.
 
+## Проверка платежей скриптом
+
+В репозитории есть безопасный проверочный скрипт:
+
+```text
+scripts/check_platega_payment.py
+```
+
+Он использует переменные `PLATEGA_*`, создает тестовый платеж в Platega и сразу
+запрашивает его статус. Секреты в вывод не печатаются.
+
+Проверить СБП:
+
+```bash
+cd /home/freedman/vpn-service
+docker cp scripts/check_platega_payment.py vpn-api:/tmp/check_platega_payment.py
+docker exec vpn-api python /tmp/check_platega_payment.py --method sbp --amount 10 --currency RUB
+```
+
+Проверить карту МИР:
+
+```bash
+cd /home/freedman/vpn-service
+docker cp scripts/check_platega_payment.py vpn-api:/tmp/check_platega_payment.py
+docker exec vpn-api python /tmp/check_platega_payment.py --method mir --amount 10 --currency RUB
+```
+
+Если `PLATEGA_METHOD_MIR_CARD` пустой, скрипт пропустит МИР и напишет `SKIP`.
+Это значит, что нужно получить у Platega числовой `paymentMethod` для карты МИР.
+
+Проверить криптовалюту:
+
+```bash
+cd /home/freedman/vpn-service
+docker cp scripts/check_platega_payment.py vpn-api:/tmp/check_platega_payment.py
+docker exec vpn-api python /tmp/check_platega_payment.py --method crypto --amount 10 --currency RUB
+```
+
+Проверить все подготовленные методы:
+
+```bash
+cd /home/freedman/vpn-service
+docker cp scripts/check_platega_payment.py vpn-api:/tmp/check_platega_payment.py
+docker exec vpn-api python /tmp/check_platega_payment.py --method all --amount 10 --currency RUB
+```
+
+Ожидаемый успешный результат:
+
+```text
+CREATE_HTTP_STATUS=200
+TRANSACTION_ID=<id платежа>
+PAYMENT_METHOD=SBPQR / Crypto / ...
+STATUS=PENDING
+REDIRECT=https://pay.platega.io...
+STATUS_HTTP_STATUS=200
+STATUS_CHECK=PENDING
+```
+
+`PENDING` для теста создания — нормальный статус: платеж создан, но еще не
+оплачен.
+
+В админке этот скрипт добавлен в раздел `Скрипты` как:
+
+```text
+Проверить Platega: СБП, МИР, крипта
+```
+
+Текущая админка для host-only команд показывает точную команду запуска на
+сервере. Если в ответе админки пришел статус `host_required`, нужно скопировать
+команду из поля `command` и выполнить ее по SSH на сервере.
+
 ## UX в Telegram-боте
 
 Рекомендуемый путь:
