@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     bot_token: str = ""
     bot_admin_chat_id: int = 0
     admin_notification_email: str = "freedmanofart5@gmail.com"
+    platega_enabled: bool = False
+    platega_base_url: str = "https://app.platega.io"
+    platega_merchant_id: str = ""
+    platega_secret: str = ""
+    platega_return_url: str = ""
+    platega_failed_url: str = ""
+    platega_callback_url: str = ""
+    platega_method_sbp_qr: int = 2
+    platega_method_mir_card: str = ""
+    platega_method_crypto: int = 13
 
     model_config = SettingsConfigDict(
         env_file=".env",
