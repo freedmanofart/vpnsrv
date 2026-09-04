@@ -54,6 +54,8 @@ async def create_platega_payment(
     *,
     method_code: str,
     source: str,
+    return_url: str | None = None,
+    failed_url: str | None = None,
 ) -> Payment:
     if not settings.platega_merchant_id or not settings.platega_secret:
         raise PlategaError("Platega не настроена: заполните PLATEGA_MERCHANT_ID и PLATEGA_SECRET")
@@ -76,8 +78,8 @@ async def create_platega_payment(
     if node.status != "active":
         raise PaymentInvalidTransition("VPN node is not active")
 
-    return_url = settings.platega_return_url or f"{settings.public_base_url.rstrip('/')}/cabinet?payment=success"
-    failed_url = settings.platega_failed_url or f"{settings.public_base_url.rstrip('/')}/cabinet?payment=failed"
+    return_url = return_url or settings.platega_return_url or f"{settings.public_base_url.rstrip('/')}/cabinet?payment=success"
+    failed_url = failed_url or settings.platega_failed_url or f"{settings.public_base_url.rstrip('/')}/cabinet?payment=failed"
     payment_method = _method_id(method_code)
     payload = {
         "paymentMethod": payment_method,

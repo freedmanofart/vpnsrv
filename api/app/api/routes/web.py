@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 COOKIE = "freedom_cabinet"
 MANUAL_PAYMENT_METHODS = {"sber_qr", "tbank_qr", "phone_transfer"}
+PAYMENT_RETURN_TOKEN_TTL_SECONDS = 60 * 60
 
 
 def _normalize_email(value: str) -> str:
@@ -317,6 +318,50 @@ def _set_cabinet_cookie(response: Response, raw: str) -> None:
     )
 
 
+def _payment_return_signature(payload: str) -> str:
+    secret = settings.payment_webhook_secret or settings.service_api_token
+    return hmac.new(secret.encode(), payload.encode(), sha256).hexdigest()
+
+
+def _payment_return_token(user_id: int) -> str:
+    payload = json.dumps(
+        {
+            "user_id": user_id,
+            "exp": int(datetime.now(timezone.utc).timestamp()) + PAYMENT_RETURN_TOKEN_TTL_SECONDS,
+            "nonce": secrets.token_urlsafe(12),
+        },
+        separators=(",", ":"),
+    )
+    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return f"{encoded}.{_payment_return_signature(encoded)}"
+
+
+def _verify_payment_return_token(token: str) -> int | None:
+    try:
+        encoded, signature = token.split(".", 1)
+    except ValueError:
+        return None
+    if not hmac.compare_digest(signature, _payment_return_signature(encoded)):
+        return None
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        user_id = int(payload["user_id"])
+        expires_at = int(payload["exp"])
+    except (KeyError, TypeError, ValueError, binascii.Error, json.JSONDecodeError):
+        return None
+    if expires_at < int(datetime.now(timezone.utc).timestamp()):
+        return None
+    return user_id
+
+
+async def _create_cabinet_session(db: AsyncSession, user: User, response: Response) -> None:
+    raw = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc) + timedelta(days=settings.cabinet_token_ttl_days)
+    db.add(CabinetAccessToken(user_id=user.id, token_hash=_digest(raw), expires_at=expires))
+    _set_cabinet_cookie(response, raw)
+
+
 @router.post("/web/register")
 async def register(data: Registration, db: AsyncSession = Depends(get_db)):
     email_address = _normalize_email(data.email)
@@ -485,6 +530,20 @@ async def set_password(
     return {"message": "Пароль сохранён"}
 
 
+@router.get("/cabinet/payment-return")
+async def cabinet_payment_return(token: str, payment: str = "success", db: AsyncSession = Depends(get_db)):
+    user_id = _verify_payment_return_token(token)
+    if user_id is None:
+        return RedirectResponse("/cabinet?payment=return_expired", status_code=303, headers=_headers())
+    user = await db.get(User, user_id)
+    if user is None or user.status != "active":
+        return RedirectResponse("/cabinet?payment=return_expired", status_code=303, headers=_headers())
+    response = RedirectResponse(f"/cabinet?payment={html.escape(payment)}", status_code=303, headers=_headers())
+    await _create_cabinet_session(db, user, response)
+    await db.commit()
+    return response
+
+
 @router.get("/cabinet/password", response_class=HTMLResponse)
 async def password_setup_page(
     cabinet_token: str | None = Cookie(default=None, alias=COOKIE),
@@ -651,11 +710,15 @@ async def web_manual_payment(data: WebOrder, cabinet_token: str | None = Cookie(
         raise HTTPException(status_code=409, detail="Сейчас нет доступного VPN-сервера")
     try:
         if is_platega_method(method.code):
+            return_token = _payment_return_token(user.id)
+            base_url = settings.public_base_url.rstrip("/")
             payment = await create_platega_payment(
                 db,
                 PaymentCreate(user_id=user.id, plan_id=data.plan_id, node_id=node.id, client_type="universal", flow="", fingerprint="firefox", idempotency_key=f"web:{user.id}:{secrets.token_hex(12)}"),
                 method_code=method.code,
                 source="web_cabinet",
+                return_url=f"{base_url}/cabinet/payment-return?payment=success&token={return_token}",
+                failed_url=f"{base_url}/cabinet/payment-return?payment=failed&token={return_token}",
             )
             await notify_payment_created(db, payment)
             platega = (payment.details or {}).get("platega") or {}

@@ -241,6 +241,24 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, receipt.status_code, receipt.text)
         self.assertEqual("processing", receipt.json()["status"])
 
+    async def test_platega_return_restores_web_cabinet_session(self) -> None:
+        from app.api.routes.web import _payment_return_token
+
+        token = _payment_return_token(self.user_id)
+        self.client.cookies.clear()
+        returned = await self.client.get(
+            f"/cabinet/payment-return?payment=success&token={token}",
+            follow_redirects=False,
+        )
+
+        self.assertEqual(303, returned.status_code, returned.text)
+        self.assertEqual("/cabinet?payment=success", returned.headers["location"])
+        self.assertIn("freedom_cabinet=", returned.headers["set-cookie"])
+        self.assertIn("SameSite=strict", returned.headers["set-cookie"])
+
+        cabinet = await self.client.get("/cabinet")
+        self.assertEqual(200, cabinet.status_code, cabinet.text)
+
     async def test_platega_webhook_accepts_confirmed_payment(self) -> None:
         old_merchant = settings.platega_merchant_id
         old_secret = settings.platega_secret
