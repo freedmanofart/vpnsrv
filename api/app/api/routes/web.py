@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.db.models.cabinet_access import CabinetAccessToken
 from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.models.plan import Plan
+from app.db.models.plan_package import PlanPackage
 from app.db.models.payment import Payment
 from app.db.models.payment_method import PaymentMethod
 from app.db.models.subscription import Subscription
@@ -113,7 +114,14 @@ def _temporary_registration_button() -> str:
 
 async def _plans(db: AsyncSession) -> list[Plan]:
     result = await db.execute(
-        select(Plan).where(Plan.is_active.is_(True), Plan.is_public.is_(True)).order_by(Plan.price, Plan.duration_days)
+        select(Plan).where(Plan.is_active.is_(True), Plan.is_public.is_(True)).order_by(Plan.package_id, Plan.duration_days, Plan.price)
+    )
+    return list(result.scalars())
+
+
+async def _plan_packages(db: AsyncSession) -> list[PlanPackage]:
+    result = await db.execute(
+        select(PlanPackage).where(PlanPackage.is_active.is_(True)).order_by(PlanPackage.sort_order, PlanPackage.id)
     )
     return list(result.scalars())
 
@@ -170,17 +178,39 @@ def _plan_cards(plans: list[Plan]) -> str:
     return "".join(cards) or '<p class="muted">Публичные тарифы временно недоступны.</p>'
 
 
-def _tier_selector(plans: list[Plan]) -> str:
+def _package_code(plan: Plan, packages_by_id: dict[int, PlanPackage] | None = None) -> str | None:
+    if packages_by_id and plan.package_id and plan.package_id in packages_by_id:
+        return packages_by_id[plan.package_id].code
+    return _tier(plan)
+
+
+def _package_label(plan: Plan, packages_by_id: dict[int, PlanPackage] | None = None) -> str:
+    if packages_by_id and plan.package_id and plan.package_id in packages_by_id:
+        return packages_by_id[plan.package_id].name
+    tier = _tier(plan)
+    return TIER_META[tier][0] if tier else "Тариф"
+
+
+def _tier_selector(plans: list[Plan], packages: list[PlanPackage] | None = None) -> str:
+    packages_by_id = {item.id: item for item in packages or []}
     groups: dict[str, list[Plan]] = {key: [] for key in TIER_META}
+    package_meta: dict[str, tuple[str, str, str]] = dict(TIER_META)
+    for package in packages or []:
+        package_meta[package.code] = (
+            package.name,
+            "без ограничений" if not package.max_connections else f"{package.max_connections} подключений",
+            "без ограничений" if not package.traffic_limit_gb else f"{package.traffic_limit_gb} ГБ трафика",
+        )
+        groups.setdefault(package.code, [])
     for plan in plans:
-        tier = _tier(plan)
+        tier = _package_code(plan, packages_by_id)
         if tier:
             groups[tier].append(plan)
     cards = []
     for tier, tier_plans in groups.items():
         if not tier_plans:
             continue
-        title, connections, traffic = TIER_META[tier]
+        title, connections, traffic = package_meta[tier]
         ordered_plans = sorted(
             tier_plans,
             key=lambda item: (abs(item.duration_days - 30), item.duration_days),
@@ -636,11 +666,14 @@ async def cabinet(
         traffic = "—"
     devices = "Без ограничений" if client and not client.max_connections else (str(client.max_connections) if client else "—")
     public_plans = await _plans(db)
+    packages = await _plan_packages(db)
+    packages_by_id = {item.id: item for item in packages}
     methods = list((await db.execute(select(PaymentMethod).where(PaymentMethod.is_active.is_(True)).order_by(PaymentMethod.sort_order))).scalars())
     payments = list((await db.execute(select(Payment).where(Payment.user_id == user.id).order_by(Payment.id.desc()).limit(10))).scalars())
-    tier_selector = _tier_selector(public_plans)
     requested_plan = next((item for item in public_plans if item.id == plan_id), None)
-    initial_plan_id = requested_plan.id if requested_plan else (public_plans[0].id if public_plans else 0)
+    current_plan = next((item for item in public_plans if plan and item.id == plan.id), None)
+    initial_plan = requested_plan or current_plan or (public_plans[0] if public_plans else None)
+    initial_plan_id = initial_plan.id if initial_plan else 0
     method_options = "".join(
         f'<option value="{html.escape(m.code)}" data-url="{html.escape(m.url or "")}">{html.escape(_clean_payment_method_name(m.name))}</option>'
         for m in methods
@@ -648,6 +681,7 @@ async def cabinet(
     plan_payload = {
         item.id: {
             "name": _clean_plan_name(item.name),
+            "package": _package_label(item, packages_by_id),
             "duration_days": item.duration_days,
             "price": f"{item.price:g}",
             "currency": item.currency,
@@ -673,9 +707,69 @@ async def cabinet(
             f'<div class="key"><code id="vpn-key">{html.escape(vpn_uri)}</code></div>'
             '<div class="actions"><button class="button" onclick="copyKey(this)">Копировать ключ</button></div>'
         )
-    body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><div class="links"><form method="post" action="/cabinet/logout"><button class="button">Выйти</button></form></div></nav><main class="cabinet"><div class="eyebrow">Управление подпиской</div><h2>{html.escape(user.email or "Ваш кабинет")}</h2><div class="cabinet-grid"><section class="panel"><h3>Подписка <span class="{status_class}">{status_text}</span></h3><p><b>{html.escape(_clean_plan_name(plan.name)) if plan else 'Тариф не выбран'}</b></p><div class="stats"><div class="stat"><small class="muted">Осталось</small><br><b>{days} дн.</b></div><div class="stat"><small class="muted">Трафик</small><br><b>{traffic}</b></div><div class="stat"><small class="muted">Подключения</small><br><b>{devices}</b></div></div><div class="cabinet-apps"><h2>Скачать приложения</h2><div class="actions"><a class="button" href="https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_windows_x64.exe">Windows</a><a class="button" href="https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_macos.zip">macOS</a><a class="button" href="https://play.google.com/store/apps/details?id=org.amnezia.vpn">Android</a><a class="button" href="https://apps.apple.com/ru/app/defaultvpn/id6744725017">iOS</a></div></div></section><section class="panel"><h3>Ключ доступа</h3>{key_block}<p class="muted">Сервер назначается автоматически: {html.escape(node.region or node.name) if node else 'после оплаты'}</p></section></div><section><h2>Пароль для входа</h2><div class="panel"><p class="muted">Задайте или смените пароль, чтобы потом входить в кабинет через вкладку «Пароль» без кода из письма.</p><label>Новый пароль<input id="cabinet-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" placeholder="Не менее 8 символов"></label><button class="button primary" type="button" onclick="saveCabinetPassword()">Сохранить пароль</button><p id="password-result"></p></div></section><section class="cabinet-purchase" id="payment"><h2>Приобрести или продлить</h2><div class="tier-groups">{tier_selector}</div><input type="hidden" id="order-plan" value="{initial_plan_id}"><div class="cabinet-grid"><div class="panel"><label>Способ оплаты<select id="order-method">{method_options}</select></label><div id="order-summary" class="payment-summary"></div><button class="button primary" type="button" onclick="openPayment()">Оплата</button></div><div class="panel"><h3>Последние платежи</h3><ul>{payment_rows}</ul></div></div></section></main></div><div class="modal" id="payment-modal"><div class="modal-card payment-modal-card"><h3>Оплата</h3><p class="muted">Проверьте сумму и выбранный способ оплаты перед продолжением.</p><div id="payment-summary-modal" class="payment-summary"></div><div id="order-result"></div><div class="actions"><button class="button" type="button" onclick="closePayment()">Назад</button><button class="button primary" type="button" onclick="confirmPayment()">Оплатить</button></div></div></div><style>.payment-summary{{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:16px;background:#f8fbff}}.payment-summary h3{{margin:0 0 12px}}.summary-row{{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #e7edf8}}.summary-row:last-child{{border-bottom:0}}.summary-row span{{color:var(--muted)}}.summary-row b{{text-align:right}}.summary-total b{{font-size:20px;color:var(--ink)}}.payment-modal-card{{width:min(620px,100%)}}#order-result img{{display:block;margin:12px 0;border-radius:16px;border:1px solid var(--line)}}#order-result input[type=file]{{margin:12px 0}}</style><script>const planData={plan_json};const methodData={method_json};function durationLabel(days){{if(!days)return 'срок не указан';if(days%30===0){{const months=days/30;return months+' мес.'}}return days+' дн.'}}function selectedPlan(){{return planData[String(document.getElementById('order-plan').value)]}}function selectedMethod(){{const select=document.getElementById('order-method');const fallback=select?.selectedOptions?.[0];return methodData[select?.value]||{{name:fallback?.textContent||'Способ оплаты',url:fallback?.dataset?.url||'',manual:true}}}}function renderPaymentSummary(targetId='order-summary'){{const target=document.getElementById(targetId);if(!target)return;const plan=selectedPlan(),method=selectedMethod();if(!plan){{target.innerHTML='<p class="error">Выберите подписку</p>';return}}target.innerHTML=`<h3>К оплате</h3><div class="summary-row"><span>Тариф</span><b>${{plan.name}}</b></div><div class="summary-row"><span>Срок</span><b>${{durationLabel(plan.duration_days)}}</b></div><div class="summary-row summary-total"><span>Сумма</span><b>${{plan.price}} ${{plan.currency}}</b></div><div class="summary-row"><span>Способ оплаты</span><b>${{method.name}}</b></div>`}}function syncTierSelection(){{document.querySelectorAll('.tier-group').forEach(group=>group.classList.toggle('selected',!!group.querySelector('[data-order-plan].selected')))}}function setPlan(button){{document.querySelectorAll('[data-order-plan]').forEach(item=>item.classList.toggle('selected',item===button));const group=button.closest('.tier-group');if(group)group.classList.add('expanded');syncTierSelection();document.getElementById('order-plan').value=button.dataset.orderPlan;renderPaymentSummary()}}document.querySelectorAll('.tier-group').forEach(group=>group.onclick=event=>{{if(!event.target.closest('[data-order-plan]'))group.classList.toggle('expanded')}});document.querySelectorAll('[data-order-plan]').forEach(button=>button.onclick=event=>{{event.stopPropagation();setPlan(button)}});document.querySelector('[data-order-plan]')?.click();document.getElementById('order-method')?.addEventListener('change',()=>renderPaymentSummary());function openPayment(){{const out=document.getElementById('order-result');if(out){{out.className='';out.innerHTML=''}}renderPaymentSummary('payment-summary-modal');if(!selectedPlan())return;document.getElementById('payment-modal').classList.add('open')}}function closePayment(){{document.getElementById('payment-modal').classList.remove('open')}}function copyKey(button){{navigator.clipboard.writeText(document.getElementById('vpn-key').textContent);button.textContent='Скопировано ✓'}}async function saveCabinetPassword(){{const out=document.getElementById('password-result'),input=document.getElementById('cabinet-password');out.className='';out.textContent='Сохраняем…';const r=await fetch('/web/password',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{password:input.value}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?'Пароль сохранён. Теперь можно входить по email и паролю.':(d.detail||'Не удалось сохранить пароль');if(r.ok)input.value=''}}async function confirmPayment(){{const method=selectedMethod();if(method.url&&!method.manual){{location.href=method.url;return}}await createOrder()}}async function createOrder(){{const out=document.getElementById('order-result');out.className='';out.textContent='Создаём платёж…';const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:document.getElementById('order-method').value}})}});const d=await r.json();if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}if(d.redirect){{if(d.payment_return_token)sessionStorage.setItem('freedom_payment_return_token',d.payment_return_token);out.innerHTML='<p>Платёж создан. Открываем страницу оплаты…</p>';location.href=d.redirect;return}}out.className='';out.innerHTML=d.qr_url?`<p>Оплатите <b>${{d.amount}} ${{d.currency}}</b> выбранным способом, затем загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><p><b>Сумма: ${{d.amount}} ${{d.currency}}</b></p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`}}async function uploadReceipt(id){{const file=document.getElementById('receipt').files[0];if(!file)return alert('Выберите файл чека');const data=await new Promise(ok=>{{const reader=new FileReader();reader.onload=()=>ok(reader.result.split(',')[1]);reader.readAsDataURL(file)}});const r=await fetch(`/web/payments/${{id}}/receipt`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{filename:file.name,mime_type:file.type,data_base64:data}})}});const d=await r.json();if(r.ok){{alert('Чек отправлен. Платёж ожидает проверки администратора.');location.reload()}}else alert(d.detail||'Ошибка загрузки')}};</script>'''
+    body = f"""
+<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><div class="links"><form method="post" action="/cabinet/logout"><button class="button">Выйти</button></form></div></nav>
+<main class="cabinet"><div class="eyebrow">Управление подпиской</div><h2>{html.escape(user.email or "Ваш кабинет")}</h2><div class="cabinet-stack">
+<section class="panel cabinet-renew" id="payment"><div class="cabinet-two"><div><h3>Подписка <span class="{status_class}">{status_text}</span></h3><p><b>{html.escape(_clean_plan_name(plan.name)) if plan else 'Тариф не выбран'}</b></p><div class="stats"><div class="stat"><small class="muted">Осталось</small><br><b>{days} дн.</b></div><div class="stat"><small class="muted">Трафик</small><br><b>{traffic}</b></div><div class="stat"><small class="muted">Подключения</small><br><b>{devices}</b></div></div></div><div class="renew-box"><h3>Выберите способ оплаты</h3><input type="hidden" id="order-plan" value="{initial_plan_id}"><label>Способ оплаты<select id="order-method">{method_options}</select></label><div id="order-summary" class="payment-summary"></div><div class="actions renew-actions"><button class="button primary" type="button" onclick="openPayment()">Продлить</button><a class="button" href="/cabinet/tariffs">Сменить тариф</a></div></div></div></section>
+<section class="panel"><div class="cabinet-two"><div><h3>Ключ доступа</h3>{key_block}<p class="muted">Сервер назначается автоматически: {html.escape(node.region or node.name) if node else 'после оплаты'}</p></div><div class="cabinet-apps"><h3>Скачать приложения</h3><div class="actions"><a class="button" href="https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_windows_x64.exe">Windows</a><a class="button" href="https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_macos.zip">macOS</a><a class="button" href="https://play.google.com/store/apps/details?id=org.amnezia.vpn">Android</a><a class="button" href="https://apps.apple.com/ru/app/defaultvpn/id6744725017">iOS</a></div></div></div></section>
+<section class="panel"><h3>Последние платежи</h3><ul>{payment_rows}</ul></section>
+<section class="panel"><h3>Пароль для входа</h3><p class="muted">Задайте или смените пароль, чтобы потом входить в кабинет через вкладку «Пароль» без кода из письма.</p><label>Новый пароль<input id="cabinet-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" placeholder="Не менее 8 символов"></label><button class="button primary" type="button" onclick="saveCabinetPassword()">Сохранить пароль</button><p id="password-result"></p></section>
+</div></main></div><div class="modal" id="payment-modal"><div class="modal-card payment-modal-card"><h3>Оплата</h3><p class="muted">Проверьте сумму и выбранный способ оплаты перед продолжением.</p><div id="payment-summary-modal" class="payment-summary"></div><div id="order-result"></div><div class="actions"><button class="button" type="button" onclick="closePayment()">Назад</button><button class="button primary" type="button" onclick="confirmPayment()">Продлить</button></div></div></div>
+<style>.cabinet-stack{{display:grid;gap:18px}}.cabinet-two{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}}.cabinet-renew{{border-color:#dfe7f4}}.renew-box{{background:#f8fbff;border:1px solid var(--line);border-radius:18px;padding:18px}}.renew-actions{{justify-content:center}}.payment-summary{{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:16px;background:#fff}}.payment-summary h3{{margin:0 0 12px;text-align:center}}.summary-row{{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #e7edf8}}.summary-row:last-child{{border-bottom:0}}.summary-row span{{color:var(--muted)}}.summary-row b{{text-align:right}}.summary-total b{{font-size:20px;color:var(--ink)}}.payment-modal-card{{width:min(620px,100%)}}#order-result img{{display:block;margin:12px 0;border-radius:16px;border:1px solid var(--line)}}#order-result input[type=file]{{margin:12px 0}}.cabinet-apps{{margin-top:0;padding-top:0;border-top:0}}.cabinet-apps h3{{margin-top:0}}.cabinet-apps .actions{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.cabinet-apps .button{{border-color:#b7ead7;background:#eefcf6;color:var(--green);border-radius:12px;text-align:center;padding:14px 16px}}@media(max-width:620px){{.cabinet-two{{grid-template-columns:1fr}}}}</style>
+<script>const planData={plan_json};const methodData={method_json};function durationLabel(days){{if(!days)return 'срок не указан';if(days%30===0){{const months=days/30;return months+' мес.'}}return days+' дн.'}}function selectedPlan(){{return planData[String(document.getElementById('order-plan').value)]}}function selectedMethod(){{const select=document.getElementById('order-method');const fallback=select?.selectedOptions?.[0];return methodData[select?.value]||{{name:fallback?.textContent||'Способ оплаты',url:fallback?.dataset?.url||'',manual:true}}}}function renderPaymentSummary(targetId='order-summary'){{const target=document.getElementById(targetId);if(!target)return;const plan=selectedPlan(),method=selectedMethod();if(!plan){{target.innerHTML='<p class="error">Выберите подписку</p>';return}}target.innerHTML=`<h3>К оплате</h3><div class="summary-row"><span>Пакет</span><b>${{plan.package}}</b></div><div class="summary-row"><span>Тариф</span><b>${{plan.name}}</b></div><div class="summary-row"><span>Срок</span><b>${{durationLabel(plan.duration_days)}}</b></div><div class="summary-row summary-total"><span>Сумма</span><b>${{plan.price}} ${{plan.currency}}</b></div><div class="summary-row"><span>Способ оплаты</span><b>${{method.name}}</b></div>`}}document.getElementById('order-method')?.addEventListener('change',()=>renderPaymentSummary());renderPaymentSummary();function openPayment(){{const out=document.getElementById('order-result');if(out){{out.className='';out.innerHTML=''}}renderPaymentSummary('payment-summary-modal');if(!selectedPlan())return;document.getElementById('payment-modal').classList.add('open')}}function closePayment(){{document.getElementById('payment-modal').classList.remove('open')}}function copyKey(button){{navigator.clipboard.writeText(document.getElementById('vpn-key').textContent);button.textContent='Скопировано ✓'}}async function saveCabinetPassword(){{const out=document.getElementById('password-result'),input=document.getElementById('cabinet-password');out.className='';out.textContent='Сохраняем…';const r=await fetch('/web/password',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{password:input.value}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?'Пароль сохранён. Теперь можно входить по email и паролю.':(d.detail||'Не удалось сохранить пароль');if(r.ok)input.value=''}}async function confirmPayment(){{await createOrder()}}async function createOrder(){{const out=document.getElementById('order-result');out.className='';out.textContent='Создаём платёж…';const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:document.getElementById('order-method').value}})}});const d=await r.json();if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}if(d.redirect){{if(d.payment_return_token)sessionStorage.setItem('freedom_payment_return_token',d.payment_return_token);out.innerHTML='<p>Платёж создан. Открываем страницу оплаты…</p>';location.href=d.redirect;return}}out.className='';out.innerHTML=d.qr_url?`<p>Оплатите <b>${{d.amount}} ${{d.currency}}</b> выбранным способом, затем загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><p><b>Сумма: ${{d.amount}} ${{d.currency}}</b></p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`}}async function uploadReceipt(id){{const file=document.getElementById('receipt').files[0];if(!file)return alert('Выберите файл чека');const data=await new Promise(ok=>{{const reader=new FileReader();reader.onload=()=>ok(reader.result.split(',')[1]);reader.readAsDataURL(file)}});const r=await fetch(`/web/payments/${{id}}/receipt`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{filename:file.name,mime_type:file.type,data_base64:data}})}});const d=await r.json();if(r.ok){{alert('Чек отправлен. Платёж ожидает проверки администратора.');location.reload()}}else alert(d.detail||'Ошибка загрузки')}};</script>"""
     await db.commit()
     return HTMLResponse(_shell(body, title="Управление подпиской — Freedom VPN"), headers=_headers())
+
+
+@router.get("/cabinet/tariffs", response_class=HTMLResponse)
+async def cabinet_tariffs(
+    cabinet_token: str | None = Cookie(default=None, alias=COOKIE),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_cabinet(cabinet_token, db)
+    plans = await _plans(db)
+    packages = await _plan_packages(db)
+    packages_by_id = {item.id: item for item in packages}
+    groups: dict[str, list[Plan]] = {}
+    package_order: list[tuple[str, str, str]] = []
+    for package in packages:
+        groups.setdefault(package.code, [])
+        package_order.append(
+            (
+                package.code,
+                package.name,
+                package.description
+                or (
+                    ("без ограничений" if not package.max_connections else f"{package.max_connections} подключений")
+                    + " · "
+                    + ("без ограничений" if not package.traffic_limit_gb else f"{package.traffic_limit_gb} ГБ трафика")
+                ),
+            )
+        )
+    for plan in plans:
+        code = _package_code(plan, packages_by_id)
+        if not code:
+            continue
+        groups.setdefault(code, []).append(plan)
+        if code not in {item[0] for item in package_order}:
+            label = _package_label(plan, packages_by_id)
+            package_order.append((code, label, ""))
+
+    cards = []
+    for code, label, description in package_order:
+        tier_plans = sorted(groups.get(code, []), key=lambda item: (item.duration_days, item.price))
+        if not tier_plans:
+            continue
+        buttons = "".join(
+            f'<a class="duration" href="/cabinet?plan_id={plan.id}#payment">{html.escape(_clean_plan_name(plan.name))} · {plan.price:g} ₽</a>'
+            for plan in tier_plans
+        )
+        cards.append(
+            f'<article class="tier-group"><h3>{html.escape(label)}</h3>'
+            f'<p class="muted">{html.escape(description)}</p><div class="duration-buttons">{buttons}</div></article>'
+        )
+    body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><a class="button" href="/cabinet">В кабинет</a></nav><main class="cabinet"><h2>Сменить тариф</h2><p class="muted">Выберите пакет и срок. После выбора вернём вас в кабинет, где можно оплатить продление.</p><div class="tier-groups tariff-page">{''.join(cards) or '<p class="muted">Тарифы временно недоступны.</p>'}</div></main></div><style>.tariff-page .tier-group{{cursor:default}}.tariff-page .duration{{display:inline-flex;text-decoration:none}}</style>'''
+    return HTMLResponse(_shell(body, title="Сменить тариф — Freedom VPN"), headers=_headers())
 
 
 @router.post("/cabinet/logout")

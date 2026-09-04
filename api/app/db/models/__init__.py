@@ -1,5 +1,6 @@
 from app.db.models.user import User
 from app.db.models.plan import Plan
+from app.db.models.plan_package import PlanPackage
 from app.db.models.payment import Payment, PaymentEvent
 from app.db.models.payment_method import PaymentMethod
 from app.db.models.subscription import Subscription

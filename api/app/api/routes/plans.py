@@ -3,10 +3,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.plan import Plan
+from app.db.models.plan_package import PlanPackage
 from app.db.models.payment import Payment
 from app.db.models.subscription import Subscription
 from app.db.session import get_db
-from app.schemas.plan import PlanCreate, PlanResponse, PlanUpdate
+from app.schemas.plan import PlanCreate, PlanPackageCreate, PlanPackageResponse, PlanPackageUpdate, PlanResponse, PlanUpdate
 from app.core.security import require_api_access
 
 
@@ -31,6 +32,45 @@ async def get_plans(
     )
 
     return result.scalars().all()
+
+
+@router.get(
+    "/packages",
+    response_model=list[PlanPackageResponse],
+)
+async def get_plan_packages(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(PlanPackage).order_by(PlanPackage.sort_order, PlanPackage.id))
+    return result.scalars().all()
+
+
+@router.post(
+    "/packages",
+    response_model=PlanPackageResponse,
+)
+async def create_plan_package(data: PlanPackageCreate, db: AsyncSession = Depends(get_db)):
+    exists = await db.scalar(select(PlanPackage).where(PlanPackage.code == data.code))
+    if exists:
+        raise HTTPException(status_code=409, detail="Plan package already exists")
+    package = PlanPackage(**data.model_dump())
+    db.add(package)
+    await db.commit()
+    await db.refresh(package)
+    return package
+
+
+@router.patch(
+    "/packages/{package_id}",
+    response_model=PlanPackageResponse,
+)
+async def update_plan_package(package_id: int, data: PlanPackageUpdate, db: AsyncSession = Depends(get_db)):
+    package = await db.get(PlanPackage, package_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="Plan package not found")
+    for key, value in data.model_dump(exclude_unset=True).items():
+        setattr(package, key, value)
+    await db.commit()
+    await db.refresh(package)
+    return package
 
 
 @router.post(
@@ -59,6 +99,7 @@ async def create_plan(
         duration_days=data.duration_days,
         max_connections=data.max_connections,
         traffic_limit_gb=data.traffic_limit_gb,
+        package_id=data.package_id,
         price=data.price,
         currency=data.currency,
         is_public=data.is_public,

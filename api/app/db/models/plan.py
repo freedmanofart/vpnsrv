@@ -5,6 +5,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Integer,
+    ForeignKey,
     Numeric,
     String,
     func,
@@ -46,6 +47,11 @@ class Plan(Base):
 
     traffic_limit_gb: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
+    )
+
+    package_id: Mapped[int | None] = mapped_column(
+        ForeignKey("plan_packages.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     price: Mapped[Decimal] = mapped_column(

@@ -22,8 +22,10 @@ from app.core.config import settings
 from app.db.base import Base
 from app.db.models import (
     AuditLog,
+    CabinetAccessToken,
     Payment,
     Plan,
+    PlanPackage,
     Subscription,
     User,
     VPNClient,
@@ -471,9 +473,48 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             self.assertEqual("/cabinet", response.headers["location"])
             cabinet = await self.client.get("/cabinet")
             self.assertEqual(200, cabinet.status_code, cabinet.text)
-            self.assertIn("Приобрести или продлить", cabinet.text)
+            self.assertIn("Выберите способ оплаты", cabinet.text)
+            self.assertIn(">Продлить<", cabinet.text)
+            self.assertIn("Сменить тариф", cabinet.text)
         finally:
             settings.cabinet_allow_temporary_registration = previous
+
+    async def test_cabinet_tariffs_page_selects_plan(self) -> None:
+        from app.core.tokens import token_hash
+
+        raw = "tariff-page-token"
+        async with self.session_factory() as db:
+            package = PlanPackage(
+                code="lite",
+                name="Лайт",
+                description="5 подключений · 250 ГБ трафика",
+                max_connections=5,
+                traffic_limit_gb=250,
+                sort_order=10,
+            )
+            db.add(package)
+            await db.flush()
+            extra = Plan(
+                code="lite_30d",
+                name="1 мес (-3%)",
+                duration_days=30,
+                max_connections=5,
+                traffic_limit_gb=250,
+                package_id=package.id,
+                price=Decimal("390.00"),
+                currency="RUB",
+                is_active=True,
+                is_public=True,
+            )
+            db.add_all([extra, CabinetAccessToken(user_id=self.user_id, token_hash=token_hash(raw), expires_at=datetime.now(timezone.utc) + timedelta(days=1))])
+            await db.commit()
+
+        self.client.cookies.set("freedom_cabinet", raw)
+        response = await self.client.get("/cabinet/tariffs")
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("Сменить тариф", response.text)
+        self.assertIn("Лайт", response.text)
+        self.assertIn("/cabinet?plan_id=", response.text)
 
     async def test_cabinet_shows_remaining_traffic(self) -> None:
         from app.core.tokens import token_hash
