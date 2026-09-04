@@ -105,9 +105,14 @@ async def get_vpn_status(
 
     now = datetime.now(timezone.utc)
 
+    expires_at = subscription.expires_at.replace(
+        tzinfo=subscription.expires_at.tzinfo or timezone.utc
+    )
+
     subscription_active = (
         subscription.status == "active"
-        and subscription.expires_at > now
+        and expires_at > now
+        and traffic_remaining_bytes != 0
     )
 
     return {
@@ -123,7 +128,7 @@ async def get_vpn_status(
             "starts_at": subscription.starts_at,
             "expires_at": subscription.expires_at,
             "plan_name": plan.name if plan else None,
-            "days_remaining": max((subscription.expires_at - now).total_seconds() / 86400, 0),
+            "days_remaining": max((expires_at - now).total_seconds() / 86400, 0),
         },
         "vpn_client": (
             {

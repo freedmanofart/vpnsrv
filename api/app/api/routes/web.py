@@ -39,6 +39,7 @@ from app.services.notifications import notify_payment_created, notify_payment_re
 from app.schemas.payment import PaymentCreate
 from app.core.security import hash_password, require_api_access, verify_password
 from app.services.audit import write_audit
+from app.services.threexui import ThreeXUIClient, ThreeXUIError
 
 
 router = APIRouter(tags=["Web cabinet"])
@@ -139,6 +140,14 @@ def _clean_plan_name(name: str) -> str:
 
 def _clean_payment_method_name(name: str) -> str:
     return re.sub(r"^[^\wА-Яа-яЁё]+", "", name, flags=re.UNICODE).strip()
+
+
+def _format_gb(value: float) -> str:
+    if value <= 0:
+        return "0 ГБ"
+    if float(value).is_integer():
+        return f"{value:.0f} ГБ"
+    return f"{value:.1f} ГБ"
 
 
 def _plan_cards(plans: list[Plan]) -> str:
@@ -529,9 +538,43 @@ async def cabinet(
         config = await db.scalar(select(VPNNodeConfig).where(VPNNodeConfig.node_id == client.node_id, VPNNodeConfig.protocol == client.protocol))
         if node and config:
             vpn_uri = client.config_override or build_client_uri(client, node, config.config)
-    active = bool(subscription and subscription.status == "active" and subscription.expires_at.replace(tzinfo=subscription.expires_at.tzinfo or timezone.utc) > now)
+    traffic_remaining_bytes = None
+    traffic_limit_bytes = None
+    traffic_used_bytes = None
+    if client and client.traffic_limit_gb:
+        traffic_limit_bytes = client.traffic_limit_gb * 1024 * 1024 * 1024
+        traffic_remaining_bytes = traffic_limit_bytes
+        if node and config:
+            try:
+                traffic_stats = await ThreeXUIClient(config.config.get("api_address")).get_client_traffic(f"vpn-{client.id}")
+                traffic_used_bytes = int(traffic_stats.get("up", 0)) + int(traffic_stats.get("down", 0))
+                total_bytes = int(traffic_stats.get("total", 0)) or traffic_limit_bytes
+                traffic_limit_bytes = total_bytes
+                traffic_remaining_bytes = max(total_bytes - traffic_used_bytes, 0)
+            except (ThreeXUIError, TypeError, ValueError):
+                logger.warning(
+                    "cabinet_traffic_lookup_failed",
+                    exc_info=True,
+                    extra={"event_type": "cabinet_traffic_lookup_failed", "client_id": client.id},
+                )
+    traffic_exhausted = bool(traffic_limit_bytes and traffic_remaining_bytes is not None and traffic_remaining_bytes <= 0)
+    active = bool(
+        subscription
+        and subscription.status == "active"
+        and subscription.expires_at.replace(tzinfo=subscription.expires_at.tzinfo or timezone.utc) > now
+        and not traffic_exhausted
+    )
     days = max(0, int(((subscription.expires_at.replace(tzinfo=subscription.expires_at.tzinfo or timezone.utc) - now).total_seconds() + 86399) // 86400)) if subscription else 0
-    traffic = "Без ограничений" if client and not client.traffic_limit_gb else (f"{client.traffic_limit_gb} ГБ" if client else "—")
+    if client and not client.traffic_limit_gb:
+        traffic = "Без ограничений"
+    elif traffic_remaining_bytes is not None and traffic_limit_bytes:
+        remaining_gb = traffic_remaining_bytes / 1024 / 1024 / 1024
+        limit_gb = traffic_limit_bytes / 1024 / 1024 / 1024
+        traffic = f"{_format_gb(remaining_gb)} из {_format_gb(limit_gb)}"
+    elif client:
+        traffic = f"{client.traffic_limit_gb} ГБ"
+    else:
+        traffic = "—"
     devices = "Без ограничений" if client and not client.max_connections else (str(client.max_connections) if client else "—")
     public_plans = await _plans(db)
     methods = list((await db.execute(select(PaymentMethod).where(PaymentMethod.is_active.is_(True)).order_by(PaymentMethod.sort_order))).scalars())

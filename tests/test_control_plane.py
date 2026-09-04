@@ -363,6 +363,97 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         finally:
             settings.cabinet_allow_temporary_registration = previous
 
+    async def test_cabinet_shows_remaining_traffic(self) -> None:
+        from app.core.tokens import token_hash
+        from app.db.models import CabinetAccessToken
+
+        raw = "traffic-test-token"
+        async with self.session_factory() as db:
+            user = await db.get(User, self.user_id)
+            user.email = "traffic@example.com"
+            client = (
+                await db.execute(select(VPNClient).where(VPNClient.user_id == self.user_id))
+            ).scalar_one()
+            client.traffic_limit_gb = 10
+            db.add(
+                CabinetAccessToken(
+                    user_id=user.id,
+                    token_hash=token_hash(raw),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            await db.commit()
+
+        self.client.cookies.set("freedom_cabinet", raw)
+        with patch("app.api.routes.web.ThreeXUIClient") as panel:
+            panel.return_value.get_client_traffic = AsyncMock(
+                return_value={
+                    "email": "vpn-1",
+                    "up": 2 * 1024**3,
+                    "down": 3 * 1024**3,
+                    "total": 10 * 1024**3,
+                }
+            )
+            response = await self.client.get("/cabinet")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("5 ГБ из 10 ГБ", response.text)
+        self.assertIn('Подписка <span class="status">активна</span>', response.text)
+
+    async def test_cabinet_marks_subscription_inactive_when_traffic_is_exhausted(self) -> None:
+        from app.core.tokens import token_hash
+        from app.db.models import CabinetAccessToken
+
+        raw = "traffic-empty-token"
+        async with self.session_factory() as db:
+            user = await db.get(User, self.user_id)
+            user.email = "empty@example.com"
+            client = (
+                await db.execute(select(VPNClient).where(VPNClient.user_id == self.user_id))
+            ).scalar_one()
+            client.traffic_limit_gb = 10
+            db.add(
+                CabinetAccessToken(
+                    user_id=user.id,
+                    token_hash=token_hash(raw),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            await db.commit()
+
+        self.client.cookies.set("freedom_cabinet", raw)
+        with patch("app.api.routes.web.ThreeXUIClient") as panel:
+            panel.return_value.get_client_traffic = AsyncMock(
+                return_value={
+                    "email": "vpn-1",
+                    "up": 10 * 1024**3,
+                    "down": 1,
+                    "total": 10 * 1024**3,
+                }
+            )
+            response = await self.client.get("/cabinet")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("0 ГБ из 10 ГБ", response.text)
+        self.assertIn('Подписка <span class="status">не активна</span>', response.text)
+
+        with patch("app.api.routes.user_status.ThreeXUIClient") as panel:
+            panel.return_value.get_client_traffic = AsyncMock(
+                return_value={
+                    "email": "vpn-1",
+                    "up": 10 * 1024**3,
+                    "down": 1,
+                    "total": 10 * 1024**3,
+                }
+            )
+            status = await self.client.get(
+                f"/users/{self.telegram_id}/vpn-status",
+                headers=self.service_headers,
+            )
+
+        self.assertEqual(200, status.status_code, status.text)
+        self.assertEqual("expired", status.json()["subscription"]["status"])
+
     async def test_plan_delete_rejects_used_and_removes_unused(self) -> None:
         used = await self.client.delete("/plans/1", headers=self.service_headers)
         self.assertEqual(409, used.status_code, used.text)
