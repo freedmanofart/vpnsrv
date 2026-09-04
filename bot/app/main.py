@@ -797,7 +797,7 @@ async def show_try_payment(target: Message | CallbackQuery) -> None:
     message = target.message if isinstance(target, CallbackQuery) else target
     if not method:
         await message.answer(
-            "QR Сбербанка пока не настроен в админке.",
+            "QR Сбербанка пока не настроен.",
             reply_markup=keyboard,
         )
         return
