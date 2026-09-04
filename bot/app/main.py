@@ -2098,6 +2098,35 @@ async def payment_method_handler(callback: CallbackQuery, state: FSMContext):
         )
         await callback.answer()
         return
+    if str(method["code"]).startswith("platega_"):
+        telegram_id = callback.from_user.id
+        user = await get_user_by_telegram_id(telegram_id)
+        try:
+            payment = await create_manual_payment(
+                user["id"], int(raw_plan_id), int(raw_node_id), method["code"],
+                f"platega:{telegram_id}:{callback.id}",
+            )
+        except Exception as exc:
+            await callback.answer(f"Не удалось создать платеж Platega: {exc}", show_alert=True)
+            return
+        platega = (payment.get("details") or {}).get("platega") or {}
+        redirect = platega.get("redirect")
+        if not redirect:
+            await callback.answer("Platega не вернула ссылку оплаты.", show_alert=True)
+            return
+        await callback.message.answer(
+            f"💳 <b>{html.escape(method['name'])}</b>\n\n"
+            f"Сумма: <b>{payment['amount']} {payment['currency']}</b>\n\n"
+            "Нажмите кнопку ниже и завершите оплату. После подтверждения платежа "
+            "VPN будет выдан или продлён автоматически.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Перейти к оплате", url=redirect)],
+                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+            ]),
+        )
+        await callback.answer()
+        return
     if method["code"] in {"sber_qr", "tbank_qr", "phone_transfer"}:
         telegram_id = callback.from_user.id
         user = await get_user_by_telegram_id(telegram_id)

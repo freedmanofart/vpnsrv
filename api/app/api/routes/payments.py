@@ -33,6 +33,7 @@ from app.services.payments import (
     create_payment,
     process_payment_event,
 )
+from app.services.platega import PlategaError, create_platega_payment, is_platega_method
 from app.services.notifications import notify_payment_created, notify_payment_receipt
 
 
@@ -90,6 +91,15 @@ async def start_payment(
 )
 async def start_manual_payment(data: ManualPaymentCreate, db: AsyncSession = Depends(get_db)):
     try:
+        if is_platega_method(data.method_code):
+            payment = await create_platega_payment(
+                db,
+                PaymentCreate(**data.model_dump(exclude={"method_code"})),
+                method_code=data.method_code,
+                source="telegram_bot",
+            )
+            await notify_payment_created(db, payment)
+            return payment
         payment = await create_payment(
             db,
             PaymentCreate(**data.model_dump(exclude={"method_code"})),
@@ -100,6 +110,8 @@ async def start_manual_payment(data: ManualPaymentCreate, db: AsyncSession = Dep
         await db.refresh(payment)
         await notify_payment_created(db, payment)
         return payment
+    except PlategaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except PaymentError as exc:
         raise _payment_error(exc) from exc
 
