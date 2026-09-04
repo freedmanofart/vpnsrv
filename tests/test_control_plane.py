@@ -259,6 +259,49 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         cabinet = await self.client.get("/cabinet")
         self.assertEqual(200, cabinet.status_code, cabinet.text)
 
+    async def test_cabinet_payment_return_fallback_script_is_available(self) -> None:
+        self.client.cookies.clear()
+        response = await self.client.get("/cabinet?payment=success")
+
+        self.assertEqual(401, response.status_code, response.text)
+        self.assertIn("freedom_payment_return_token", response.text)
+        self.assertIn("/cabinet/payment-return", response.text)
+
+    async def test_web_platega_payment_returns_restore_token(self) -> None:
+        from types import SimpleNamespace
+        from app.db.models import CabinetAccessToken, PaymentMethod
+        from app.core.tokens import token_hash
+
+        raw = "web-platega-token"
+        async with self.session_factory() as db:
+            db.add(CabinetAccessToken(user_id=self.user_id, token_hash=token_hash(raw), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
+            db.add(PaymentMethod(code="platega_sbp_qr", name="Platega СБП", is_active=True, sort_order=1))
+            await db.commit()
+        self.client.cookies.set("freedom_cabinet", raw)
+        fake_payment = SimpleNamespace(
+            id=123,
+            status="pending",
+            amount=Decimal("1.00"),
+            currency="RUB",
+            details={"platega": {"redirect": "https://platega.test/pay"}},
+        )
+
+        with (
+            patch("app.api.routes.web.create_platega_payment", new=AsyncMock(return_value=fake_payment)) as create,
+            patch("app.api.routes.web.notify_payment_created", new=AsyncMock()),
+        ):
+            created = await self.client.post(
+                "/web/payments/manual",
+                json={"plan_id": 1, "method_code": "platega_sbp_qr"},
+            )
+
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual("https://platega.test/pay", created.json()["redirect"])
+        self.assertIn("payment_return_token", created.json())
+        _, kwargs = create.await_args
+        self.assertIn("/cabinet/payment-return?payment=success&token=", kwargs["return_url"])
+        self.assertIn("/cabinet/payment-return?payment=failed&token=", kwargs["failed_url"])
+
     async def test_platega_webhook_accepts_confirmed_payment(self) -> None:
         old_merchant = settings.platega_merchant_id
         old_secret = settings.platega_secret
