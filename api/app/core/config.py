@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     smtp_use_ssl: bool = False
     bot_token: str = ""
+    bot_username: str = "vpn142323srv_bot"
     bot_admin_chat_id: int = 0
     admin_notification_email: str = "freedmanofart5@gmail.com"
     platega_enabled: bool = False

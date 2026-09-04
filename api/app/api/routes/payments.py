@@ -48,6 +48,11 @@ PLATEGA_STATUS_MAP = {
 }
 
 
+def _telegram_bot_return_url() -> str:
+    username = (settings.bot_username or "vpn142323srv_bot").strip().lstrip("@")
+    return f"https://t.me/{username}" if username else settings.public_base_url.rstrip("/")
+
+
 def _payment_error(exc: PaymentError) -> HTTPException:
     if isinstance(exc, PaymentNotFound):
         return HTTPException(status_code=404, detail=str(exc))
@@ -97,6 +102,8 @@ async def start_manual_payment(data: ManualPaymentCreate, db: AsyncSession = Dep
                 PaymentCreate(**data.model_dump(exclude={"method_code"})),
                 method_code=data.method_code,
                 source="telegram_bot",
+                return_url=_telegram_bot_return_url(),
+                failed_url=_telegram_bot_return_url(),
             )
             return payment
         payment = await create_payment(
@@ -314,6 +321,14 @@ async def platega_webhook(
         raise HTTPException(status_code=400, detail="Invalid Platega payload")
 
     status = str(raw_status).upper()
+    logger.info(
+        "platega_webhook_received",
+        extra={
+            "event_type": "platega_webhook_received",
+            "provider_payment_id": provider_payment_id,
+            "status": status,
+        },
+    )
     target_status = PLATEGA_STATUS_MAP.get(status)
     if target_status is None:
         logger.info(
@@ -357,6 +372,14 @@ async def platega_webhook(
         raise _payment_error(exc) from exc
     if target_status == "paid":
         await notify_payment_paid(db, payment)
+        logger.info(
+            "platega_webhook_paid_notified",
+            extra={
+                "event_type": "platega_webhook_paid_notified",
+                "payment_id": payment.id,
+                "provider_payment_id": provider_payment_id,
+            },
+        )
     return {"status": "ok", "payment_id": payment.id, "payment_status": payment.status}
 
 

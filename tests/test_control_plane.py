@@ -327,7 +327,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         notify_created = AsyncMock()
         with (
-            patch("app.api.routes.payments.create_platega_payment", new=AsyncMock(return_value=payment)),
+            patch("app.api.routes.payments.create_platega_payment", new=AsyncMock(return_value=payment)) as create,
             patch("app.api.routes.payments.notify_payment_created", new=notify_created),
         ):
             created = await self.client.post(
@@ -347,6 +347,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, created.status_code, created.text)
         self.assertEqual("platega", created.json()["provider"])
+        self.assertEqual("https://t.me/vpn142323srv_bot", create.await_args.kwargs["return_url"])
+        self.assertEqual("https://t.me/vpn142323srv_bot", create.await_args.kwargs["failed_url"])
         notify_created.assert_not_awaited()
 
     async def test_platega_webhook_accepts_confirmed_payment(self) -> None:

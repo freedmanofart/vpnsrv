@@ -281,6 +281,10 @@ async def _send_client_payment_paid_email(user: User, subject: str, body: str) -
 
 async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
     if await _payment_paid_notification_was_sent(db, payment.id):
+        logger.info(
+            "payment_paid_notification_skipped_duplicate",
+            extra={"event_type": "payment_paid_notification_skipped_duplicate", "payment_id": payment.id},
+        )
         return
     user = await db.get(User, payment.user_id)
     plan = await db.get(Plan, payment.plan_id)
@@ -315,6 +319,14 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
         resource_type="payment",
         resource_id=payment.id,
         details={"client_notified": client_notified},
+    )
+    logger.info(
+        "payment_paid_notification_sent",
+        extra={
+            "event_type": "payment_paid_notification_sent",
+            "payment_id": payment.id,
+            "client_notified": client_notified,
+        },
     )
 
 
