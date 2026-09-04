@@ -56,6 +56,8 @@ async def _telegram_destinations(db: AsyncSession) -> list[int | str]:
 
 def _payment_actions(payment: Payment) -> dict:
     buttons = []
+    if getattr(payment, "provider", None) == "platega" and payment.status in {"pending", "processing"}:
+        return {}
     if payment.status in {"pending", "processing"}:
         buttons.append(
             [

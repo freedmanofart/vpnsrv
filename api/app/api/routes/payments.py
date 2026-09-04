@@ -200,6 +200,11 @@ async def update_payment_status_from_service(
     payment = await db.get(Payment, payment_id)
     if payment is None:
         raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.provider == "platega" and data.status == "paid":
+        raise HTTPException(
+            status_code=409,
+            detail="Platega payments are confirmed automatically by webhook",
+        )
     if not payment.provider_payment_id:
         raise HTTPException(status_code=409, detail="Payment has no provider ID")
     try:

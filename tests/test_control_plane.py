@@ -537,6 +537,42 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(422, invalid.status_code, invalid.text)
 
+    async def test_platega_payment_cannot_be_manually_approved(self) -> None:
+        async with self.session_factory() as db:
+            payment = Payment(
+                user_id=self.user_id,
+                plan_id=1,
+                node_id=self.node_id,
+                provider="platega",
+                provider_payment_id="platega-manual-paid-test",
+                idempotency_key="platega-manual-paid-test",
+                amount=Decimal("1.00"),
+                currency="RUB",
+                status="pending",
+                client_type="universal",
+                flow="",
+                fingerprint="firefox",
+                details={},
+            )
+            db.add(payment)
+            await db.commit()
+            await db.refresh(payment)
+            payment_id = payment.id
+
+        admin_response = await self.client.post(
+            f"/admin/payments/{payment_id}/status",
+            auth=self.admin_auth,
+            json={"status": "paid"},
+        )
+        self.assertEqual(409, admin_response.status_code, admin_response.text)
+
+        service_response = await self.client.post(
+            f"/payments/{payment_id}/status",
+            headers=self.service_headers,
+            json={"status": "paid"},
+        )
+        self.assertEqual(409, service_response.status_code, service_response.text)
+
     async def test_admin_manages_public_payment_methods(self) -> None:
         created = await self.client.post(
             "/payment-methods",
