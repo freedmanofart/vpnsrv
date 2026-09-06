@@ -376,6 +376,37 @@ STATUS_CHECK=PENDING
 кабинете. Финальное подтверждение и выдача доступа всё равно идут только через
 callback `CONFIRMED`.
 
+## Проверка в базе
+
+Для диагностики важно разделять создание заказа и подтверждение провайдера:
+
+- Telegram создаёт заказ через `/payments/manual` с `source = telegram_bot`;
+- web-кабинет создаёт заказ через `/web/payments/manual` с
+  `source = web_cabinet`;
+- после callback `CONFIRMED` поле `payments.status` должно стать `paid`;
+- поле `payments.subscription_id` должно быть заполнено;
+- в `subscriptions` должна появиться/продлиться активная подписка;
+- в `vpn_clients` должен быть активный клиент с тем же `subscription_id`.
+
+После callback Platega данные в `payments.details` хранятся так:
+
+| Поле | Что означает |
+| --- | --- |
+| `source` | где был создан заказ: `web_cabinet` или `telegram_bot` |
+| `created_source` | дублирует исходник создания, чтобы его не затёр callback |
+| `last_event_source` | последняя служебная операция, обычно `platega_callback` |
+| `platega.redirect` | ссылка оплаты, полученная при создании заказа |
+| `platega.status` | последний статус из callback Platega |
+
+Быстрая логика проверки:
+
+```text
+status = paid + subscription_id есть      -> доступ должен быть выдан
+status = paid + subscription_id пустой    -> ошибка выдачи, смотреть логи provisioning
+status = cancelled/failed/expired         -> Platega не подтвердила оплату
+status = pending/processing               -> ждём callback Platega
+```
+
 ## Админка
 
 В админке нужно иметь возможность видеть:

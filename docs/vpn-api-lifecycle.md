@@ -139,6 +139,32 @@ production подтверждение должно приходить подпи
 5. фиксируются подписка, клиент, платёж и событие;
 6. `subscription_id` сохраняется в платеже.
 
+Актуальные таблицы и поля, по которым проверяется полный цикл:
+
+| Таблица | Важные поля | Для чего используется |
+| --- | --- | --- |
+| `payments` | `id`, `user_id`, `provider`, `provider_payment_id`, `idempotency_key`, `status`, `plan_id`, `node_id`, `subscription_id`, `details`, `paid_at`, `cancelled_at`, `failed_at`, `refunded_at` | Локальный заказ и его связь с провайдером. Подписка считается выданной только если успешный платёж имеет `status = paid` и заполненный `subscription_id`. |
+| `payment_events` | `provider`, `event_id`, `payment_id`, `event_type`, `payload`, `processed_at` | Идемпотентный журнал callback/webhook. Один и тот же callback не должен выдавать доступ повторно. |
+| `subscriptions` | `user_id`, `plan_id`, `status`, `starts_at`, `expires_at` | Оплаченный период. Для кабинета активна только подписка со `status = active` и будущим `expires_at`. |
+| `vpn_clients` | `subscription_id`, `node_id`, `client_uuid`, `status`, `expires_at`, `traffic_limit_gb`, `max_connections` | Реальный VPN-клиент, который добавляется в 3x-ui. Кабинет показывает ключ только для активного клиента. |
+
+Для Platega исходник заказа хранится в `payments.details.source` и
+`payments.details.created_source`: `web_cabinet` для личного кабинета и
+`telegram_bot` для Telegram. Callback не должен затирать этот источник; последняя
+служебная операция записывается в `details.last_event_source`. Дополнительно
+`idempotency_key` начинается с `web:` для кабинета и с `platega:` для Telegram,
+поэтому по нему можно быстро отличить, где был создан заказ.
+
+Статусы Platega приводятся к внутренним статусам:
+
+| Platega | Внутренний статус |
+| --- | --- |
+| `CONFIRMED` | `paid` |
+| `CANCELED` | `cancelled` |
+| `CHARGEBACKED` | `refunded` |
+| `PENDING` | `pending` |
+| `PROCESSING` | `processing` |
+
 Если 3x-ui не добавил клиента, транзакция PostgreSQL откатывается. Если 3x-ui
 успел добавить клиента, но commit БД завершился ошибкой, компенсация удаляет
 нового клиента из 3x-ui. Платёж не должен считаться успешно обработанным, пока

@@ -205,6 +205,11 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 self.payment_data("telegram:callback-1"),
                 provider="mock",
             )
+            payment.details = {
+                "source": "web_cabinet",
+                "platega": {"redirect": "https://platega.test/pay"},
+            }
+            await db.commit()
             repeated = await create_payment(
                 db,
                 self.payment_data("telegram:callback-1"),
@@ -218,7 +223,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 event_id="provider-event-1",
                 provider_payment_id=payment.provider_payment_id,
                 target_status="paid",
-                payload={"details": {"source": "test"}},
+                payload={"details": {"source": "platega_callback", "platega": {"status": "CONFIRMED"}}},
                 panel_factory=FakePanel,
             )
             duplicate = await process_payment_event(
@@ -233,6 +238,10 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
 
             self.assertEqual("paid", duplicate.status)
             self.assertEqual(paid.subscription_id, duplicate.subscription_id)
+            self.assertEqual("web_cabinet", duplicate.details["source"])
+            self.assertEqual("platega_callback", duplicate.details["last_event_source"])
+            self.assertEqual("https://platega.test/pay", duplicate.details["platega"]["redirect"])
+            self.assertEqual("CONFIRMED", duplicate.details["platega"]["status"])
             client = (
                 await db.execute(
                     select(VPNClient).where(

@@ -22,6 +22,14 @@ PLATEGA_METHODS = {
     "platega_crypto": ("platega_method_crypto", "Криптовалюта"),
 }
 
+PLATEGA_INITIAL_STATUS_MAP = {
+    "CONFIRMED": "paid",
+    "CANCELED": "cancelled",
+    "CHARGEBACKED": "refunded",
+    "PENDING": "pending",
+    "PROCESSING": "processing",
+}
+
 
 class PlategaError(Exception):
     pass
@@ -115,6 +123,10 @@ async def create_platega_payment(
     if not provider_payment_id:
         raise PlategaError("Platega не вернула transactionId")
 
+    initial_status = PLATEGA_INITIAL_STATUS_MAP.get(
+        str(response_data.get("status") or "PENDING").upper(),
+        str(response_data.get("status") or "PENDING").lower(),
+    )
     payment = Payment(
         user_id=data.user_id,
         plan_id=data.plan_id,
@@ -124,13 +136,14 @@ async def create_platega_payment(
         idempotency_key=data.idempotency_key,
         amount=plan.price,
         currency=plan.currency,
-        status=str(response_data.get("status") or "PENDING").lower(),
+        status=initial_status,
         client_type=data.client_type,
         flow=data.flow,
         fingerprint=data.fingerprint,
         details={
             "method_code": method_code,
             "source": source,
+            "created_source": source,
             "platega": {
                 "paymentMethod": response_data.get("paymentMethod"),
                 "redirect": response_data.get("redirect") or response_data.get("url"),
