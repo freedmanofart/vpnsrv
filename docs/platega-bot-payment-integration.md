@@ -1,5 +1,9 @@
 # Подключение Platega: бот и web-кабинет
 
+Актуальные поля БД для Platega-платежей, `payments.details`, `payment_events`,
+`subscriptions` и `vpn_clients` описаны в
+[`database-reference.md`](database-reference.md).
+
 Документ описывает, как подключить платежную систему Platega к Freedom VPN без
 хранения секретов в коде. Реальные API-данные вводятся вручную в окружение или
 админ-настройки.

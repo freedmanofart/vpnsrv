@@ -136,6 +136,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(401, unauthenticated.status_code)
         authenticated = await self.client.get("/admin", auth=self.admin_auth)
         self.assertEqual(200, authenticated.status_code)
+        self.assertIn("Добавить пакет тарифа", authenticated.text)
+        self.assertIn('name="is_active"', authenticated.text)
 
     async def test_admin_docs_and_infrastructure_resources_are_available(self) -> None:
         overview = await self.client.get("/admin/overview", auth=self.admin_auth)
@@ -144,6 +146,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         doc_ids = {item["id"] for item in data["docs"]}
         self.assertIn("notifications", doc_ids)
         self.assertIn("vpn_lifecycle", doc_ids)
+        self.assertIn("database_reference", doc_ids)
         doc = await self.client.get("/admin/docs/notifications", auth=self.admin_auth)
         self.assertEqual(200, doc.status_code, doc.text)
         self.assertIn("Уведомления", doc.text)

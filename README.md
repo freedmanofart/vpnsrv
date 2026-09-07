@@ -71,6 +71,8 @@ Inbound может работать на master или быть назначен
 [`docs/add-3x-ui-node.md`](docs/add-3x-ui-node.md).
 Полный жизненный цикл тарифа, оплаты, выдачи, продления и отзыва описан в
 [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md).
+Актуальная схема БД, связи таблиц и SQL/скрипты диагностики собраны в
+[`docs/database-reference.md`](docs/database-reference.md).
 
 Возможности и ограничения интеграции web admin с API 3x-ui:
 [`docs/admin-3xui-api.md`](docs/admin-3xui-api.md).
@@ -201,6 +203,7 @@ in-memory реализацию и не изменяют развёрнутую �
 Операционные инструкции: [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md),
 доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md),
 бизнес-логика: [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md),
+БД: [`docs/database-reference.md`](docs/database-reference.md),
 frontend-структура: [`docs/frontend-site-structure.md`](docs/frontend-site-structure.md),
 план устранения неисправностей:
 [`docs/remediation-plan.md`](docs/remediation-plan.md).
