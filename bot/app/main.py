@@ -14,6 +14,7 @@ import qrcode
 from app.content import CONTENT, link as content_link, platform as get_platform, text as content_text
 from app.domain import (
     country_label,
+    package_description,
     package_details,
     package_line,
     plan_tier,
@@ -1263,12 +1264,9 @@ async def reply_tier_handler(message: Message, state: FSMContext):
     await state.update_data(plans={plan_button_label(plan): plan for plan in plans})
     await state.set_state(PurchaseFlow.waiting_plan)
     details = package_details(tier, packages)
-    connections = int(details.get("connections") or 0)
-    connection_text = "Без ограничений по подключениям" if not connections else f"До {connections} подключений"
-    summary = f"\n{details['summary']}\n" if details.get("summary") else "\n"
+    description = package_description(tier, packages)
     await message.answer(
-        f"{details['label']}\n\n{connection_text} · {details['traffic']}\n"
-        f"{summary}\nВыберите срок:",
+        f"{details['label']}\n\n{description}\n\nВыберите срок:",
         reply_markup=purchase_plans_keyboard(plans),
     )
 
@@ -2013,9 +2011,7 @@ async def purchase_tier_handler(callback: CallbackQuery):
         await callback.answer("Пакет недоступен", show_alert=True)
         return
     details = package_details(tier, packages)
-    connections = int(details.get("connections") or 0)
-    connection_text = "Без ограничений по подключениям" if not connections else f"До {connections} подключений"
-    summary = f"\n{details['summary']}\n" if details.get("summary") else "\n"
+    description = package_description(tier, packages)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
@@ -2027,8 +2023,7 @@ async def purchase_tier_handler(callback: CallbackQuery):
     )
     await show_screen(
         callback,
-        f"{details['label']}\n\n{connection_text} · {details['traffic']}\n"
-        f"{summary}\n🗓 <b>Выберите срок</b>",
+        f"{details['label']}\n\n{description}\n\n🗓 <b>Выберите срок</b>",
         keyboard,
     )
     await callback.answer()

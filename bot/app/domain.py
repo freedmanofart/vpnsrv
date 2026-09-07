@@ -123,9 +123,20 @@ def package_details(tier: str, packages: list[dict] | None = None) -> dict:
 
 def package_line(tier: str, packages: list[dict] | None = None) -> str:
     details = package_details(tier, packages)
+    if details.get("summary"):
+        return f"<b>{details['label']}</b> — {details['summary']}"
     connections = int(details.get("connections") or 0)
     connection_text = "без ограничений" if not connections else f"до {connections} подключений"
     return f"<b>{details['label']}</b> — {connection_text}, {details['traffic']}"
+
+
+def package_description(tier: str, packages: list[dict] | None = None) -> str:
+    details = package_details(tier, packages)
+    if details.get("summary"):
+        return str(details["summary"])
+    connections = int(details.get("connections") or 0)
+    connection_text = "Без ограничений по подключениям" if not connections else f"До {connections} подключений"
+    return f"{connection_text} · {details['traffic']}"
 
 
 def plans_by_tier(plans: list[dict], packages: list[dict] | None = None) -> dict[str, list[dict]]:

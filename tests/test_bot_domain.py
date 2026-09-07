@@ -8,6 +8,8 @@ from bot.app.domain import (
     PLAN_TIERS,
     country_label,
     package_details,
+    package_description,
+    package_line,
     rotation_payload,
     plan_tier,
     plans_by_tier,
@@ -93,6 +95,8 @@ class PlanSelectionTests(unittest.TestCase):
         self.assertEqual("Семейный", package_details("family", packages)["label"])
         self.assertEqual(12, package_details("family", packages)["connections"])
         self.assertEqual("512 ГБ трафика", package_details("family", packages)["traffic"])
+        self.assertEqual("Для всей семьи", package_description("family", packages))
+        self.assertEqual("<b>Семейный</b> — Для всей семьи", package_line("family", packages))
 
     def test_rotation_payload_has_one_key_variant(self):
         self.assertEqual(
