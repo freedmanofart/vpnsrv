@@ -13,8 +13,9 @@ import httpx
 import qrcode
 from app.content import CONTENT, link as content_link, platform as get_platform, text as content_text
 from app.domain import (
-    PLAN_TIERS,
     country_label,
+    package_details,
+    package_line,
     plan_tier,
     plans_by_tier,
     rotation_payload,
@@ -240,9 +241,12 @@ def purchase_plans_keyboard(plans: list[dict]) -> ReplyKeyboardMarkup:
     )
 
 
-def purchase_tiers_keyboard(tiers: dict[str, list[dict]]) -> ReplyKeyboardMarkup:
+def purchase_tiers_keyboard(
+    tiers: dict[str, list[dict]],
+    packages: list[dict] | None = None,
+) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=PLAN_TIERS[key]["label"])] for key in tiers]
+        keyboard=[[KeyboardButton(text=package_details(key, packages).get("label", key))] for key in tiers]
         + [[KeyboardButton(text="⬅️ Главное меню")]],
         resize_keyboard=True,
         is_persistent=True,
@@ -569,6 +573,13 @@ async def get_plans() -> list[dict]:
         response.raise_for_status()
 
         return select_public_plans(response.json(), PUBLIC_PLAN_CODES)
+
+
+async def get_plan_packages() -> list[dict]:
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.get("/plans/packages")
+        response.raise_for_status()
+        return [item for item in response.json() if item.get("is_active", True)]
 
 
 async def get_nodes() -> list[dict]:
@@ -1176,24 +1187,23 @@ async def popup_home_handler(message: Message, state: FSMContext):
 
 async def show_reply_tiers(message: Message, state: FSMContext, node: dict) -> None:
     plans = await get_plans()
+    packages = await get_plan_packages()
     if not plans:
         await state.clear()
         await message.answer("Сейчас нет доступных тарифов.", reply_markup=popup_menu())
         return
-    tiers = plans_by_tier(plans)
+    tiers = plans_by_tier(plans, packages)
     if not tiers:
         await state.clear()
         await message.answer("Тарифные пакеты временно не настроены.", reply_markup=popup_menu())
         return
-    await state.update_data(node_id=node["id"], all_plans=plans, tiers=tiers)
+    await state.update_data(node_id=node["id"], all_plans=plans, packages=packages, tiers=tiers)
     await state.set_state(PurchaseFlow.waiting_tier)
+    package_lines = "\n".join(package_line(tier, packages) for tier in tiers)
     await message.answer(
-        "💳 <b>Выберите пакет</b>\n\n"
-        "🛴 <b>Лайт</b> — до 5 подключений, 250 ГБ\n"
-        "🔥 <b>Стандарт</b> — до 15 подключений, 650 ГБ\n"
-        "🚀 <b>Ультра</b> — до 30 подключений, 3 ТБ",
+        f"💳 <b>Выберите пакет</b>\n\n{package_lines}",
         parse_mode="HTML",
-        reply_markup=purchase_tiers_keyboard(tiers),
+        reply_markup=purchase_tiers_keyboard(tiers, packages),
     )
 
 
@@ -1237,8 +1247,13 @@ async def reply_country_handler(message: Message, state: FSMContext):
 @router.message(PurchaseFlow.waiting_tier)
 async def reply_tier_handler(message: Message, state: FSMContext):
     data = await state.get_data()
+    packages = data.get("packages", [])
     tier = next(
-        (key for key in data.get("tiers", {}) if PLAN_TIERS[key]["label"] == message.text),
+        (
+            key
+            for key in data.get("tiers", {})
+            if package_details(key, packages).get("label") == message.text
+        ),
         None,
     )
     plans = data.get("tiers", {}).get(tier, []) if tier else []
@@ -1247,10 +1262,13 @@ async def reply_tier_handler(message: Message, state: FSMContext):
         return
     await state.update_data(plans={plan_button_label(plan): plan for plan in plans})
     await state.set_state(PurchaseFlow.waiting_plan)
-    details = PLAN_TIERS[tier]
+    details = package_details(tier, packages)
+    connections = int(details.get("connections") or 0)
+    connection_text = "Без ограничений по подключениям" if not connections else f"До {connections} подключений"
+    summary = f"\n{details['summary']}\n" if details.get("summary") else "\n"
     await message.answer(
-        f"{details['label']}\n\nДо {details['connections']} подключений · {details['traffic']}\n"
-        f"{details['summary']}\n\nВыберите срок:",
+        f"{details['label']}\n\n{connection_text} · {details['traffic']}\n"
+        f"{summary}\nВыберите срок:",
         reply_markup=purchase_plans_keyboard(plans),
     )
 
@@ -1956,15 +1974,19 @@ async def purchase_device_handler(callback: CallbackQuery):
 async def purchase_country_handler(callback: CallbackQuery):
     node_id = int(callback.data.split(":", 1)[1])
     plans = await get_plans()
+    packages = await get_plan_packages()
     if not plans:
         await callback.answer("Сейчас нет доступных тарифов", show_alert=True)
         return
-    tiers = plans_by_tier(plans)
+    tiers = plans_by_tier(plans, packages)
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{PLAN_TIERS[tier]['label']} · до {PLAN_TIERS[tier]['connections']} подключений",
+                    text=(
+                        f"{package_details(tier, packages)['label']} · "
+                        f"{'без ограничений' if not package_details(tier, packages)['connections'] else 'до ' + str(package_details(tier, packages)['connections']) + ' подключений'}"
+                    ),
                     callback_data=f"purchase_tier:{tier}:{node_id}",
                 )
             ]
@@ -1972,9 +1994,10 @@ async def purchase_country_handler(callback: CallbackQuery):
         ]
         + [[InlineKeyboardButton(text="⬅️ К странам", callback_data="buy_vpn")]]
     )
+    package_lines = "\n".join(package_line(tier, packages) for tier in tiers)
     await show_screen(
         callback,
-        "💳 <b>Выберите пакет</b>\n\nСначала количество одновременных подключений, затем срок.",
+        f"💳 <b>Выберите пакет</b>\n\n{package_lines}",
         keyboard,
     )
     await callback.answer()
@@ -1984,11 +2007,15 @@ async def purchase_country_handler(callback: CallbackQuery):
 async def purchase_tier_handler(callback: CallbackQuery):
     _, tier, raw_node_id = callback.data.split(":")
     node_id = int(raw_node_id)
-    plans = plans_by_tier(await get_plans()).get(tier, [])
-    if not plans or tier not in PLAN_TIERS:
+    packages = await get_plan_packages()
+    plans = plans_by_tier(await get_plans(), packages).get(tier, [])
+    if not plans:
         await callback.answer("Пакет недоступен", show_alert=True)
         return
-    details = PLAN_TIERS[tier]
+    details = package_details(tier, packages)
+    connections = int(details.get("connections") or 0)
+    connection_text = "Без ограничений по подключениям" if not connections else f"До {connections} подключений"
+    summary = f"\n{details['summary']}\n" if details.get("summary") else "\n"
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
@@ -2000,8 +2027,8 @@ async def purchase_tier_handler(callback: CallbackQuery):
     )
     await show_screen(
         callback,
-        f"{details['label']}\n\nДо {details['connections']} подключений · {details['traffic']}\n"
-        f"{details['summary']}\n\n🗓 <b>Выберите срок</b>",
+        f"{details['label']}\n\n{connection_text} · {details['traffic']}\n"
+        f"{summary}\n🗓 <b>Выберите срок</b>",
         keyboard,
     )
     await callback.answer()

@@ -7,6 +7,7 @@ from bot.app.content import load_content
 from bot.app.domain import (
     PLAN_TIERS,
     country_label,
+    package_details,
     rotation_payload,
     plan_tier,
     plans_by_tier,
@@ -63,6 +64,35 @@ class PlanSelectionTests(unittest.TestCase):
         self.assertEqual(["lite", "standard", "ultra"], list(grouped))
         self.assertEqual("standard", plan_tier(plans[1]))
         self.assertEqual(30, PLAN_TIERS["ultra"]["connections"])
+
+    def test_plans_are_grouped_by_database_packages(self):
+        packages = [
+            {
+                "id": 10,
+                "code": "family",
+                "name": "Семейный",
+                "description": "Для всей семьи",
+                "max_connections": 12,
+                "traffic_limit_gb": 512,
+            },
+            {
+                "id": 20,
+                "code": "business",
+                "name": "Бизнес",
+                "description": "",
+                "max_connections": 0,
+                "traffic_limit_gb": 0,
+            },
+        ]
+        plans = [
+            {"code": "legacy_lite", "package_id": 10, "max_connections": 5},
+            {"code": "legacy_ultra", "package_id": 20, "max_connections": 30},
+        ]
+        grouped = plans_by_tier(plans, packages)
+        self.assertEqual(["family", "business"], list(grouped))
+        self.assertEqual("Семейный", package_details("family", packages)["label"])
+        self.assertEqual(12, package_details("family", packages)["connections"])
+        self.assertEqual("512 ГБ трафика", package_details("family", packages)["traffic"])
 
     def test_rotation_payload_has_one_key_variant(self):
         self.assertEqual(

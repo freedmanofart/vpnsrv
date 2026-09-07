@@ -71,6 +71,15 @@ def select_public_plans(plans: list[dict], configured_codes: tuple[str, ...]) ->
 
 
 def plan_tier(plan: dict) -> str | None:
+    package = plan.get("package")
+    if isinstance(package, dict) and package.get("code"):
+        return str(package["code"])
+    package_code = plan.get("package_code")
+    if package_code:
+        return str(package_code)
+    package_id = plan.get("package_id")
+    if package_id:
+        return f"package_{package_id}"
     code = str(plan.get("code", ""))
     prefix = code.partition("_")[0]
     if prefix in PLAN_TIERS:
@@ -82,11 +91,59 @@ def plan_tier(plan: dict) -> str | None:
     )
 
 
-def plans_by_tier(plans: list[dict]) -> dict[str, list[dict]]:
-    result = {key: [] for key in PLAN_TIERS}
+def package_details(tier: str, packages: list[dict] | None = None) -> dict:
+    packages = packages or []
+    for package in packages:
+        if str(package.get("code")) == tier or f"package_{package.get('id')}" == tier:
+            connections = int(package.get("max_connections") or 0)
+            traffic_gb = int(package.get("traffic_limit_gb") or 0)
+            if traffic_gb >= 1024 and traffic_gb % 1024 == 0:
+                traffic = f"{traffic_gb // 1024} ТБ трафика"
+            elif traffic_gb:
+                traffic = f"{traffic_gb} ГБ трафика"
+            else:
+                traffic = "без ограничений по трафику"
+            summary = package.get("description") or ""
+            return {
+                "label": package.get("name") or tier,
+                "connections": connections,
+                "traffic": traffic,
+                "summary": summary,
+            }
+    return PLAN_TIERS.get(
+        tier,
+        {
+            "label": tier,
+            "connections": 0,
+            "traffic": "трафик по тарифу",
+            "summary": "",
+        },
+    )
+
+
+def package_line(tier: str, packages: list[dict] | None = None) -> str:
+    details = package_details(tier, packages)
+    connections = int(details.get("connections") or 0)
+    connection_text = "без ограничений" if not connections else f"до {connections} подключений"
+    return f"<b>{details['label']}</b> — {connection_text}, {details['traffic']}"
+
+
+def plans_by_tier(plans: list[dict], packages: list[dict] | None = None) -> dict[str, list[dict]]:
+    result = {str(package["code"]): [] for package in packages or [] if package.get("code")}
+    if not result:
+        result = {key: [] for key in PLAN_TIERS}
+    packages_by_id = {
+        int(package["id"]): str(package["code"])
+        for package in packages or []
+        if package.get("id") is not None and package.get("code")
+    }
     for plan in plans:
-        tier = plan_tier(plan)
+        package_id = plan.get("package_id")
+        tier = packages_by_id.get(int(package_id)) if package_id else None
+        if tier is None:
+            tier = plan_tier(plan)
         if tier:
+            result.setdefault(tier, [])
             result[tier].append(plan)
     return {key: value for key, value in result.items() if value}
 
