@@ -138,6 +138,51 @@ scripts/check_online_apis.sh 106123347
 - `/users/{telegram_id}`;
 - `/users/{telegram_id}/status`.
 
+## Проверка реального трафика VPN-клиента
+
+Скрипт `scripts/check_vpn_traffic.py` читает клиента из БД `vpn`, находит его
+ноду и берёт live-счётчики из `clientStats` 3x-ui. Запускайте его внутри
+`api`-контейнера, чтобы использовались production `DATABASE_URL` и
+`THREEXUI_API_TOKEN`.
+
+Проверить конкретного клиента:
+
+```bash
+cd /home/freedman/vpn-service
+docker compose exec -T api python scripts/check_vpn_traffic.py vpn-80
+```
+
+Можно указывать ID без префикса и несколько клиентов сразу:
+
+```bash
+docker compose exec -T api python scripts/check_vpn_traffic.py 80 85
+```
+
+Показать последние выданные VPN-клиенты:
+
+```bash
+docker compose exec -T api python scripts/check_vpn_traffic.py --limit 20
+```
+
+JSON-вывод для копирования в диагностику:
+
+```bash
+docker compose exec -T api python scripts/check_vpn_traffic.py vpn-80 --json
+```
+
+В выводе:
+
+- `db_client_status` и `db_subscription_status` — состояние в нашей БД;
+- `panel_enabled` — включён ли клиент в 3x-ui;
+- `client_used`, `client_left`, `client_limit` — реальные счётчики клиента;
+- `last_online` — последнее подключение по данным 3x-ui;
+- `inbound_used` — общий трафик inbound на ноде.
+
+Если `inbound_used` растёт, а у клиента `client_used=0` и `last_online=—`,
+значит конкретный ключ не подключался или 3x-ui не атрибутирует трафик этому
+email. Если клиент есть в БД, но `panel: not found`, проверьте синхронизацию
+ноды, SSL/API 3x-ui и worker.
+
 ## Логи
 
 Быстрые команды:
