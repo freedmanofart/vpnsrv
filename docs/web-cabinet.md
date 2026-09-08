@@ -386,7 +386,7 @@ scripts/check_online_apis.sh TELEGRAM_ID
 
 В `/admin` раздел `Скрипты` содержит кнопки-команды для всех ключевых операций:
 почта, быстрый restart `api`/`bot`, Tailscale certificate/Funnel, backup,
-проверка backup и online-тесты API.
+проверка backup, online-тесты API, SSL health и renew сертификатов master/нод.
 
 ## Коды входа и пароли в админке
 

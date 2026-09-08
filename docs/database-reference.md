@@ -593,6 +593,9 @@ PY
 - Добавлены пакеты тарифов:
   - `plan_packages`;
   - `plans.package_id`.
+  Telegram-бот и web-кабинет читают названия, описания, лимиты и порядок
+  пакетов из БД; в коде остаётся только fallback для старых тарифов без
+  `package_id`.
 - Добавлена операционная база:
   - `audit_logs`;
   - `debug_sessions`;
@@ -600,5 +603,12 @@ PY
   - `activation_codes`;
   - `access_grants`;
   - `admin_settings`.
+- Добавлен механизм единого пользователя Telegram/web:
+  - при входе из Telegram бот получает персональную ссылку через
+    `POST /web/telegram-cabinet-link`;
+  - если пользователь сначала зарегистрировался в web-кабинете, затем пришёл из
+    Telegram с тем же email, API привязывает Telegram-профиль к существующей
+    записи `users`, чтобы подписка, платежи и `vpn_clients` оставались на одном
+    `users.id`.
 
 Полный список миграций лежит в `alembic/versions`.

@@ -5,9 +5,12 @@ import logging
 import os
 from pathlib import Path
 import re
+import socket
+import ssl
 import smtplib
 import subprocess
 import time
+from urllib.parse import urlparse
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -93,6 +96,7 @@ HOST_COMMANDS = {
     "platega_check": "docker cp scripts/check_platega_payment.py vpn-api:/tmp/check_platega_payment.py && docker exec vpn-api python /tmp/check_platega_payment.py --method all --amount 10 --currency RUB --description \"Freedom VPN Platega admin check\"",
     "tailscale_recover": "scripts/recover_tailscale.sh",
     "tailscale_funnel": "tailscale funnel status",
+    "master_cert_renew": "scripts/renew_master_cert.sh",
 }
 
 BACKUP_DIR = Path(os.getenv("VPN_BACKUP_DIR", "/var/backups/vpn-service"))
@@ -189,6 +193,63 @@ async def _public_probe(path: str = "/", timeout: float = 5.0) -> dict:
         }
 
 
+def _check_ssl_certificate(name: str, host: str, port: int = 443, timeout: float = 6.0) -> dict:
+    started = time.perf_counter()
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with context.wrap_socket(sock, server_hostname=host) as wrapped:
+                cert = wrapped.getpeercert()
+        not_after = cert.get("notAfter")
+        expires_at = (
+            datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            if not_after
+            else None
+        )
+        days_left = (expires_at - datetime.now(timezone.utc)).total_seconds() / 86400 if expires_at else None
+        if days_left is None:
+            status = "degraded"
+            details = "Сертификат получен, дата окончания не прочитана"
+        elif days_left < 0:
+            status = "offline"
+            details = f"Сертификат истёк: {expires_at.isoformat()}"
+        elif days_left < 2:
+            status = "degraded"
+            details = f"Сертификат скоро истечёт: {expires_at.isoformat()} ({days_left:.1f} дн.)"
+        else:
+            status = "online"
+            details = f"Действует до {expires_at.isoformat()} ({days_left:.1f} дн.)"
+        return {
+            "name": name,
+            "status": status,
+            "details": details,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    except (OSError, ssl.SSLError, ValueError) as exc:
+        return {
+            "name": name,
+            "status": "offline",
+            "details": str(exc),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+
+def _ssl_target_from_url(value: str | None) -> tuple[str, int] | None:
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return None
+    return parsed.hostname, parsed.port or 443
+
+
+def _node_ssl_target(node: VPNNode, config: VPNNodeConfig) -> tuple[str, int]:
+    api_target = _ssl_target_from_url(config.config.get("api_address"))
+    if api_target:
+        return api_target
+    return node.ip_address, 443
+
+
 def _check_smtp() -> dict:
     host = settings.smtp_host
     if not host:
@@ -258,6 +319,29 @@ async def _check_nodes(db: AsyncSession) -> list[dict]:
     return checks
 
 
+async def _check_ssl_targets(db: AsyncSession) -> list[dict]:
+    checks = []
+    master = _ssl_target_from_url(settings.public_base_url)
+    if master:
+        checks.append(await asyncio.to_thread(_check_ssl_certificate, "SSL master/site", master[0], master[1]))
+    result = await db.execute(
+        select(VPNNode, VPNNodeConfig)
+        .join(VPNNodeConfig, VPNNodeConfig.node_id == VPNNode.id)
+        .where(VPNNode.status != "disabled", VPNNodeConfig.protocol == "vless")
+    )
+    for node, config in result.all():
+        target = _node_ssl_target(node, config)
+        checks.append(
+            await asyncio.to_thread(
+                _check_ssl_certificate,
+                f"SSL VPN-нода #{node.id} {node.name}",
+                target[0],
+                target[1],
+            )
+        )
+    return checks
+
+
 def _host_script_result(script_id: str) -> dict:
     command = HOST_COMMANDS.get(script_id)
     if not command:
@@ -267,6 +351,40 @@ def _host_script_result(script_id: str) -> dict:
         "status": "host_required",
         "message": "Эта операция должна выполняться на SSH-хосте, а не внутри API-контейнера.",
         "command": f"cd /home/freedman/vpn-service && {command}",
+    }
+
+
+async def _node_cert_renew_result(script_id: str, db: AsyncSession) -> dict:
+    raw_id = script_id.split(":", 1)[1] if ":" in script_id else ""
+    try:
+        node_id = int(raw_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Unknown node renew script") from exc
+    result = await db.execute(
+        select(VPNNode, VPNNodeConfig)
+        .join(VPNNodeConfig, VPNNodeConfig.node_id == VPNNode.id)
+        .where(VPNNode.id == node_id, VPNNodeConfig.protocol == "vless")
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="VPN-нода не найдена")
+    node, config = row
+    cert_host = _node_ssl_target(node, config)[0]
+    ssh_host = node.ip_address
+    return {
+        "script_id": script_id,
+        "status": "host_required",
+        "message": "Запустите команду на master SSH-хосте: она подключится к выбранной ноде и обновит её SSL.",
+        "command": (
+            "cd /home/freedman/vpn-service && "
+            f"scp deploy/node/renew_3xui_ip_cert.sh deploy/systemd/vpn-3xui-ip-cert-renew.service deploy/systemd/vpn-3xui-ip-cert-renew.timer root@{ssh_host}:/tmp/ && "
+            f"ssh root@{ssh_host} 'install -m 0755 /tmp/renew_3xui_ip_cert.sh /usr/local/sbin/renew_3xui_ip_cert.sh && "
+            "install -m 0644 /tmp/vpn-3xui-ip-cert-renew.service /etc/systemd/system/vpn-3xui-ip-cert-renew.service && "
+            "install -m 0644 /tmp/vpn-3xui-ip-cert-renew.timer /etc/systemd/system/vpn-3xui-ip-cert-renew.timer && "
+            "systemctl daemon-reload && "
+            "systemctl enable --now vpn-3xui-ip-cert-renew.timer && "
+            f"THREEXUI_IP_CERT_ADDRESS={cert_host} /usr/local/sbin/renew_3xui_ip_cert.sh'"
+        ),
     }
 
 
@@ -551,12 +669,23 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "login_codes": [{"id": x.id, "user_id": x.user_id, "code": x.plain_code or "legacy_hash_only", "status": "used" if x.used_at else ("expired" if _aware(x.expires_at) <= datetime.now(timezone.utc) else "active"), "attempts": x.attempts, "created_at": x.created_at, "expires_at": x.expires_at, "used_at": x.used_at} for x in login_codes],
         "docs": ADMIN_DOCS,
         "scripts": [
-            {"id": "health_dashboard", "name": "Health-dashboard: API, сайт, почта, 3x-ui", "command": "выполняется из админки", "runnable": True},
+            {"id": "health_dashboard", "name": "Health-dashboard: API, сайт, почта, SSL master/нод, 3x-ui", "command": "выполняется из админки", "runnable": True},
             {"id": "smtp_check", "name": "Проверить SMTP-логин и отправку писем", "command": "выполняется из админки", "runnable": True},
             {"id": "online_apis", "name": "Все online-тесты ключевых API", "command": "scripts/check_online_apis.sh", "runnable": True},
             {"id": "platega_check", "name": "Проверить Platega: СБП, МИР, крипта", "command": "scripts/check_platega_payment.py --method all --amount 10 --currency RUB", "runnable": True},
             {"id": "mail_chain_recover", "name": "Проверить почту и быстро переподнять api/bot", "command": "scripts/check_mail_chain.sh", "runnable": True},
             {"id": "tailscale_recover", "name": "Быстро переподнять Tailscale, Funnel и сертификат", "command": "scripts/recover_tailscale.sh", "runnable": True},
+            {"id": "master_cert_renew", "name": "Обновить SSL-сертификат master/site", "command": "scripts/renew_master_cert.sh", "runnable": True},
+            *[
+                {
+                    "id": f"node_cert_renew:{x.id}",
+                    "name": f"Обновить SSL-сертификат ноды #{x.id} {x.name}",
+                    "command": f"deploy/node/renew_3xui_ip_cert.sh на root@{x.ip_address}",
+                    "runnable": True,
+                }
+                for x in sorted(nodes, key=lambda item: item.id)
+                if x.status != "disabled"
+            ],
             {"id": "backup_postgres", "name": "Создать PostgreSQL backup сейчас", "command": "pg_dump -Fc в /var/backups/vpn-service", "runnable": True},
             {"id": "verify_latest_backup", "name": "Проверить последний PostgreSQL backup", "command": "pg_restore --list для последнего dump", "runnable": True},
             {"id": "list_backups", "name": "Показать последние PostgreSQL backup-файлы", "command": "ls -lh /var/backups/vpn-service/vpn-db-*.dump", "runnable": True},
@@ -609,6 +738,7 @@ async def health_dashboard(db: AsyncSession = Depends(get_db)):
         _public_probe("/payment-methods"),
     )
     checks.extend(public_results)
+    checks.extend(await _check_ssl_targets(db))
     checks.append(await asyncio.to_thread(_check_smtp))
     checks.extend(await _check_nodes(db))
     return {
@@ -632,6 +762,8 @@ async def run_admin_script(script_id: str, db: AsyncSession = Depends(get_db)):
         return await asyncio.to_thread(_verify_latest_postgres_backup)
     if script_id == "list_backups":
         return {"status": "done", "backups": _backup_files()}
+    if script_id.startswith("node_cert_renew:"):
+        return await _node_cert_renew_result(script_id, db)
     return _host_script_result(script_id)
 
 

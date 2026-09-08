@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew 3x-ui short-lived IP certificate
+
+[Service]
+Type=oneshot
+Environment=THREEXUI_IP_CERT_ADDRESS=89.127.212.239
+ExecStart=/usr/local/sbin/renew_3xui_ip_cert.sh

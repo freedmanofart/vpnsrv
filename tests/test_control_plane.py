@@ -172,6 +172,16 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn("target", resources["PostgreSQL"])
         self.assertIn("command", resources["Tailscale Funnel"])
         self.assertIn("path", resources["PostgreSQL backups"])
+        scripts = {item["id"]: item for item in data["scripts"] if item.get("id")}
+        self.assertIn("master_cert_renew", scripts)
+        self.assertIn(f"node_cert_renew:{self.node_id}", scripts)
+        self.assertIn("renew_master_cert.sh", scripts["master_cert_renew"]["command"])
+        self.assertIn("deploy/node/renew_3xui_ip_cert.sh", scripts[f"node_cert_renew:{self.node_id}"]["command"])
+
+        node_renew = await self.client.post(f"/admin/scripts/node_cert_renew:{self.node_id}/run", auth=self.admin_auth)
+        self.assertEqual(200, node_renew.status_code, node_renew.text)
+        self.assertEqual("host_required", node_renew.json()["status"])
+        self.assertIn("root@203.0.113.20", node_renew.json()["command"])
 
     async def test_web_registration_emails_one_time_code_and_opens_cabinet(self) -> None:
         with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:

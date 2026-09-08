@@ -68,6 +68,64 @@ curl -vk --max-time 10 https://<child-host>:<panel-port>/<base-path>/panel/api/s
 неверный base path, `EOF` — ошибку listener/reverse proxy, timeout — отсутствие
 внешнего маршрута или недоступный порт.
 
+## SSL на IP child-ноды
+
+Если child-панель опубликована по IP, 3x-ui использует short-lived
+Let's Encrypt certificate for IP Address. Такой сертификат живёт примерно 6
+дней, поэтому его нужно регулярно перевыпускать и переустанавливать в пути
+панели:
+
+```text
+/root/cert/ip/fullchain.pem
+/root/cert/ip/privkey.pem
+```
+
+Ручная проверка на ноде:
+
+```bash
+openssl x509 -in /root/cert/ip/fullchain.pem -noout -subject -issuer -dates
+systemctl status x-ui --no-pager
+```
+
+Автоматический renew выполняет node-скрипт:
+
+```bash
+sudo THREEXUI_IP_CERT_ADDRESS=89.127.212.239 \
+  /usr/local/sbin/renew_3xui_ip_cert.sh
+```
+
+Скрипт делает то же, что успешный пункт меню 3x-ui
+`SSL Certificate` → `Get SSL for IP Address` → `Force Renew`:
+
+1. вызывает `acme.sh --renew -d <ip> --ecc --force`, а если сертификат ещё не
+   выпускался — делает первичный `--issue --standalone`;
+2. устанавливает cert/key в `/root/cert/ip/`;
+3. перезапускает `x-ui`;
+4. пытается прописать эти пути в настройках панели и subscription-сервера;
+5. печатает `notBefore/notAfter` для быстрой проверки.
+
+Для запуска каждые 5 дней установите скрипт и готовые unit/timer на child-ноду:
+
+```bash
+install -m 0755 deploy/node/renew_3xui_ip_cert.sh /usr/local/sbin/renew_3xui_ip_cert.sh
+cp deploy/systemd/vpn-3xui-ip-cert-renew.service /etc/systemd/system/
+cp deploy/systemd/vpn-3xui-ip-cert-renew.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now vpn-3xui-ip-cert-renew.timer
+systemctl list-timers vpn-3xui-ip-cert-renew.timer --all
+```
+
+Из `/admin` → `Скрипты` это же действие доступно отдельной кнопкой для каждой
+активной ноды. Админка не выполняет SSH сама: она возвращает готовую команду,
+которую нужно запустить на master SSH-хосте. Команда копирует node-скрипт на
+выбранную ноду, включает timer и сразу запускает renew.
+
+Логи:
+
+```bash
+journalctl -u vpn-3xui-ip-cert-renew.service -n 100 --no-pager
+```
+
 ## Inbound и логическая нода
 
 После успешного Probe создайте или импортируйте VLESS Reality xHTTP inbound и

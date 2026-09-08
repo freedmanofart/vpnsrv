@@ -61,6 +61,9 @@ web-админку.
 - web-кабинета `/cabinet`;
 - админки `/admin`;
 - `/plans` и `/payment-methods`;
+- SSL-сертификата master/site по `PUBLIC_BASE_URL`;
+- SSL-сертификатов VPN-нод: по HTTPS `vpn_node_configs.config.api_address`,
+  а если API-адрес внутренний HTTP — по публичному `vpn_nodes.ip_address:443`;
 - SMTP-логина для писем web-кабинета;
 - каждой активной VPN-ноды через её `api_address` master 3x-ui.
 
@@ -182,6 +185,32 @@ docker compose exec -T api python scripts/check_vpn_traffic.py vpn-80 --json
 значит конкретный ключ не подключался или 3x-ui не атрибутирует трафик этому
 email. Если клиент есть в БД, но `panel: not found`, проверьте синхронизацию
 ноды, SSL/API 3x-ui и worker.
+
+## Обновление SSL-сертификатов master и 3x-ui нод
+
+В `/admin` → `Скрипты` есть:
+
+- `Обновить SSL-сертификат master/site` — возвращает host-only команду
+  `scripts/renew_master_cert.sh`;
+- `Обновить SSL-сертификат ноды #...` — отдельная кнопка для каждой активной
+  VPN-ноды из БД. Команда копирует node-скрипт на выбранную ноду, включает
+  timer и запускает renew.
+
+Для master используется Tailscale certificate:
+
+```bash
+cd /home/freedman/vpn-service
+sudo scripts/renew_master_cert.sh
+```
+
+Для child-ноды с short-lived Let's Encrypt certificate на IP используется
+node-скрипт `deploy/node/renew_3xui_ip_cert.sh`, который устанавливается на
+саму ноду в `/usr/local/sbin/renew_3xui_ip_cert.sh`. Timer
+`vpn-3xui-ip-cert-renew.timer` запускается каждые 5 дней, чтобы сертификат,
+живущий примерно 6 дней, не успевал истечь.
+
+Подробная установка, проверка и команды логов описаны в
+[`3x-ui-master.md`](3x-ui-master.md#ssl-на-ip-child-ноды).
 
 ## Логи
 

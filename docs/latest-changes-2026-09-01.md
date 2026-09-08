@@ -124,9 +124,19 @@ Funnel проксирует его на `127.0.0.1:8000`; API не открыв�
 внешнюю сеть. Postfix слушает только loopback и Docker bridge и используется
 API через `host.docker.internal:25`.
 
-`scripts/renew_tailscale_cert.sh` атомарно обновляет файловый сертификат для
-внешних listeners. Таймер `vpn-tailscale-cert.timer` запускает проверку
-еженедельно. Сам Funnel получает и продлевает сертификат автоматически.
+`scripts/renew_master_cert.sh` запускает обновление сертификата master/site
+через `vpn-tailscale-cert.service` или напрямую через
+`scripts/renew_tailscale_cert.sh`, затем перезапускает Funnel и проверяет
+`/health`. Сам Funnel также умеет получать и продлевать сертификат
+автоматически.
+
+Для child-ноды с HTTPS-панелью на IP используется
+`deploy/node/renew_3xui_ip_cert.sh`. Скрипт устанавливается на саму ноду в
+`/usr/local/sbin/renew_3xui_ip_cert.sh`; timer
+`vpn-3xui-ip-cert-renew.timer` запускает renew каждые 5 дней. В `/admin` →
+`Health` теперь проверяется не только API 3x-ui, но и SSL master/site и SSL
+каждой активной ноды. В `/admin` → `Скрипты` есть отдельная кнопка renew для
+master и отдельная кнопка для каждой ноды из БД.
 
 ## Развёртывание
 
@@ -151,7 +161,7 @@ tailscale funnel status
 systemctl is-active postfix vpn-tailscale-cert.timer
 ```
 
-Ожидаемая миграция: `b74e2c31a190 (head)`. `/cabinet` без cookie намеренно
+Ожидаемая миграция: `b5c7a92f31e4 (head)`. `/cabinet` без cookie намеренно
 возвращает `401` вместе с HTML-формой входа — это не ошибка health-check.
 
 ## Email-коды и ручные пароли в админке
@@ -179,6 +189,11 @@ web-кабинета. Старые записи, где код не сохран
 В таблице `users` добавлен статус пароля (`set` / `not_set`) и кнопка `Пароль`
 для ручной установки нового пароля пользователю. Пароли в открытом виде не
 показываются и не сохраняются; хранится только hash.
+
+Telegram-first и web-first сценарии сведены к одному `users.id`: бот выдаёт
+персональную ссылку кабинета через `POST /web/telegram-cabinet-link`, а при
+совпадении email web-пользователь привязывается к Telegram-профилю вместо
+создания второго независимого аккаунта.
 
 В административной панели убраны дублирующиеся верхние metric-карточки: теперь
 есть один flow через боковое меню на русском. Добавлены разделы
