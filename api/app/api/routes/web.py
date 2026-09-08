@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.client import build_client_uri
 from app.core.config import settings
+from app.core.cabinet_links import telegram_cabinet_link_token, verify_telegram_cabinet_link_token
 from app.db.models.cabinet_access import CabinetAccessToken
 from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.models.plan import Plan
@@ -59,6 +60,7 @@ def _normalize_email(value: str) -> str:
 class Registration(BaseModel):
     email: str = Field(min_length=5, max_length=320)
     plan_id: int | None = None
+    telegram_link_token: str | None = None
 
 
 class PasswordLogin(BaseModel):
@@ -401,8 +403,22 @@ async def register(data: Registration, db: AsyncSession = Depends(get_db)):
         plan = await db.get(Plan, data.plan_id)
         if plan is None or not plan.is_active or not plan.is_public:
             raise HTTPException(status_code=404, detail="Тариф не найден")
+    linked_user = None
+    if data.telegram_link_token:
+        linked_user_id = verify_telegram_cabinet_link_token(data.telegram_link_token)
+        if linked_user_id is None:
+            raise HTTPException(status_code=401, detail="Ссылка Telegram устарела. Откройте web-кабинет из бота ещё раз.")
+        linked_user = await db.get(User, linked_user_id)
+        if linked_user is None or linked_user.status != "active":
+            raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+
     user = await db.scalar(select(User).where(User.email == email_address))
-    if user is None:
+    if linked_user is not None:
+        if user is not None and user.id != linked_user.id:
+            raise HTTPException(status_code=409, detail="Этот email уже связан с другим аккаунтом")
+        linked_user.email = email_address
+        user = linked_user
+    elif user is None:
         user = User(telegram_id=-secrets.randbelow(9_000_000_000_000_000) - 1, email=email_address, status="active")
         db.add(user)
         try:
@@ -499,7 +515,8 @@ async def telegram_cabinet_link(data: TelegramCabinetLink, db: AsyncSession = De
         raise HTTPException(status_code=409, detail="Этот email уже связан с другим аккаунтом")
     user.email = email_address
     expires, code = await _issue_code(user, email_address, db)
-    return {"message": "Код для входа отправлен на почту", "expires_at": expires, "code": code, "cabinet_url": "/cabinet"}
+    token = telegram_cabinet_link_token(user.id)
+    return {"message": "Код для входа отправлен на почту", "expires_at": expires, "code": code, "cabinet_url": f"/cabinet?tg={token}"}
 
 
 @router.post("/web/temporary-register")
@@ -610,7 +627,7 @@ async def cabinet(
 ):
     found = await _access(cabinet_token, db)
     if found is None:
-        body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><a class="button" href="/">На главную</a></nav></div><main class="login-page"><section class="login-card"><h1>Вход в аккаунт</h1><p class="muted">Рады видеть вас снова.</p><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="email" placeholder="you@example.com"><div class="login-tabs"><button class="active" type="button" data-login-mode="email">Код из письма</button><button type="button" data-login-mode="password">Пароль</button></div><div class="login-mode" data-mode-panel="email"><p class="muted" style="margin-top:22px">Пришлём шестизначный одноразовый код — пароль не нужен.</p><button class="button gradient" type="button" onclick="requestLogin()">Получить код на email</button><label for="login-code">Код из письма</label><input id="login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{{6}}" placeholder="000000"><button class="button gradient" type="button" onclick="codeLogin()">Войти по коду</button></div><div class="login-mode" data-mode-panel="password" hidden><div class="password-heading"><label for="login-password">Пароль</label><button type="button" onclick="requestPasswordReset()">Получить код</button></div><input id="login-password" type="password" autocomplete="current-password" minlength="8" placeholder="••••••••"><button class="button gradient" type="button" onclick="passwordLogin()">Войти</button></div><p id="login-result"></p>{_temporary_registration_button()}</section></main><script>const paymentReturn=new URLSearchParams(location.search).get('payment');const paymentReturnToken=sessionStorage.getItem('freedom_payment_return_token');if(paymentReturn&&paymentReturnToken){{sessionStorage.removeItem('freedom_payment_return_token');location.replace('/cabinet/payment-return?payment='+encodeURIComponent(paymentReturn)+'&token='+encodeURIComponent(paymentReturnToken))}}const tabs=document.querySelectorAll('[data-login-mode]');function selectLoginMode(mode){{tabs.forEach(x=>x.classList.toggle('active',x.dataset.loginMode===mode));document.querySelectorAll('[data-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.modePanel!==mode)}}tabs.forEach(tab=>tab.onclick=()=>selectLoginMode(tab.dataset.loginMode));async function requestLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Отправляем код…';const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка отправки');if(r.ok)document.getElementById('login-code').focus()}}async function requestPasswordReset(){{selectLoginMode('email');await requestLogin()}}async function codeLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем код…';const r=await fetch('/web/code/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,code:document.getElementById('login-code').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}}async function passwordLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем…';const r=await fetch('/web/password/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,password:document.getElementById('login-password').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}};</script>'''
+        body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><a class="button" href="/">На главную</a></nav></div><main class="login-page"><section class="login-card"><h1>Вход в аккаунт</h1><p class="muted">Рады видеть вас снова.</p><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="email" placeholder="you@example.com"><div class="login-tabs"><button class="active" type="button" data-login-mode="email">Код из письма</button><button type="button" data-login-mode="password">Пароль</button></div><div class="login-mode" data-mode-panel="email"><p class="muted" style="margin-top:22px">Пришлём шестизначный одноразовый код — пароль не нужен.</p><button class="button gradient" type="button" onclick="requestLogin()">Получить код на email</button><label for="login-code">Код из письма</label><input id="login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{{6}}" placeholder="000000"><button class="button gradient" type="button" onclick="codeLogin()">Войти по коду</button></div><div class="login-mode" data-mode-panel="password" hidden><div class="password-heading"><label for="login-password">Пароль</label><button type="button" onclick="requestPasswordReset()">Получить код</button></div><input id="login-password" type="password" autocomplete="current-password" minlength="8" placeholder="••••••••"><button class="button gradient" type="button" onclick="passwordLogin()">Войти</button></div><p id="login-result"></p>{_temporary_registration_button()}</section></main><script>const params=new URLSearchParams(location.search);const telegramLinkToken=params.get('tg')||'';const paymentReturn=params.get('payment');const paymentReturnToken=sessionStorage.getItem('freedom_payment_return_token');if(paymentReturn&&paymentReturnToken){{sessionStorage.removeItem('freedom_payment_return_token');location.replace('/cabinet/payment-return?payment='+encodeURIComponent(paymentReturn)+'&token='+encodeURIComponent(paymentReturnToken))}}const tabs=document.querySelectorAll('[data-login-mode]');function selectLoginMode(mode){{tabs.forEach(x=>x.classList.toggle('active',x.dataset.loginMode===mode));document.querySelectorAll('[data-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.modePanel!==mode)}}tabs.forEach(tab=>tab.onclick=()=>selectLoginMode(tab.dataset.loginMode));async function requestLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Отправляем код…';const body={{email:document.getElementById('login-email').value}};if(telegramLinkToken)body.telegram_link_token=telegramLinkToken;const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка отправки');if(r.ok)document.getElementById('login-code').focus()}}async function requestPasswordReset(){{selectLoginMode('email');await requestLogin()}}async function codeLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем код…';const r=await fetch('/web/code/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,code:document.getElementById('login-code').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}}async function passwordLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем…';const r=await fetch('/web/password/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,password:document.getElementById('login-password').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}};</script>'''
         return HTMLResponse(_shell(body, title="Вход — Freedom VPN"), status_code=401, headers=_headers())
     user, access = found
     access.last_used_at = datetime.now(timezone.utc)

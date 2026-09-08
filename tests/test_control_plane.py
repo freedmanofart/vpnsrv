@@ -475,6 +475,45 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(401, unauthenticated.status_code)
 
+    async def test_web_registration_with_telegram_link_uses_existing_user(self) -> None:
+        from app.core.cabinet_links import telegram_cabinet_link_token
+
+        token = telegram_cabinet_link_token(self.user_id)
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
+            response = await self.client.post(
+                "/web/register",
+                json={
+                    "email": "linked@example.com",
+                    "telegram_link_token": token,
+                },
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("linked@example.com", send.await_args.args[0])
+        async with self.session_factory() as db:
+            users = list((await db.execute(select(User))).scalars())
+            linked = await db.get(User, self.user_id)
+            self.assertEqual(1, len(users))
+            self.assertEqual("linked@example.com", linked.email)
+
+    async def test_web_registration_rejects_email_owned_by_another_user(self) -> None:
+        from app.core.cabinet_links import telegram_cabinet_link_token
+
+        async with self.session_factory() as db:
+            db.add(User(telegram_id=-999, email="busy@example.com", status="active"))
+            await db.commit()
+
+        token = telegram_cabinet_link_token(self.user_id)
+        response = await self.client.post(
+            "/web/register",
+            json={
+                "email": "busy@example.com",
+                "telegram_link_token": token,
+            },
+        )
+
+        self.assertEqual(409, response.status_code, response.text)
+
     async def test_temporary_registration_opens_cabinet_without_email(self) -> None:
         from app.core.config import settings
 

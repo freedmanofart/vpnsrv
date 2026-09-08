@@ -10,6 +10,7 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.cabinet_links import telegram_cabinet_link_token
 from app.db.models.audit import AuditLog
 from app.db.models.payment import Payment
 from app.db.models.payment_method import PaymentMethod
@@ -22,7 +23,6 @@ from app.services.audit import write_audit
 from app.services.email import (
     EmailDeliveryError,
     _cabinet_url,
-    _renew_url,
     _send,
     send_subscription_expired,
     send_subscription_expiring,
@@ -43,6 +43,15 @@ def _telegram_error_details(exc: httpx.HTTPError) -> tuple[str, int | None, str]
 
 def _support_chat_id() -> str:
     return SUPPORT_NOTIFICATION_CHAT
+
+
+def _user_cabinet_url(user: User | None, path: str = "") -> str:
+    base = _cabinet_url()
+    if user is None:
+        return base + path
+    route, marker, fragment = path.partition("#")
+    separator = "&" if "?" in path else "?"
+    return f"{base}{route}{separator}tg={telegram_cabinet_link_token(user.id)}{marker}{fragment}"
 
 
 async def _telegram_destinations(db: AsyncSession) -> list[int | str]:
@@ -302,8 +311,8 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
             f"Тариф: {plan_name}\n"
             f"Сумма: {payment.amount:g} {payment.currency}"
             f"{expires}\n\n"
-            f"Web-кабинет: {_cabinet_url()}\n"
-            f"Продлить подписку: {_renew_url()}\n\n"
+            f"Web-кабинет: {_user_cabinet_url(user)}\n"
+            f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}\n\n"
             "VPN-ключ и статус подписки доступны в web-кабинете."
         )
         client_notified = await _send_client_telegram_message(user, client_text) or client_notified

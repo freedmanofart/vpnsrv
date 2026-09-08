@@ -530,12 +530,17 @@ def cabinet_public_url(path: str = "") -> str:
 def cabinet_credentials_text(email_address: str, payload: dict) -> str:
     code = payload.get("code") or "проверьте письмо"
     expires_at = str(payload.get("expires_at") or "").replace("T", " ").replace("+00:00", " UTC")
+    cabinet_url = str(payload.get("cabinet_url") or "")
+    if cabinet_url.startswith("/"):
+        cabinet_url = cabinet_public_url(cabinet_url.removeprefix("/cabinet"))
+    elif not cabinet_url:
+        cabinet_url = cabinet_public_url()
     return (
         "✅ Доступ в личный кабинет отправлен на email.\n\n"
         "<b>Креды для входа:</b>\n"
         f"Email: <code>{html.escape(email_address)}</code>\n"
         f"Код: <code>{html.escape(str(code))}</code>\n"
-        f"Web-кабинет: {html.escape(cabinet_public_url())}\n"
+        f"Web-кабинет: {html.escape(cabinet_url)}\n"
         + (f"Код действует до: <b>{html.escape(expires_at)}</b>\n\n" if expires_at else "\n")
         + "Теперь пришлите чек фотографией или файлом."
     )
