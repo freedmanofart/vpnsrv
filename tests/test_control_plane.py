@@ -174,8 +174,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn("path", resources["PostgreSQL backups"])
         scripts = {item["id"]: item for item in data["scripts"] if item.get("id")}
         self.assertIn("master_cert_renew", scripts)
+        self.assertIn("tailscale_cert_units", scripts)
         self.assertIn(f"node_cert_renew:{self.node_id}", scripts)
         self.assertIn("renew_master_cert.sh", scripts["master_cert_renew"]["command"])
+        self.assertIn("vpn-tailscale-cert.service", scripts["tailscale_cert_units"]["command"])
         self.assertIn("deploy/node/renew_3xui_ip_cert.sh", scripts[f"node_cert_renew:{self.node_id}"]["command"])
 
         node_renew = await self.client.post(f"/admin/scripts/node_cert_renew:{self.node_id}/run", auth=self.admin_auth)

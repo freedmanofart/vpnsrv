@@ -64,6 +64,8 @@ web-админку.
 - SSL-сертификата master/site по `PUBLIC_BASE_URL`;
 - SSL-сертификатов VPN-нод: по HTTPS `vpn_node_configs.config.api_address`,
   а если API-адрес внутренний HTTP — по публичному `vpn_nodes.ip_address:443`;
+- механизма обновления master-сертификата: `vpn-tailscale-cert.service` и
+  `vpn-tailscale-cert.timer`;
 - SMTP-логина для писем web-кабинета;
 - каждой активной VPN-ноды через её `api_address` master 3x-ui.
 
@@ -190,6 +192,9 @@ email. Если клиент есть в БД, но `panel: not found`, пров
 
 В `/admin` → `Скрипты` есть:
 
+- `Проверить Tailscale cert service/timer` — возвращает host-only команду
+  проверки `vpn-tailscale-cert.service`, `vpn-tailscale-cert.timer`, следующего
+  запуска timer и последних строк журнала;
 - `Обновить SSL-сертификат master/site` — возвращает host-only команду
   `scripts/renew_master_cert.sh`;
 - `Обновить SSL-сертификат ноды #...` — отдельная кнопка для каждой активной
@@ -200,6 +205,9 @@ email. Если клиент есть в БД, но `panel: not found`, пров
 
 ```bash
 cd /home/freedman/vpn-service
+systemctl status vpn-tailscale-cert.service vpn-tailscale-cert.timer --no-pager
+systemctl list-timers vpn-tailscale-cert.timer --all --no-pager
+journalctl -u vpn-tailscale-cert.service -n 40 --no-pager
 sudo scripts/renew_master_cert.sh
 ```
 

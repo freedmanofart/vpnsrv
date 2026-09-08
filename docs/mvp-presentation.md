@@ -211,6 +211,7 @@ Production-состав MVP:
 - online-тесты ключевых API;
 - backup, verify и restore PostgreSQL;
 - проверку live-трафика VPN-клиента через 3x-ui `clientStats`;
+- health check `vpn-tailscale-cert.service` и `vpn-tailscale-cert.timer`;
 - обновление Tailscale certificate master/site;
 - обновление SSL child-нод;
 - регистрацию новой 3x-ui ноды через идемпотентный скрипт.

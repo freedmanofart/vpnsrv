@@ -134,9 +134,10 @@ API через `host.docker.internal:25`.
 `deploy/node/renew_3xui_ip_cert.sh`. Скрипт устанавливается на саму ноду в
 `/usr/local/sbin/renew_3xui_ip_cert.sh`; timer
 `vpn-3xui-ip-cert-renew.timer` запускает renew каждые 5 дней. В `/admin` →
-`Health` теперь проверяется не только API 3x-ui, но и SSL master/site и SSL
-каждой активной ноды. В `/admin` → `Скрипты` есть отдельная кнопка renew для
-master и отдельная кнопка для каждой ноды из БД.
+`Health` теперь проверяется не только API 3x-ui, но и SSL master/site, SSL
+каждой активной ноды и состояние `vpn-tailscale-cert.timer`. В `/admin` →
+`Скрипты` есть отдельная кнопка проверки Tailscale cert service/timer, кнопка
+renew для master и отдельная кнопка для каждой ноды из БД.
 
 ## Развёртывание
 
