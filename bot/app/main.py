@@ -17,6 +17,7 @@ from app.domain import (
     package_description,
     package_details,
     package_line,
+    plan_display_name,
     plan_tier,
     plans_by_tier,
     rotation_payload,
@@ -365,6 +366,7 @@ def subscription_text(data: dict) -> str:
     active = subscription.get("status") == "active"
     days = math.ceil(float(subscription.get("days_remaining") or 0))
     expires_at = (subscription.get("expires_at") or "—").replace("T", " ").replace("+00:00", "")
+    tariff_name = plan_display_name(subscription.get("plan_name"), subscription.get("package_name"))
     connections = client.get("max_connections", 0) if client else 0
     connection_text = "без ограничений" if connections == 0 else str(connections)
     traffic_limit_gb = client.get("traffic_limit_gb", 0) if client else 0
@@ -380,7 +382,7 @@ def subscription_text(data: dict) -> str:
     return (
         "👤 <b>Управление подпиской</b>\n\n"
         f"Статус: {'🟢 Активна' if active else '🔴 Истекла'}\n"
-        f"Тариф: <b>{html.escape(str(subscription.get('plan_name') or '—'))}</b>\n"
+        f"Тариф: <b>{html.escape(tariff_name)}</b>\n"
         f"Осталось дней: <b>{days}</b>\n"
         f"Осталось трафика: <b>{traffic_text}</b>\n"
         f"Одновременных подключений: <b>{connection_text}</b>\n"

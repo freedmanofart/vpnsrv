@@ -8,6 +8,7 @@ from app.db.models.user import User
 from app.db.models.subscription import Subscription
 from app.db.models.vpn_client import VPNClient
 from app.db.models.plan import Plan
+from app.db.models.plan_package import PlanPackage
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.session import get_db
 from app.core.security import require_api_access
@@ -82,6 +83,7 @@ async def get_vpn_status(
     client = result.scalars().first()
 
     plan = await db.get(Plan, subscription.plan_id)
+    package = await db.get(PlanPackage, plan.package_id) if plan and plan.package_id else None
     traffic_used_bytes = None
     traffic_remaining_bytes = None
     if client:
@@ -128,6 +130,8 @@ async def get_vpn_status(
             "starts_at": subscription.starts_at,
             "expires_at": subscription.expires_at,
             "plan_name": plan.name if plan else None,
+            "package_name": package.name if package else None,
+            "package_code": package.code if package else None,
             "days_remaining": max((expires_at - now).total_seconds() / 86400, 0),
         },
         "vpn_client": (

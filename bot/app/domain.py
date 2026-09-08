@@ -139,6 +139,14 @@ def package_description(tier: str, packages: list[dict] | None = None) -> str:
     return f"{connection_text} · {details['traffic']}"
 
 
+def plan_display_name(plan_name: str | None, package_name: str | None = None) -> str:
+    plan_label = str(plan_name or "—")
+    package_label = str(package_name or "").strip()
+    if package_label and package_label.lower() not in plan_label.lower():
+        return f"{package_label} - {plan_label}"
+    return plan_label
+
+
 def plans_by_tier(plans: list[dict], packages: list[dict] | None = None) -> dict[str, list[dict]]:
     result = {str(package["code"]): [] for package in packages or [] if package.get("code")}
     if not result:

@@ -43,10 +43,21 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             await connection.run_sync(Base.metadata.create_all)
         async with self.session_factory() as db:
             user = User(telegram_id=42424242, username="device-user", status="active")
+            package = PlanPackage(
+                code="lite",
+                name="Лайт",
+                description="",
+                max_connections=5,
+                traffic_limit_gb=250,
+                sort_order=10,
+            )
+            db.add(package)
+            await db.flush()
             plan = Plan(
                 code="control-plane",
-                name="Control plane",
+                name="1 день",
                 duration_days=30,
+                package_id=package.id,
                 price=Decimal("1.00"),
                 currency="USD",
                 is_active=True,
@@ -104,6 +115,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             self.user_id = user.id
             self.telegram_id = user.telegram_id
             self.node_id = node.id
+            self.package_id = package.id
 
         async def override_db():
             async with self.session_factory() as db:
@@ -487,23 +499,13 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         raw = "tariff-page-token"
         async with self.session_factory() as db:
-            package = PlanPackage(
-                code="lite",
-                name="Лайт",
-                description="5 подключений · 250 ГБ трафика",
-                max_connections=5,
-                traffic_limit_gb=250,
-                sort_order=10,
-            )
-            db.add(package)
-            await db.flush()
             extra = Plan(
                 code="lite_30d",
                 name="1 мес (-3%)",
                 duration_days=30,
                 max_connections=5,
                 traffic_limit_gb=250,
-                package_id=package.id,
+                package_id=self.package_id,
                 price=Decimal("390.00"),
                 currency="RUB",
                 is_active=True,
@@ -609,6 +611,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, status.status_code, status.text)
         self.assertEqual("expired", status.json()["subscription"]["status"])
+        self.assertEqual("1 день", status.json()["subscription"]["plan_name"])
+        self.assertEqual("Лайт", status.json()["subscription"]["package_name"])
 
     async def test_plan_delete_rejects_used_and_removes_unused(self) -> None:
         used = await self.client.delete("/plans/1", headers=self.service_headers)
