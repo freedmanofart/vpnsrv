@@ -6,6 +6,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     JSON,
+    LargeBinary,
     Numeric,
     String,
     UniqueConstraint,
@@ -66,7 +67,7 @@ class Payment(Base):
     subscription_id: Mapped[int | None] = mapped_column(
         ForeignKey("subscriptions.id"),
         nullable=True,
-        unique=True,
+        index=True,
     )
 
     client_type: Mapped[str] = mapped_column(
@@ -92,6 +93,10 @@ class Payment(Base):
         nullable=False,
         default=dict,
     )
+
+    receipt_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    receipt_mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    receipt_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     amount: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),

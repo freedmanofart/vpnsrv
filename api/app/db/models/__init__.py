@@ -1,6 +1,8 @@
 from app.db.models.user import User
 from app.db.models.plan import Plan
+from app.db.models.plan_package import PlanPackage
 from app.db.models.payment import Payment, PaymentEvent
+from app.db.models.payment_method import PaymentMethod
 from app.db.models.subscription import Subscription
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
@@ -11,14 +13,17 @@ from app.db.models.audit import (
     AuditLog,
     ClientDevice,
     DebugSession,
-    NodeAgentCredential,
 )
+from app.db.models.cabinet_access import CabinetAccessToken
+from app.db.models.cabinet_login_code import CabinetLoginCode
+from app.db.models.admin_setting import AdminSetting
 
 __all__ = [
     "User",
     "Plan",
     "Payment",
     "PaymentEvent",
+    "PaymentMethod",
     "Subscription",
     "VPNNode",
     "VPNNodeConfig",
@@ -28,5 +33,7 @@ __all__ = [
     "AuditLog",
     "ClientDevice",
     "DebugSession",
-    "NodeAgentCredential",
+    "CabinetAccessToken",
+    "CabinetLoginCode",
+    "AdminSetting",
 ]

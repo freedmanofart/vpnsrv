@@ -4,56 +4,151 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from bot.app.content import load_content
-from bot.app.domain import country_label, profile_flow, rotation_payload, subscription_payload
+from bot.app.domain import (
+    PLAN_TIERS,
+    country_label,
+    package_details,
+    package_description,
+    package_line,
+    plan_display_name,
+    rotation_payload,
+    plan_tier,
+    plans_by_tier,
+    select_public_plans,
+    subscription_payload,
+    supports_threexui,
+)
 
 
 class CountryTests(unittest.TestCase):
-    def test_supported_countries_and_aliases(self):
-        self.assertEqual(country_label("US"), "🇺🇸 США")
-        self.assertEqual(country_label("Нидерланды"), "🇳🇱 Нидерланды")
-        self.assertEqual(country_label(" germany "), "🇩🇪 Германия")
+    def test_country_code_and_detected_name(self):
+        self.assertEqual(country_label("US|США"), "🇺🇸 США")
+        self.assertEqual(country_label("NL|Нидерланды"), "🇳🇱 Нидерланды")
+        self.assertEqual(country_label("de"), "🇩🇪 DE")
 
-    def test_unknown_country_is_hidden(self):
-        self.assertIsNone(country_label("France"))
+    def test_any_detected_country_is_supported(self):
+        self.assertEqual(country_label("FR|Франция"), "🇫🇷 Франция")
 
 
-class ProfileTests(unittest.TestCase):
-    def test_profiles(self):
-        self.assertEqual(profile_flow("standard"), "")
-        self.assertEqual(profile_flow("vision"), "xtls-rprx-vision")
-
-    def test_purchase_payload_for_amnezia(self):
+class KeyTests(unittest.TestCase):
+    def test_purchase_payload_has_one_key_variant(self):
         self.assertEqual(
-            subscription_payload(1, 2, 3, "amnezia", "vision"),
+            subscription_payload(1, 2, 3),
             {
                 "user_id": 1,
                 "plan_id": 2,
                 "node_id": 3,
-                "client_type": "amnezia",
-                "flow": "xtls-rprx-vision",
-                "fingerprint": "chrome",
+                "client_type": "universal",
+                "flow": "",
+                "fingerprint": "firefox",
             },
         )
 
-    def test_invalid_options(self):
-        with self.assertRaises(ValueError):
-            profile_flow("tls")
-        with self.assertRaises(ValueError):
-            subscription_payload(1, 2, 3, "unknown", "standard")
 
-    def test_rotation_payload_preserves_selected_profile(self):
+class PlanSelectionTests(unittest.TestCase):
+    def test_empty_allowlist_shows_new_api_plans(self):
+        plans = [{"code": "old"}, {"code": "new-three-devices"}]
+        self.assertEqual(plans, select_public_plans(plans, ()))
+
+    def test_explicit_allowlist_filters_and_orders(self):
+        plans = [{"code": "one"}, {"code": "three"}, {"code": "unlimited"}]
         self.assertEqual(
-            rotation_payload(7, "amnezia", "vision"),
+            [{"code": "unlimited"}, {"code": "one"}],
+            select_public_plans(plans, ("unlimited", "one")),
+        )
+
+    def test_plans_are_grouped_by_connection_tier(self):
+        plans = [
+            {"code": "lite_1m", "max_connections": 5},
+            {"code": "standard_1m", "max_connections": 15},
+            {"code": "ultra_1m", "max_connections": 30},
+        ]
+        grouped = plans_by_tier(plans)
+        self.assertEqual(["lite", "standard", "ultra"], list(grouped))
+        self.assertEqual("standard", plan_tier(plans[1]))
+        self.assertEqual(30, PLAN_TIERS["ultra"]["connections"])
+
+    def test_plans_are_grouped_by_database_packages(self):
+        packages = [
+            {
+                "id": 10,
+                "code": "family",
+                "name": "Семейный",
+                "description": "Для всей семьи",
+                "max_connections": 12,
+                "traffic_limit_gb": 512,
+            },
+            {
+                "id": 20,
+                "code": "business",
+                "name": "Бизнес",
+                "description": "",
+                "max_connections": 0,
+                "traffic_limit_gb": 0,
+            },
+        ]
+        plans = [
+            {"code": "legacy_lite", "package_id": 10, "max_connections": 5},
+            {"code": "legacy_ultra", "package_id": 20, "max_connections": 30},
+        ]
+        grouped = plans_by_tier(plans, packages)
+        self.assertEqual(["family", "business"], list(grouped))
+        self.assertEqual("Семейный", package_details("family", packages)["label"])
+        self.assertEqual(12, package_details("family", packages)["connections"])
+        self.assertEqual("512 ГБ трафика", package_details("family", packages)["traffic"])
+        self.assertEqual("Для всей семьи", package_description("family", packages))
+        self.assertEqual("<b>Семейный</b> — Для всей семьи", package_line("family", packages))
+
+    def test_plan_display_name_includes_package(self):
+        self.assertEqual("Лайт - 1 день", plan_display_name("1 день", "Лайт"))
+        self.assertEqual("Лайт 1 день", plan_display_name("Лайт 1 день", "Лайт"))
+
+    def test_rotation_payload_has_one_key_variant(self):
+        self.assertEqual(
+            rotation_payload(7),
             {
                 "node_id": 7,
-                "client_type": "amnezia",
-                "flow": "xtls-rprx-vision",
-                "fingerprint": "chrome",
+                "client_type": "universal",
+                "flow": "",
+                "fingerprint": "firefox",
             },
+        )
+
+    def test_only_http_master_and_numeric_inbound_are_eligible(self):
+        self.assertTrue(
+            supports_threexui(
+                [
+                    {
+                        "protocol": "vless",
+                        "config": {
+                            "api_address": "http://master.internal/prefix",
+                            "inbound_tag": "3",
+                        },
+                    }
+                ]
+            )
+        )
+        self.assertFalse(
+            supports_threexui(
+                [
+                    {
+                        "protocol": "vless",
+                        "config": {
+                            "api_address": "127.0.0.1:10085",
+                            "inbound_tag": "vless-reality",
+                        },
+                    }
+                ]
+            )
         )
 
 
 class ContentTests(unittest.TestCase):
+    def test_default_welcome_promotes_web_cabinet(self):
+        content = load_content()
+        self.assertIn("Freedom VPN", content["texts"]["welcome"])
+        self.assertIn("веб-кабинет", content["texts"]["welcome"])
+
     def test_content_file_expands_environment_links(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "content.json"

@@ -9,14 +9,14 @@ class SubscriptionCreate(BaseModel):
     node_id: int | None = None
     client_type: str = "universal"
     flow: str = ""
-    fingerprint: str = "chrome"
+    fingerprint: str = "firefox"
 
 
 class VPNClientRotate(BaseModel):
     node_id: int
     client_type: str = "universal"
     flow: str = ""
-    fingerprint: str = "chrome"
+    fingerprint: str = "firefox"
 
 
 class AccessGrantCreate(BaseModel):
@@ -24,9 +24,10 @@ class AccessGrantCreate(BaseModel):
     kind: str
     code: str | None = None
     node_id: int
-    client_type: str = "amnezia"
-    flow: str = "xtls-rprx-vision"
-    fingerprint: str = "chrome"
+    duration_hours: int | None = None
+    client_type: str = "universal"
+    flow: str = ""
+    fingerprint: str = "firefox"
 
 
 class SubscriptionResponse(BaseModel):

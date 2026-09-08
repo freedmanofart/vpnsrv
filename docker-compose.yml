@@ -1,67 +1,5 @@
 services:
 
-  postgres:
-    image: postgres:17
-    container_name: vpn-postgres
-    restart: unless-stopped
-
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-    ports:
-      - "127.0.0.1:5432:5432"
-
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 10s
-
-    networks:
-      - vpn-backend
-
-
-  redis:
-    image: redis:8-alpine
-    container_name: vpn-redis
-    restart: unless-stopped
-
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-
-    volumes:
-      - redis_data:/data
-
-    ports:
-      - "127.0.0.1:6379:6379"
-
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "redis-cli",
-          "ping"
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-    networks:
-      - vpn-backend
-
-
   api:
     build:
       context: ./api
@@ -72,11 +10,10 @@ services:
 
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
       LOG_LEVEL: ${LOG_LEVEL}
 
-      XRAY_API_ADDRESS: ${XRAY_API_ADDRESS}
-      XRAY_INBOUND_TAG: ${XRAY_INBOUND_TAG}
+      THREEXUI_API_TOKEN: ${THREEXUI_API_TOKEN:-}
+      THREEXUI_VERIFY_TLS: ${THREEXUI_VERIFY_TLS:-true}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change_me}
       SERVICE_API_TOKEN: ${SERVICE_API_TOKEN}
@@ -85,15 +22,42 @@ services:
       PAYMENT_AUTO_CONFIRM: ${PAYMENT_AUTO_CONFIRM:-false}
       PROMO_CODES: ${PROMO_CODES:-WELCOME7:7}
       BACKGROUND_JOBS_ENABLED: ${BACKGROUND_JOBS_ENABLED:-false}
-      XRAY_MANAGEMENT_MODE: ${XRAY_MANAGEMENT_MODE:-direct}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      CABINET_TOKEN_TTL_DAYS: ${CABINET_TOKEN_TTL_DAYS:-365}
+      CABINET_EMAIL_CODE_TTL_MINUTES: ${CABINET_EMAIL_CODE_TTL_MINUTES:-10}
+      CABINET_ALLOW_TEMPORARY_REGISTRATION: ${CABINET_ALLOW_TEMPORARY_REGISTRATION:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      BOT_USERNAME: ${BOT_USERNAME:-vpn142323srv_bot}
+      BOT_ADMIN_CHAT_ID: ${BOT_ADMIN_CHAT_ID:-0}
+      ADMIN_NOTIFICATION_EMAIL: ${ADMIN_NOTIFICATION_EMAIL:-freedmanofart5@gmail.com}
+      VPN_BACKUP_DIR: ${VPN_BACKUP_DIR:-/var/backups/vpn-service}
+      PLATEGA_ENABLED: ${PLATEGA_ENABLED:-false}
+      PLATEGA_BASE_URL: ${PLATEGA_BASE_URL:-https://app.platega.io}
+      PLATEGA_MERCHANT_ID: ${PLATEGA_MERCHANT_ID:-}
+      PLATEGA_SECRET: ${PLATEGA_SECRET:-}
+      PLATEGA_RETURN_URL: ${PLATEGA_RETURN_URL:-}
+      PLATEGA_FAILED_URL: ${PLATEGA_FAILED_URL:-}
+      PLATEGA_CALLBACK_URL: ${PLATEGA_CALLBACK_URL:-}
+      PLATEGA_METHOD_SBP_QR: ${PLATEGA_METHOD_SBP_QR:-2}
+      PLATEGA_METHOD_MIR_CARD: ${PLATEGA_METHOD_MIR_CARD:-}
+      PLATEGA_METHOD_CRYPTO: ${PLATEGA_METHOD_CRYPTO:-13}
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
     volumes:
       - ./api/app:/app/app
+      - ./docs:/app/docs:ro
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
+      - /var/backups/vpn-service:/var/backups/vpn-service
 
     ports:
       - "127.0.0.1:8000:8000"
@@ -104,12 +68,6 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
-
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
 
     networks:
       - vpn-backend
@@ -125,29 +83,41 @@ services:
 
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
       LOG_LEVEL: ${LOG_LEVEL}
-      XRAY_API_ADDRESS: ${XRAY_API_ADDRESS}
-      XRAY_INBOUND_TAG: ${XRAY_INBOUND_TAG}
+      THREEXUI_API_TOKEN: ${THREEXUI_API_TOKEN:-}
+      THREEXUI_VERIFY_TLS: ${THREEXUI_VERIFY_TLS:-true}
       SERVICE_API_TOKEN: ${SERVICE_API_TOKEN}
       PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET}
       BACKGROUND_JOBS_ENABLED: "true"
       LIFECYCLE_INTERVAL_SECONDS: ${LIFECYCLE_INTERVAL_SECONDS:-60}
       LIFECYCLE_ADVISORY_LOCK_KEY: ${LIFECYCLE_ADVISORY_LOCK_KEY:-846202608}
+      SUBSCRIPTION_EXPIRATION_REMINDER_DAYS: ${SUBSCRIPTION_EXPIRATION_REMINDER_DAYS:-3}
       WORKER_RUN_ONCE: ${WORKER_RUN_ONCE:-false}
-      XRAY_MANAGEMENT_MODE: ${XRAY_MANAGEMENT_MODE:-direct}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      ADMIN_NOTIFICATION_EMAIL: ${ADMIN_NOTIFICATION_EMAIL:-freedmanofart5@gmail.com}
+      PLATEGA_ENABLED: ${PLATEGA_ENABLED:-false}
+      PLATEGA_BASE_URL: ${PLATEGA_BASE_URL:-https://app.platega.io}
+      PLATEGA_MERCHANT_ID: ${PLATEGA_MERCHANT_ID:-}
+      PLATEGA_SECRET: ${PLATEGA_SECRET:-}
+      PLATEGA_RETURN_URL: ${PLATEGA_RETURN_URL:-}
+      PLATEGA_FAILED_URL: ${PLATEGA_FAILED_URL:-}
+      PLATEGA_CALLBACK_URL: ${PLATEGA_CALLBACK_URL:-}
+      PLATEGA_METHOD_SBP_QR: ${PLATEGA_METHOD_SBP_QR:-2}
+      PLATEGA_METHOD_MIR_CARD: ${PLATEGA_METHOD_MIR_CARD:-}
+      PLATEGA_METHOD_CRYPTO: ${PLATEGA_METHOD_CRYPTO:-13}
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
     volumes:
       - ./api/app:/app/app
-
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
 
     networks:
       - vpn-backend
@@ -163,6 +133,7 @@ services:
 
     environment:
       BOT_TOKEN: ${BOT_TOKEN}
+      BOT_ADMIN_CHAT_ID: ${BOT_ADMIN_CHAT_ID:-0}
       API_URL: ${API_URL}
       LOG_LEVEL: ${LOG_LEVEL}
       VPN_PLAN_ID: ${VPN_PLAN_ID}
@@ -170,7 +141,9 @@ services:
       SERVICE_API_TOKEN: ${SERVICE_API_TOKEN}
       TELEGRAM_CHANNEL_URL: ${TELEGRAM_CHANNEL_URL:-}
       SUPPORT_URL: ${SUPPORT_URL:-}
-      BOT_PLAN_CODES: ${BOT_PLAN_CODES:-vpn_14d,vpn_30d,vpn_90d}
+      WEB_CABINET_URL: ${WEB_CABINET_URL:-}
+      WEB_SITE_URL: ${WEB_SITE_URL:-}
+      BOT_PLAN_CODES: ${BOT_PLAN_CODES:-}
       YOOMONEY_PAYMENT_URL: ${YOOMONEY_PAYMENT_URL:-}
       YOOMONEY_14D_URL: ${YOOMONEY_14D_URL:-}
       YOOMONEY_30D_URL: ${YOOMONEY_30D_URL:-}
@@ -188,130 +161,6 @@ services:
 
     networks:
       - vpn-backend
-
-  xray:
-    image: ghcr.io/xtls/xray-core:latest
-    container_name: vpn-xray
-    restart: unless-stopped
-
-    volumes:
-      - ./xray/config.json:/usr/local/etc/xray/config.json:ro
-
-    network_mode: host
-
-    cap_add:
-      - NET_BIND_SERVICE
-
-    command:
-      - run
-      - -config
-      - /usr/local/etc/xray/config.json
-
-  node-agent:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-    container_name: vpn-node-agent
-    restart: unless-stopped
-    profiles: ["node-agent"]
-    command: ["python", "-m", "app.node_agent"]
-    environment:
-      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://api:8000}
-      NODE_AGENT_TOKEN: ${NODE_AGENT_TOKEN}
-      NODE_XRAY_API_ADDRESS: ${XRAY_API_ADDRESS}
-      NODE_AGENT_INTERVAL_SECONDS: ${NODE_AGENT_INTERVAL_SECONDS:-30}
-      LOG_LEVEL: ${LOG_LEVEL}
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ./api/app:/app/app
-    depends_on:
-      api:
-        condition: service_healthy
-    networks:
-      - vpn-backend
-
-  loki:
-    image: grafana/loki:3.7.0
-    container_name: vpn-loki
-    restart: unless-stopped
-    command: ["-config.file=/etc/loki/config.yaml"]
-    volumes:
-      - ./observability/loki-config.yaml:/etc/loki/config.yaml:ro
-      - loki_data:/loki
-    ports:
-      - "127.0.0.1:3100:3100"
-    healthcheck:
-      test: ["CMD", "/usr/bin/loki", "-version"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    networks:
-      - vpn-backend
-
-  alloy:
-    image: grafana/alloy:v1.18.0
-    container_name: vpn-alloy
-    restart: unless-stopped
-    user: "0:0"
-    command:
-      - run
-      - --server.http.listen-addr=0.0.0.0:12345
-      - --storage.path=/var/lib/alloy/data
-      - --disable-reporting
-      - /etc/alloy/config.alloy
-    volumes:
-      - ./observability/alloy-config.alloy:/etc/alloy/config.alloy:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - alloy_data:/var/lib/alloy/data
-    ports:
-      - "127.0.0.1:12345:12345"
-    depends_on:
-      - loki
-    networks:
-      - vpn-backend
-
-  grafana:
-    image: grafana/grafana:12.4.0
-    container_name: vpn-grafana
-    restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_ANALYTICS_REPORTING_ENABLED: "false"
-      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
-      GF_UPDATE_CHECK_ENABLED: "false"
-      GF_PLUGINS_CHECK_FOR_UPDATES: "false"
-      GF_PLUGINS_PREINSTALL_DISABLED: "true"
-      GF_UNIFIED_ALERTING_ENABLED: "false"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    ports:
-      - "127.0.0.1:3000:3000"
-    depends_on:
-      - loki
-    networks:
-      - vpn-backend
-
-volumes:
-  postgres_data:
-    name: vpn-postgres-data
-
-  redis_data:
-    name: vpn-redis-data
-  loki_data:
-    name: vpn-loki-data
-  alloy_data:
-    name: vpn-alloy-data
-  grafana_data:
-    name: vpn-grafana-data
-
 
 networks:
   vpn-backend:

@@ -44,23 +44,6 @@ class DebugSession(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class NodeAgentCredential(Base):
-    __tablename__ = "node_agent_credentials"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    node_id: Mapped[int] = mapped_column(
-        ForeignKey("vpn_nodes.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
-    )
-    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    token_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class ClientDevice(Base):
     __tablename__ = "client_devices"
 

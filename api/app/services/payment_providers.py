@@ -41,7 +41,20 @@ class WebhookPaymentProvider(PaymentProviderAdapter):
         )
 
 
+class TelegramStarsPaymentProvider(PaymentProviderAdapter):
+    name = "telegram_stars"
+
+    async def create(self, *, idempotency_key: str) -> ProviderPayment:
+        return ProviderPayment(
+            provider_payment_id=str(uuid4()),
+            status="pending",
+            details={"adapter": "telegram_stars"},
+        )
+
+
 def get_payment_provider(name: str) -> PaymentProviderAdapter:
     if name == "mock":
         return MockPaymentProvider()
+    if name == "telegram_stars":
+        return TelegramStarsPaymentProvider()
     return WebhookPaymentProvider(name)

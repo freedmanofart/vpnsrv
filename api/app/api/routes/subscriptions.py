@@ -17,16 +17,16 @@ from app.db.models.audit import AccessGrant
 
 from app.db.session import get_db
 
-from app.services.xray import (
-    XrayClient,
-    XrayError,
-    XrayUserNotFound,
+from app.services.threexui import (
+    ThreeXUIClient,
+    ThreeXUIError,
+    ThreeXUIClientNotFound,
 )
 from app.services.provisioning import (
     ProvisioningConflict,
     ProvisioningInvalid,
     ProvisioningNotFound,
-    ProvisioningXrayError,
+    ProvisioningThreeXUIError,
     commit_provisioning,
     provision_subscription,
 )
@@ -111,14 +111,32 @@ async def grant_trial_or_promo(
     if kind == "trial":
         code = "TRIAL"
         days = 3
+        duration = timedelta(days=days)
         previous = await db.execute(
             select(Subscription.id).where(Subscription.user_id == user.id).limit(1)
         )
         if previous.scalar_one_or_none() is not None:
             raise HTTPException(status_code=409, detail="Trial is available only once before purchase")
+    elif kind == "paid_trial":
+        code = "PAID_TRIAL_3H"
+        hours = data.duration_hours or 3
+        if hours < 1 or hours > 24:
+            raise HTTPException(status_code=400, detail="Trial duration must be between 1 and 24 hours")
+        days = 0
+        duration = timedelta(hours=hours)
+        previous = await db.execute(
+            select(AccessGrant.id).where(
+                AccessGrant.user_id == user.id,
+                AccessGrant.kind == kind,
+                AccessGrant.code == code,
+            )
+        )
+        if previous.scalar_one_or_none() is not None:
+            raise HTTPException(status_code=409, detail="Paid trial is available only once")
     elif kind == "promo":
         code = (data.code or "").strip().upper()
         days = promo_catalog().get(code, 0)
+        duration = timedelta(days=days)
         if not days:
             raise HTTPException(status_code=404, detail="Promo code is invalid")
     else:
@@ -154,6 +172,8 @@ async def grant_trial_or_promo(
     if active is not None:
         if kind == "trial":
             raise HTTPException(status_code=409, detail="Active subscription already exists")
+        if kind == "paid_trial":
+            raise HTTPException(status_code=409, detail="Active subscription already exists")
         active.expires_at = max(aware(active.expires_at), now) + timedelta(days=days)
         client_result = await db.execute(
             select(VPNClient).where(
@@ -167,7 +187,7 @@ async def grant_trial_or_promo(
         await db.commit()
         subscription = active
     else:
-        plan = await system_access_plan(db, days)
+        plan = await system_access_plan(db, max(days, 1))
         try:
             result = await provision_subscription(
                 db,
@@ -177,6 +197,7 @@ async def grant_trial_or_promo(
                 client_type=data.client_type,
                 flow=data.flow,
                 fingerprint=data.fingerprint,
+                access_duration=duration,
             )
         except ProvisioningNotFound as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -184,7 +205,7 @@ async def grant_trial_or_promo(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ProvisioningInvalid as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except ProvisioningXrayError as exc:
+        except ProvisioningThreeXUIError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         grant.subscription_id = result.subscription.id
         await commit_provisioning(db, result)
@@ -198,7 +219,7 @@ async def grant_trial_or_promo(
         actor_type="service",
         resource_type="subscription",
         resource_id=subscription.id,
-        details={"days": days, "code": code},
+        details={"days": days, "hours": int(duration.total_seconds() // 3600), "code": code},
     )
     return subscription
 
@@ -270,7 +291,7 @@ async def get_node_for_client(
             detail="VPN node not found",
         )
 
-    if not node_accepts_clients(node, management_mode=settings.xray_management_mode):
+    if not node_accepts_clients(node, management_mode="threexui"):
         raise HTTPException(
             status_code=503,
             detail="VPN node is not available",
@@ -316,7 +337,7 @@ async def get_active_node_and_config(
             candidate
             for candidate in result.scalars().all()
             if node_accepts_clients(
-                candidate, management_mode=settings.xray_management_mode
+                candidate, management_mode="threexui"
             )
         ),
         None,
@@ -352,7 +373,7 @@ async def get_active_node_and_config(
 
 
 async def add_vless_client_to_xray(
-    xray: XrayClient,
+    xray: ThreeXUIClient,
     node_config: VPNNodeConfig,
     client: VPNClient,
 ) -> None:
@@ -369,7 +390,7 @@ async def add_vless_client_to_xray(
             flow=client.flow,
         )
 
-    except XrayError as exc:
+    except ThreeXUIError as exc:
         raise HTTPException(
             status_code=502,
             detail=(
@@ -380,7 +401,7 @@ async def add_vless_client_to_xray(
 
 
 async def remove_vless_client_from_xray(
-    xray: XrayClient,
+    xray: ThreeXUIClient,
     node_config: VPNNodeConfig,
     client: VPNClient,
 ) -> bool:
@@ -407,11 +428,11 @@ async def remove_vless_client_from_xray(
 
         return True
 
-    except XrayUserNotFound:
+    except ThreeXUIClientNotFound:
         # Идемпотентный delete.
         return True
 
-    except XrayError:
+    except ThreeXUIError:
         return False
 
 
@@ -452,7 +473,7 @@ async def create_subscription(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ProvisioningInvalid as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ProvisioningXrayError as exc:
+    except ProvisioningThreeXUIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     await commit_provisioning(db, result)
@@ -618,7 +639,9 @@ async def renew_subscription(
         protocol=protocol,
         client_type=(previous_client.client_type if previous_client else "universal"),
         flow=(previous_client.flow if previous_client else ""),
-        fingerprint=(previous_client.fingerprint if previous_client else "chrome"),
+        fingerprint=(previous_client.fingerprint if previous_client else "firefox"),
+        max_connections=plan.max_connections,
+        traffic_limit_gb=plan.traffic_limit_gb,
         client_uuid=new_uuid,
         status="provisioning",
         expires_at=new_expires_at,
@@ -642,26 +665,26 @@ async def renew_subscription(
     # =====================================================
 
     xray = None
-    if settings.xray_management_mode == "direct":
-        xray = XrayClient(address=node_config.config.get("api_address"))
-        try:
-            await xray.add_vless_user(
-                inbound_tag=inbound_tag,
-                client_uuid=new_client.client_uuid,
-                email=f"vpn-{new_client.id}",
-                flow=new_client.flow,
-            )
+    xray = ThreeXUIClient(address=node_config.config.get("api_address"))
+    try:
+        await xray.add_vless_user(
+            inbound_tag=inbound_tag,
+            client_uuid=new_client.client_uuid,
+            email=f"vpn-{new_client.id}",
+            flow=new_client.flow,
+            expiry_time=int(new_expires_at.timestamp() * 1000),
+            telegram_id=user.telegram_id,
+            limit_ip=new_client.max_connections,
+            total_gb=new_client.traffic_limit_gb * 1024 * 1024 * 1024,
+        )
 
-        except XrayError as exc:
-            await db.rollback()
+    except ThreeXUIError as exc:
+        await db.rollback()
 
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Failed to add renewed VPN client "
-                    f"to Xray: {exc}"
-                ),
-            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to add renewed VPN client to 3x-ui: {exc}",
+        )
 
     # =====================================================
     # Step 2: Remove OLD client from Xray
@@ -679,12 +702,12 @@ async def renew_subscription(
                     email=f"vpn-{previous_client.id}",
                 )
 
-            except XrayUserNotFound:
+            except ThreeXUIClientNotFound:
                 # Старого клиента уже нет.
                 # Это безопасное конечное состояние.
                 pass
 
-            except XrayError as exc:
+            except ThreeXUIError as exc:
                 # -------------------------------------------------
                 # Компенсация:
                 #
@@ -702,8 +725,8 @@ async def renew_subscription(
                     )
 
                 except (
-                    XrayError,
-                    XrayUserNotFound,
+                    ThreeXUIError,
+                    ThreeXUIClientNotFound,
                 ):
                     pass
 
@@ -768,6 +791,9 @@ async def rotate_subscription_client(
         raise HTTPException(status_code=400, detail="Unsupported fingerprint")
 
     user = await get_user(db, subscription.user_id)
+    plan = await db.get(Plan, subscription.plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
     target_node, target_config = await get_node_for_client(db, data.node_id, "vless")
     result = await db.execute(
         select(VPNClient)
@@ -785,6 +811,8 @@ async def rotate_subscription_client(
         client_type=data.client_type,
         flow=data.flow,
         fingerprint=data.fingerprint,
+        max_connections=plan.max_connections,
+        traffic_limit_gb=plan.traffic_limit_gb,
         client_uuid=str(uuid4()),
         status="provisioning",
         expires_at=subscription.expires_at,
@@ -794,18 +822,21 @@ async def rotate_subscription_client(
 
     target_tag = target_config.config.get("inbound_tag", "vless-reality")
     target_xray = None
-    if settings.xray_management_mode == "direct":
-        target_xray = XrayClient(address=target_config.config.get("api_address"))
-        try:
-            await target_xray.add_vless_user(
-                inbound_tag=target_tag,
-                client_uuid=new_client.client_uuid,
-                email=f"vpn-{new_client.id}",
-                flow=new_client.flow,
-            )
-        except XrayError as exc:
-            await db.rollback()
-            raise HTTPException(status_code=502, detail=f"Failed to add replacement client: {exc}")
+    target_xray = ThreeXUIClient(address=target_config.config.get("api_address"))
+    try:
+        await target_xray.add_vless_user(
+            inbound_tag=target_tag,
+            client_uuid=new_client.client_uuid,
+            email=f"vpn-{new_client.id}",
+            flow=new_client.flow,
+            expiry_time=int(subscription.expires_at.timestamp() * 1000),
+            telegram_id=user.telegram_id,
+            limit_ip=new_client.max_connections,
+            total_gb=new_client.traffic_limit_gb * 1024 * 1024 * 1024,
+        )
+    except ThreeXUIError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"Failed to add replacement client: {exc}")
 
     if previous and target_xray is not None:
         old_result = await db.execute(
@@ -815,20 +846,22 @@ async def rotate_subscription_client(
             )
         )
         old_config = old_result.scalar_one_or_none()
+        old_address = old_config.config.get("api_address") if old_config else ""
         try:
             if not old_config:
-                raise XrayError("Previous node configuration not found")
-            old_xray = XrayClient(address=old_config.config.get("api_address"))
-            await old_xray.remove_vless_user(
-                inbound_tag=old_config.config.get("inbound_tag", "vless-reality"),
-                email=f"vpn-{previous.id}",
-            )
-        except XrayUserNotFound:
+                raise ThreeXUIError("Previous node configuration not found")
+            if str(old_address).startswith(("http://", "https://")):
+                old_xray = ThreeXUIClient(address=old_address)
+                await old_xray.remove_vless_user(
+                    inbound_tag=old_config.config.get("inbound_tag", "vless-reality"),
+                    email=f"vpn-{previous.id}",
+                )
+        except ThreeXUIClientNotFound:
             pass
-        except XrayError as exc:
+        except ThreeXUIError as exc:
             try:
                 await target_xray.remove_vless_user(target_tag, f"vpn-{new_client.id}")
-            except (XrayError, XrayUserNotFound):
+            except (ThreeXUIError, ThreeXUIClientNotFound):
                 pass
             await db.rollback()
             raise HTTPException(status_code=502, detail=f"Failed to revoke previous client: {exc}")

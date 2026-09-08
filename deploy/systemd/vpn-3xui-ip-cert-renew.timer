@@ -1,0 +1,11 @@
+[Unit]
+Description=Run 3x-ui IP certificate renew every 5 days
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5d
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

@@ -1,10 +1,12 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 from uuid import uuid4
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +17,9 @@ from app.api.routes.vpn import router as vpn_router
 from app.api.routes.subscriptions import router as subscriptions_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.payments import router as payments_router
-from app.api.routes.agent import router as agent_router
 from app.api.routes.client import router as client_router
+from app.api.routes.payment_methods import router as payment_methods_router
+from app.api.routes.web import router as web_router
 
 from app.db.session import get_db, AsyncSessionLocal
 
@@ -94,7 +97,7 @@ async def vpn_expiration_loop():
                 "VPN expiration job failed"
             )
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(settings.lifecycle_interval_seconds)
 
 
 @asynccontextmanager
@@ -128,6 +131,11 @@ app = FastAPI(
     version="0.2.0",
     lifespan=lifespan,
 )
+app.mount(
+    "/static",
+    StaticFiles(directory=Path(__file__).resolve().parent / "static"),
+    name="static",
+)
 
 
 @app.middleware("http")
@@ -144,13 +152,16 @@ async def request_context_and_audit(request: Request, call_next):
         return response
     finally:
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        logged_path = request.url.path
+        if logged_path.startswith("/cabinet/access/"):
+            logged_path = "/cabinet/access/[redacted]"
         logger.info(
             "http_request",
             extra={
                 "event": {
                     "event_type": "http_request",
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": logged_path,
                     "status_code": status_code,
                     "duration_ms": duration_ms,
                     "client_ip": request.client.host if request.client else None,
@@ -171,7 +182,7 @@ async def request_context_and_audit(request: Request, call_next):
                         actor_type=getattr(principal, "kind", "anonymous"),
                         actor_id=getattr(principal, "name", None),
                         resource_type="http",
-                        resource_id=request.url.path,
+                        resource_id=logged_path,
                         ip_address=request.client.host if request.client else None,
                         details={"status_code": status_code, "duration_ms": duration_ms},
                         sensitive_details={
@@ -190,8 +201,9 @@ app.include_router(subscriptions_router)
 app.include_router(vpn_router)
 app.include_router(admin_router)
 app.include_router(payments_router)
-app.include_router(agent_router)
 app.include_router(client_router)
+app.include_router(payment_methods_router)
+app.include_router(web_router)
 
 
 @app.get("/health")
@@ -212,12 +224,4 @@ async def db_health(
 
     return {
         "database": result.scalar_one() == 1
-    }
-
-
-@app.get("/")
-async def root():
-    return {
-        "service": "vpn-api",
-        "version": "0.2.0",
     }

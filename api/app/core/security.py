@@ -1,4 +1,6 @@
 import secrets
+import base64
+import hashlib
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
@@ -10,6 +12,30 @@ from fastapi.security import (
 )
 
 from app.core.config import settings
+
+
+PASSWORD_ITERATIONS = 600_000
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PASSWORD_ITERATIONS)
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${base64.urlsafe_b64encode(salt).decode()}${base64.urlsafe_b64encode(digest).decode()}"
+
+
+def verify_password(password: str, encoded: str | None) -> bool:
+    if not encoded:
+        return False
+    try:
+        algorithm, iterations, salt, expected = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), base64.urlsafe_b64decode(salt), int(iterations)
+        )
+        return secrets.compare_digest(actual, base64.urlsafe_b64decode(expected))
+    except (ValueError, TypeError):
+        return False
 
 
 basic_security = HTTPBasic(auto_error=False)

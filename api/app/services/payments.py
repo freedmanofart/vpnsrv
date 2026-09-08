@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 from typing import Callable
 
 from sqlalchemy import select
@@ -19,13 +20,17 @@ from app.services.provisioning import (
     ProvisioningInvalid,
     ProvisioningNotFound,
     ProvisioningResult,
-    ProvisioningXrayError,
+    ProvisioningThreeXUIError,
     commit_provisioning,
     provision_subscription,
+    renew_paid_subscription,
 )
-from app.services.xray import XrayClient
+from app.services.threexui import ThreeXUIClient
 from app.services.payment_providers import get_payment_provider
 from app.services.vpn_expiration import revoke_vpn_client
+
+
+logger = logging.getLogger(__name__)
 
 
 class PaymentError(Exception):
@@ -59,6 +64,22 @@ ALLOWED_TRANSITIONS = {
     "expired": set(),
     "refunded": set(),
 }
+
+
+def _merge_payment_details(current: dict | None, incoming: dict | None) -> dict:
+    merged = dict(current or {})
+    incoming = dict(incoming or {})
+    incoming_source = incoming.pop("source", None)
+    if incoming_source:
+        if "source" not in merged:
+            merged["source"] = incoming_source
+        elif merged["source"] != incoming_source:
+            merged["last_event_source"] = incoming_source
+    if "platega" in incoming and isinstance(incoming["platega"], dict):
+        existing_platega = merged.get("platega") if isinstance(merged.get("platega"), dict) else {}
+        merged["platega"] = {**existing_platega, **incoming.pop("platega")}
+    merged.update(incoming)
+    return merged
 
 
 async def _payment_for_duplicate_event(
@@ -144,7 +165,7 @@ async def process_payment_event(
     target_status: str,
     payload: dict,
     occurred_at: datetime | None = None,
-    xray_factory: Callable[..., XrayClient] = XrayClient,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> Payment:
     target_status = STATUS_ALIASES.get(target_status.lower(), target_status.lower())
     if target_status not in ALLOWED_TRANSITIONS:
@@ -215,29 +236,66 @@ async def process_payment_event(
             await db.rollback()
             raise PaymentInvalidTransition("Payment has no VPN node")
         try:
-            provisioning = await provision_subscription(
-                db,
-                user_id=payment.user_id,
-                plan_id=payment.plan_id,
-                node_id=payment.node_id,
-                client_type=payment.client_type,
-                flow=payment.flow,
-                fingerprint=payment.fingerprint,
-                xray_factory=xray_factory,
-            )
+            active = (
+                await db.execute(
+                    select(Subscription)
+                    .where(
+                        Subscription.user_id == payment.user_id,
+                        Subscription.status == "active",
+                        Subscription.expires_at > datetime.now(timezone.utc),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if active is not None:
+                plan = await db.get(Plan, payment.plan_id)
+                if plan is None:
+                    raise ProvisioningNotFound("Plan not found")
+                provisioning = await renew_paid_subscription(
+                    db,
+                    subscription=active,
+                    plan=plan,
+                    node_id=payment.node_id,
+                    client_type=payment.client_type,
+                    flow=payment.flow,
+                    fingerprint=payment.fingerprint,
+                    panel_factory=panel_factory,
+                )
+            else:
+                provisioning = await provision_subscription(
+                    db,
+                    user_id=payment.user_id,
+                    plan_id=payment.plan_id,
+                    node_id=payment.node_id,
+                    client_type=payment.client_type,
+                    flow=payment.flow,
+                    fingerprint=payment.fingerprint,
+                    panel_factory=panel_factory,
+                )
         except ProvisioningNotFound as exc:
             await db.rollback()
             raise PaymentNotFound(str(exc)) from exc
         except (ProvisioningConflict, ProvisioningInvalid) as exc:
             await db.rollback()
             raise PaymentInvalidTransition(str(exc)) from exc
-        except ProvisioningXrayError as exc:
+        except ProvisioningThreeXUIError as exc:
             await db.rollback()
             raise PaymentProvisioningError(str(exc)) from exc
         except ProvisioningError as exc:
             await db.rollback()
             raise PaymentProvisioningError(str(exc)) from exc
         payment.subscription_id = provisioning.subscription.id
+        logger.info(
+            "payment_subscription_provisioned",
+            extra={
+                "event_type": "payment_subscription_provisioned",
+                "payment_id": payment.id,
+                "provider": payment.provider,
+                "subscription_id": provisioning.subscription.id,
+                "client_id": provisioning.client.id,
+                "user_id": payment.user_id,
+            },
+        )
 
     if target_status == "refunded" and payment.subscription_id is not None:
         subscription = await db.get(Subscription, payment.subscription_id)
@@ -249,27 +307,22 @@ async def process_payment_event(
                 )
             )
             clients = client_result.scalars().all()
-            if settings.xray_management_mode == "agent":
-                for client in clients:
-                    client.status = "revoked"
-                    client.revoked_at = now
-            else:
-                for client in clients:
-                    revoked = await revoke_vpn_client(
-                        db,
-                        client,
-                        now,
-                        xray_factory=xray_factory,
+            for client in clients:
+                revoked = await revoke_vpn_client(
+                    db,
+                    client,
+                    now,
+                    panel_factory=panel_factory,
+                )
+                if not revoked:
+                    await db.rollback()
+                    raise PaymentProvisioningError(
+                        f"Could not revoke VPN client {client.id} for refund"
                     )
-                    if not revoked:
-                        await db.rollback()
-                        raise PaymentProvisioningError(
-                            f"Could not revoke VPN client {client.id} for refund"
-                        )
             subscription.status = "cancelled"
 
     payment.status = target_status
-    payment.details = {**(payment.details or {}), **payload.get("details", {})}
+    payment.details = _merge_payment_details(payment.details, payload.get("details", {}))
     if target_status == "paid":
         payment.paid_at = now
     elif target_status == "failed":

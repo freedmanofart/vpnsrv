@@ -11,8 +11,37 @@ class PaymentCreate(BaseModel):
     node_id: int
     client_type: str = "universal"
     flow: str = ""
-    fingerprint: str = "chrome"
+    fingerprint: str = "firefox"
     idempotency_key: str = Field(min_length=8, max_length=255)
+
+
+class ManualPaymentCreate(PaymentCreate):
+    method_code: str = Field(min_length=2, max_length=64)
+
+
+class TelegramStarsPaymentCreate(PaymentCreate):
+    stars_amount: int = Field(gt=0)
+
+
+class TelegramStarsPaid(BaseModel):
+    user_id: int
+    provider_payment_id: str = Field(min_length=1, max_length=255)
+    telegram_payment_charge_id: str = Field(min_length=1, max_length=255)
+    invoice_payload: str = Field(min_length=1, max_length=128)
+
+
+class PaymentStatusUpdate(BaseModel):
+    status: str = Field(pattern=r"^(paid|failed|cancelled|refunded)$")
+
+
+class PaymentReceiptCreate(BaseModel):
+    user_id: int
+    telegram_file_id: str = Field(min_length=5, max_length=1024)
+    telegram_file_unique_id: str | None = Field(default=None, max_length=255)
+    media_type: str = Field(pattern=r"^(photo|document)$")
+    filename: str = Field(min_length=1, max_length=255)
+    mime_type: str = Field(max_length=128)
+    data_base64: str = Field(min_length=4, max_length=12_000_000)
 
 
 class PaymentWebhook(BaseModel):

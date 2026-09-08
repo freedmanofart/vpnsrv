@@ -11,7 +11,7 @@ def effective_node_health(
     management_mode: str,
     now: datetime | None = None,
 ) -> str:
-    """Не считать ноду доступной после прекращения heartbeat от node-agent."""
+    """Normalize the last health result for legacy rows and current panel checks."""
     if management_mode != "agent" or health_status != "online":
         return health_status
     if last_seen_at is None:

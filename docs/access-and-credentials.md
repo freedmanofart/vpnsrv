@@ -1,93 +1,126 @@
-# Доступы, служебные страницы и переменные
+# Доступы и переменные
 
-Документ описывает, где находятся настройки и как безопасно проверить доступы.
-Фактические секреты (пароли, токены, Telegram BOT_TOKEN и private keys) здесь не
-хранятся и в Git не коммитятся.
+Секреты хранятся только в `/home/freedman/vpn-service/.env` с правами `0600`.
+Не помещайте в Git токены, пароли, закрытые base path, полный VLESS URI и
+Reality private key.
 
-## Где выполняются команды
+## VPN Admin
 
-* **Backend/control plane** — сервер с Git checkout, `.env`, Docker Compose,
-  PostgreSQL, API, bot, worker и web admin.
-* **VPN-нода** — удалённый сервер с Xray/node-agent или standalone-тестом.
-  Полный Git-репозиторий на ноде не нужен.
-* **Операторский компьютер** — SSH-туннели, импорт клиентских конфигураций и
-  просмотр служебных страниц.
+API опубликован только на loopback основного сервера:
 
-## Служебные страницы
-
-После запуска Compose и SSH-туннеля:
-
-| Страница | Адрес | Доступ |
+| Адрес | Назначение | Доступ |
 |---|---|---|
-| Web admin | `http://localhost:8000/admin` | HTTP Basic: `ADMIN_USERNAME` / `ADMIN_PASSWORD` |
-| Swagger | `http://localhost:8000/docs` | HTTP Basic или Bearer service token |
-| API health | `http://localhost:8000/health` | без авторизации |
-| DB health | `http://localhost:8000/db-health` | авторизация |
-| Grafana | `http://localhost:3000` | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` |
+| `http://127.0.0.1:8000/` | публичный лендинг | без авторизации |
+| `http://127.0.0.1:8000/admin` | админка | HTTP Basic |
+| `http://127.0.0.1:8000/docs` | Swagger UI | без авторизации в текущей реализации |
+| `http://127.0.0.1:8000/openapi.json` | схема OpenAPI | без авторизации в текущей реализации |
+| `http://127.0.0.1:8000/health` | API health | без авторизации |
+| `http://127.0.0.1:8000/db-health` | PostgreSQL health | авторизация |
 
-Для доступа с Mac используйте туннели:
+Для доступа с операторской машины откройте SSH-туннель:
 
 ```bash
-ssh -N -L 8000:127.0.0.1:8000 codex@192.168.10.60
-ssh -N -L 3000:127.0.0.1:3000 codex@192.168.10.60
+ssh -N -L 8000:127.0.0.1:8000 codex@<master-host>
 ```
 
-## Основные переменные
+Затем откройте `http://localhost:8000/admin`.
 
-| Группа | Переменные | Назначение |
-|---|---|---|
-| Админка | `ADMIN_USERNAME`, `ADMIN_PASSWORD` | HTTP Basic web admin/Swagger |
-| API | `SERVICE_API_TOKEN`, `API_URL` | внутренние запросы bot/worker |
-| Telegram | `BOT_TOKEN`, `TELEGRAM_CHANNEL_URL`, `SUPPORT_URL` | бот и ссылки |
-| Оплата | `YOOMONEY_PAYMENT_URL`, `YOOMONEY_*_URL`, `PAYMENT_WEBHOOK_SECRET` | ЮMoney, QR и webhook |
-| Xray | `XRAY_MANAGEMENT_MODE`, `XRAY_API_ADDRESS`, `XRAY_INBOUND_TAG` | режим управления |
-| Ноды | `CONTROL_PLANE_URL`, `NODE_AGENT_NODE_ID`, `NODE_AGENT_TOKEN` | node-agent |
-| Reality | `REALITY_SNI`, `REALITY_FINGERPRINT` | SNI/fingerprint новых нод |
-| Grafana | `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` | вход в Grafana |
+HTTP Basic передаёт логин и пароль в обратимо кодированном заголовке, поэтому
+за пределами SSH-туннеля или loopback используйте только HTTPS. Если OpenAPI не
+должен быть публичным, закройте `/docs`, `/redoc` и `/openapi.json` на reverse
+proxy: само FastAPI-приложение сейчас их не защищает.
 
-Полный список значений и безопасные defaults находится в `.env.example`.
+```dotenv
+ADMIN_USERNAME=<admin-login>
+ADMIN_PASSWORD=<long-random-password>
+```
 
-## Как смотреть значения
+## Master 3x-ui через SSH proxy
 
-На backend-сервере от root:
+3x-ui master слушает внутренний порт сервера и открывается оператору через
+local-forward. Это отдельный доступ от VPN Admin: VPN Admin управляет
+пользователями/платежами, а 3x-ui показывает фактические inbound, клиентов и
+ноды Xray.
+
+Откройте туннель:
+
+```bash
+ssh -L 2222:127.0.0.1:41026 root@freedomvpn
+```
+
+Затем в браузере:
+
+```text
+http://localhost:2222/<private-3x-ui-base-path>/panel/clients
+```
+
+Назначение proxy:
+
+- не публиковать панель 3x-ui в интернет;
+- подключаться к master так же, как к внутренним нодам через SSH;
+- безопасно смотреть клиентов, inbound и состояние Xray;
+- отделить операторский доступ к панели от публичного сайта
+  `https://freedomvpn.taile485ac.ts.net`.
+
+Туннель живёт только пока запущена SSH-команда. Если соединение закрыто,
+`localhost:2222` перестанет открываться.
+
+## PostgreSQL
+
+Используется один внешний контейнер `postgres` (`postgres:16-alpine`) и
+отдельная БД `vpn`. Compose приложения PostgreSQL не запускает.
+
+```dotenv
+POSTGRES_CONTAINER=postgres
+VPN_DATABASE_NAME=vpn
+DATABASE_URL=postgresql+asyncpg://<user>:<password>@host.docker.internal:6432/vpn
+```
+
+Не меняйте БД `mydb`: она принадлежит другому приложению в том же экземпляре.
+
+## Остальные переменные
+
+| Группа | Переменные |
+|---|---|
+| 3x-ui | `THREEXUI_API_TOKEN`, `THREEXUI_VERIFY_TLS` |
+| Telegram | `BOT_TOKEN`, `BOT_USERNAME`, `BOT_ADMIN_CHAT_ID`, `TELEGRAM_CHANNEL_URL`, `SUPPORT_URL`, `BOT_PLAN_CODES` |
+| API | `API_URL`, `SERVICE_API_TOKEN` |
+| Платежи | `PAYMENT_PROVIDER`, `PAYMENT_WEBHOOK_SECRET`, `YOOMONEY_*` |
+| Уведомления | `ADMIN_NOTIFICATION_EMAIL`, `BOT_ADMIN_CHAT_ID` |
+| Worker | `LIFECYCLE_INTERVAL_SECONDS`, `LIFECYCLE_ADVISORY_LOCK_KEY` |
+| Admin | `ADMIN_USERNAME`, `ADMIN_PASSWORD` |
+
+`SERVICE_API_TOKEN` является общим высокопривилегированным секретом: его
+держат API, бот и операторские скрипты. Он не идентифицирует конечного Telegram-
+пользователя и не имеет срока действия; при компрометации сгенерируйте новый и
+одновременно пересоздайте все использующие его контейнеры. Для этого используйте
+единую команду `configctl rotate --all-internal`; она также меняет
+`ADMIN_PASSWORD`, не печатает значения и перезапускает `api`, `bot` и `worker`.
+
+Redis, Grafana, Loki, Alloy, собственный Xray и node-agent удалены. Их
+переменные больше не используются.
+
+## Безопасное изменение
 
 ```bash
 cd /home/freedman/vpn-service
+python3 scripts/configctl.py validate
 python3 scripts/configctl.py get ADMIN_USERNAME
-python3 scripts/configctl.py get ADMIN_PASSWORD --show-secret
+python3 scripts/configctl.py rotate --all-internal --dry-run
+python3 scripts/configctl.py rotate --all-internal
 ```
 
-Обычный `get` маскирует секреты. Флаг `--show-secret` используйте только в
-защищённой SSH-сессии; пароль не копируйте в issue, чат или логи. Проверить
-наличие без раскрытия:
+Обычный `get` маскирует секреты. Ротация `PAYMENT_WEBHOOK_SECRET` требует
+отдельного обновления у платёжного провайдера: внесите выданное им значение
+через `configctl set`, затем выполните `configctl apply --services api worker`.
+См. полный порядок и границы автоматической ротации в
+[maintenance-scripts.md](maintenance-scripts.md#ротация-секретов).
+
+Проверка:
 
 ```bash
-sed -n -e 's/^ADMIN_USERNAME=.*/ADMIN_USERNAME=<set>/p' \
-       -e 's/^ADMIN_PASSWORD=.*/ADMIN_PASSWORD=<set>/p' .env
-stat -c '%a %U:%G %n' .env       # ожидается 600 root:root
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" http://127.0.0.1:8000/admin
+curl -fsS -u "$ADMIN_USERNAME:$ADMIN_PASSWORD" \
+  http://127.0.0.1:8000/db-health
 ```
-
-Для просмотра другой переменной замените имя в команде `configctl.py get`.
-После временного `export` выполните `unset VARIABLE`.
-
-## Изменение и применение
-
-```bash
-python3 scripts/configctl.py set ADMIN_USERNAME admin
-python3 scripts/configctl.py generate ADMIN_PASSWORD
-python3 scripts/configctl.py apply --services api bot worker
-```
-
-После изменения оплаты пересоздайте `bot`; после изменения Grafana передайте
-`--services grafana`. Не меняйте `.env` через `cat >` и не включайте `set -x`.
-
-## Проверка node-agent
-
-На VPN-ноде (read-only):
-
-```bash
-/root/check_node_agent.sh
-```
-
-Скрипт проверяет health endpoint и контейнер `vpn-node-agent`, но не печатает
-токен и не изменяет сетевые правила.

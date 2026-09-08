@@ -1,549 +1,449 @@
-# Обслуживающие скрипты
+# Обслуживание
 
-В каталоге `scripts/` находятся операции, которые запускаются оператором,
-таймером systemd или как сквозная проверка развёрнутого стенда. Этот документ
-описывает не только команды, но и их предусловия, побочные эффекты, ожидаемый
-результат и правила работы с секретами.
+## Состав production
 
-## Общие правила
+```text
+postgres
+vpn-api
+vpn-bot
+vpn-worker
+3x-ui master (systemd)
+```
 
-- Запускайте команды из корня репозитория, если не указано обратное.
-- Не включайте shell tracing (`set -x`): параметры содержат пароли и токены.
-- Файлы `.env`, дампы, архивы конфигурации, node-agent token и Reality private
-  key считаются секретами. Не прикладывайте их к issue и не отправляйте в чат.
-- E2E-скрипты изменяют данные. Используйте отдельного тестового пользователя и
-  только тестовый платёжный провайдер.
-- Сначала выполните `python3 scripts/configctl.py validate`, затем проверьте
-  состояние контейнеров командой `docker compose ps`.
+Redis и мониторинг отсутствуют. PostgreSQL — общий контейнер `postgres`, данные
+VPN находятся только в отдельной БД `vpn`.
+Актуальная схема таблиц, связи и безопасные команды диагностики описаны в
+[`database-reference.md`](database-reference.md).
 
-## `configctl.py`: управление `.env`
+## Проверка состояния
 
-Скрипт не требует сторонних Python-пакетов, сохраняет порядок строк и
-комментарии, записывает файл атомарно и устанавливает права `0600`. Секретные
-значения в `list` и `get` маскируются по умолчанию.
+```bash
+cd /home/freedman/vpn-service
+docker compose ps
+curl -fsS http://127.0.0.1:8000/health
+docker compose logs --since=10m api bot worker
+systemctl status x-ui vpn-threexui-proxy.service --no-pager
+```
+
+Worker в норме пишет `xray_errors=0`.
+
+## Единый операторский flow
+
+Основной путь обслуживания теперь собран в `/admin`:
+
+1. Откройте `https://freedomvpn.taile485ac.ts.net/admin`.
+2. В боковом меню выберите нужный раздел:
+   - `Пользователи` — доступ, перевыпуск ключа, ручная смена пароля;
+   - `Платежи` — чеки, подтверждение, ошибка, отмена, возврат;
+   - `Коды входа` — последние email-коды web-кабинета;
+   - `Документация` — основные markdown-файлы проекта;
+   - `Health` — дашборд состояния API, PostgreSQL, публичного URL, SMTP и 3x-ui;
+   - `Скрипты` — запуск безопасных проверок и команды host-only операций;
+   - `Инфраструктура` — сайт, кабинет, admin и master 3x-ui из конфигурации нод.
+3. Если проблема связана с письмами, сначала выполните проверку почтовой цепочки.
+4. Если проблема шире, запустите online-тесты ключевых API.
+5. Перед опасными изменениями или обновлением сделайте backup.
+
+Админка запускает только заранее разрешённые проверки, которые можно выполнить
+из API-контейнера: health-dashboard, public probes, SMTP-login и проверку 3x-ui
+через API нод. Операции уровня хоста — `docker compose`, `tailscale`,
+PostgreSQL backup/restore — остаются host-only: кнопка возвращает точную
+команду для SSH-сессии на сервере. Docker socket намеренно не проброшен в
+web-админку.
+
+## Health-dashboard
+
+Раздел `/admin` → `Health` показывает состояние:
+
+- API-контейнера;
+- PostgreSQL (`SELECT 1`);
+- публичного сайта через `PUBLIC_BASE_URL`;
+- web-кабинета `/cabinet`;
+- админки `/admin`;
+- `/plans` и `/payment-methods`;
+- SSL-сертификата master/site по `PUBLIC_BASE_URL`;
+- SSL-сертификатов VPN-нод: по HTTPS `vpn_node_configs.config.api_address`,
+  а если API-адрес внутренний HTTP — по публичному `vpn_nodes.ip_address:443`;
+- SMTP-логина для писем web-кабинета;
+- каждой активной VPN-ноды через её `api_address` master 3x-ui.
+
+Если 3x-ui открыт только через SSH proxy, адрес в разделе `Инфраструктура`
+помечается как внутренний/proxy SSH адрес. Для ноды важен именно `api_address`
+из `vpn_node_configs`: health проверяет этот VPN API и обновляет
+`health_status`, `latency_ms`, `last_seen_at` у ноды.
+
+`401` на `/admin` или защищённых API считается рабочим ответом: endpoint
+доступен снаружи, а авторизация корректно закрывает данные.
+
+## Быстрая проверка почты и переподнятие цепочки
+
+В `/admin` → `Скрипты` кнопка `Проверить почту и быстро переподнять api/bot`
+выполняет доступную из web-админки часть:
+
+- проверяет ответ API;
+- проверяет PostgreSQL;
+- гарантирует наличие `cabinet_login_codes.plain_code`;
+- проверяет SMTP-login;
+- показывает последние 10 кодов входа и их статус.
+
+Для фактического recreate `api`/`bot` кнопка возвращает готовую SSH-команду:
+контейнер не должен сам перезапускать Docker-хост.
+
+```bash
+cd /home/freedman/vpn-service
+scripts/check_mail_chain.sh
+```
+
+Скрипт делает:
+
+- `docker compose ps api bot worker`;
+- `curl http://127.0.0.1:8000/health`;
+- вывод SMTP-настроек внутри `api` без пароля;
+- проверку SMTP-login без отправки письма;
+- добавление `cabinet_login_codes.plain_code`, если колонка ещё не создана;
+- быстрый recreate `api` и `bot`;
+- вывод последних mail/cabinet/error логов.
+
+Для реального тестового письма явно передайте адрес:
+
+```bash
+scripts/check_mail_chain.sh user@example.com
+```
+
+Контрольное письмо содержит код `000000`. Не отправляйте его на чужие адреса
+без согласия владельца.
+
+## Online-тесты ключевых API
+
+```bash
+cd /home/freedman/vpn-service
+scripts/check_online_apis.sh
+```
+
+Проверяются:
+
+- `docker compose ps api bot worker`;
+- локальный `/health`;
+- публичный лендинг через `PUBLIC_BASE_URL`;
+- `/plans`;
+- `/payment-methods`;
+- `/admin/overview` с `ADMIN_USERNAME`/`ADMIN_PASSWORD`;
+- `tailscale funnel status`.
+
+Для проверки пользовательских endpoints передайте Telegram ID:
+
+```bash
+scripts/check_online_apis.sh 106123347
+```
+
+Тогда дополнительно проверяются:
+
+- `/users/{telegram_id}`;
+- `/users/{telegram_id}/status`.
+
+## Проверка реального трафика VPN-клиента
+
+Скрипт `scripts/check_vpn_traffic.py` читает клиента из БД `vpn`, находит его
+ноду и берёт live-счётчики из `clientStats` 3x-ui. Запускайте его внутри
+`api`-контейнера, чтобы использовались production `DATABASE_URL` и
+`THREEXUI_API_TOKEN`.
+
+Проверить конкретного клиента:
+
+```bash
+cd /home/freedman/vpn-service
+docker compose exec -T api python scripts/check_vpn_traffic.py vpn-80
+```
+
+Можно указывать ID без префикса и несколько клиентов сразу:
+
+```bash
+docker compose exec -T api python scripts/check_vpn_traffic.py 80 85
+```
+
+Показать последние выданные VPN-клиенты:
+
+```bash
+docker compose exec -T api python scripts/check_vpn_traffic.py --limit 20
+```
+
+JSON-вывод для копирования в диагностику:
+
+```bash
+docker compose exec -T api python scripts/check_vpn_traffic.py vpn-80 --json
+```
+
+В выводе:
+
+- `db_client_status` и `db_subscription_status` — состояние в нашей БД;
+- `panel_enabled` — включён ли клиент в 3x-ui;
+- `client_used`, `client_left`, `client_limit` — реальные счётчики клиента;
+- `last_online` — последнее подключение по данным 3x-ui;
+- `inbound_used` — общий трафик inbound на ноде.
+
+Если `inbound_used` растёт, а у клиента `client_used=0` и `last_online=—`,
+значит конкретный ключ не подключался или 3x-ui не атрибутирует трафик этому
+email. Если клиент есть в БД, но `panel: not found`, проверьте синхронизацию
+ноды, SSL/API 3x-ui и worker.
+
+## Обновление SSL-сертификатов master и 3x-ui нод
+
+В `/admin` → `Скрипты` есть:
+
+- `Обновить SSL-сертификат master/site` — возвращает host-only команду
+  `scripts/renew_master_cert.sh`;
+- `Обновить SSL-сертификат ноды #...` — отдельная кнопка для каждой активной
+  VPN-ноды из БД. Команда копирует node-скрипт на выбранную ноду, включает
+  timer и запускает renew.
+
+Для master используется Tailscale certificate:
+
+```bash
+cd /home/freedman/vpn-service
+sudo scripts/renew_master_cert.sh
+```
+
+Для child-ноды с short-lived Let's Encrypt certificate на IP используется
+node-скрипт `deploy/node/renew_3xui_ip_cert.sh`, который устанавливается на
+саму ноду в `/usr/local/sbin/renew_3xui_ip_cert.sh`. Timer
+`vpn-3xui-ip-cert-renew.timer` запускается каждые 5 дней, чтобы сертификат,
+живущий примерно 6 дней, не успевал истечь.
+
+Подробная установка, проверка и команды логов описаны в
+[`3x-ui-master.md`](3x-ui-master.md#ssl-на-ip-child-ноды).
+
+## Логи
+
+Быстрые команды:
+
+```bash
+docker compose logs --tail=200 api bot worker
+docker compose logs --since=20m api | grep -i -E 'smtp|email|mail|cabinet|503|error|failed|exception' || true
+journalctl -u vpn-tailscale-cert.service -n 80 --no-pager
+tailscale funnel status
+```
+
+При успешной отправке email-кода API пишет событие
+`cabinet_login_code_sent`. При ошибке отправки — `cabinet_login_code_email_failed`.
+Пароли в логи не пишутся.
+
+## Быстрое переподнятие Tailscale
+
+Если сайт открывается внутри tailnet, но не открывается снаружи, чаще всего
+нужно проверить связку `tailscaled` → Funnel → публичный HTTPS-адрес. Для этого
+добавлен host-only скрипт:
+
+```bash
+cd /home/freedman/vpn-service
+sudo scripts/recover_tailscale.sh
+```
+
+Скрипт использует домен `freedomvpn.taile485ac.ts.net` по умолчанию и делает:
+
+- перезапуск `tailscaled.service`;
+- вывод короткого `tailscale status`;
+- сброс старой публикации `tailscale funnel reset`;
+- запуск `vpn-tailscale-cert.service` или прямое обновление сертификата через
+  `scripts/renew_tailscale_cert.sh`;
+- перезапуск `vpn-tailscale-funnel.service` или прямой запуск Funnel на
+  `http://127.0.0.1:8000`;
+- вывод `tailscale funnel status`;
+- проверку локального `/health`;
+- проверку публичного `https://freedomvpn.taile485ac.ts.net/`.
+
+Переопределяемые переменные:
+
+```bash
+TAILSCALE_CERT_DOMAIN=freedomvpn.taile485ac.ts.net
+PUBLIC_BASE_URL=https://freedomvpn.taile485ac.ts.net
+TAILSCALE_FUNNEL_TARGET=http://127.0.0.1:8000
+TAILSCALE_CERT_SERVICE=vpn-tailscale-cert.service
+TAILSCALE_FUNNEL_SERVICE=vpn-tailscale-funnel.service
+```
+
+В `/admin` → `Скрипты` кнопка `Быстро переподнять Tailscale, Funnel и сертификат`
+возвращает готовую SSH-команду. Она не выполняется внутри API-контейнера, потому
+что контейнер не должен управлять host-level `systemd`, `tailscaled` и Funnel.
+
+## Конфигурация
 
 ```bash
 python3 scripts/configctl.py validate
 python3 scripts/configctl.py list
-python3 scripts/configctl.py get XRAY_MANAGEMENT_MODE
-python3 scripts/configctl.py set LOG_LEVEL INFO
-python3 scripts/configctl.py generate SERVICE_API_TOKEN
-python3 scripts/configctl.py apply --services api bot worker
+python3 scripts/configctl.py get THREEXUI_API_TOKEN
+python3 scripts/configctl.py set THREEXUI_VERIFY_TLS true
+python3 scripts/configctl.py apply --services api worker
 ```
 
-`generate` доступен только для переменных, для которых задана безопасная длина.
-После ротации токена одновременно обновите всех потребителей. Флаги
-`--show-secret` и `--show-secrets` предназначены только для контролируемой
-диагностики: их вывод попадёт в историю терминала или журнал CI.
+`.env` должен иметь права `0600`. Не используйте `set -x`.
 
-`apply` валидирует конфигурацию и пересоздаёт перечисленные Compose-сервисы.
-По умолчанию это `api`, `bot` и `worker`; Grafana и node-agent нужно указывать
-явно. Альтернативный файл выбирается до подкоманды:
+### Ротация секретов
+
+`configctl rotate` — единая операция для переменных, которыми владеет сам
+проект. Она генерирует новые значения в памяти, записывает `.env` атомарно,
+проверяет итоговую конфигурацию и пересоздаёт все сервисы, которым нужны новые
+значения. В вывод секреты не попадают. Если `docker compose up` не удался,
+скрипт восстанавливает прежний `.env` и пытается вернуть прежнюю конфигурацию
+тех же сервисов.
+
+Сначала всегда можно посмотреть план без изменений:
 
 ```bash
-python3 scripts/configctl.py --env-file /secure/path/staging.env validate
+python3 scripts/configctl.py rotate --all-internal --dry-run
 ```
 
-## `backup.sh`: резервное копирование
-
-Скрипт создаёт два артефакта:
-
-1. `vpn-db-<UTC>.dump` — PostgreSQL custom-format dump;
-2. `vpn-config-<UTC>.tar.gz` — `.env`, Compose, Xray и observability config.
-
-По умолчанию исходный проект находится в `/home/freedman/vpn-service`, а
-результат — в `/var/backups/vpn-service`. Пути можно переопределить:
+Обычная внутренняя ротация меняет `SERVICE_API_TOKEN` и `ADMIN_PASSWORD` и
+пересоздаёт `api`, `bot` и `worker` одной командой:
 
 ```bash
-sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/mnt/secure/vpn \
+python3 scripts/configctl.py rotate --all-internal
+```
+
+После неё операторам нужно заново аутентифицироваться в Basic Auth, а внешние
+скрипты и интеграции с `SERVICE_API_TOKEN` должны получить новое значение из
+защищённого хранилища. Не выводите это значение через `get --show-secret` в
+терминал с записью истории.
+
+Можно выбрать конкретный внутренний секрет:
+
+```bash
+python3 scripts/configctl.py rotate ADMIN_PASSWORD
+```
+
+`PAYMENT_WEBHOOK_SECRET` передаётся стороннему платёжному провайдеру, поэтому
+он намеренно исключён из локальной генерации: сервер не может сам сообщить
+провайдеру новое значение. Сначала перевыпустите или смените секрет в панели
+провайдера, затем внесите выданное значение и пересоздайте нужные сервисы:
+
+```bash
+python3 scripts/configctl.py set PAYMENT_WEBHOOK_SECRET '<provider-issued-secret>'
+python3 scripts/configctl.py apply --services api worker
+```
+
+Токены `BOT_TOKEN`,
+`THREEXUI_API_TOKEN`, SMTP-пароль и `DATABASE_URL` не генерируются локально:
+их надо перевыпустить у Telegram, 3x-ui, почтового провайдера или PostgreSQL,
+внести через `configctl set` и выполнить `configctl apply` для затронутых
+сервисов. В частности, произвольный `THREEXUI_API_TOKEN` не будет принят
+мастер-узлом 3x-ui.
+
+## Backup
+
+В `/admin` → `Скрипты` есть активные кнопки:
+
+- `Создать PostgreSQL backup сейчас` — запускает `pg_dump -Fc` из
+  API-контейнера и кладёт dump в `/var/backups/vpn-service`;
+- `Проверить последний PostgreSQL backup` — запускает `pg_restore --list`;
+- `Показать последние PostgreSQL backup-файлы` — выводит список dump-файлов.
+
+Для этого API-контейнер имеет `postgresql-client` и volume
+`/var/backups/vpn-service:/var/backups/vpn-service`.
+
+`backup.sh` создаёт два вида backup за один запуск:
+
+- custom-format dump БД `vpn` из контейнера `postgres`;
+- защищённый архив `.env` и `docker-compose.yml`.
+
+```bash
+sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/var/backups/vpn-service \
   scripts/backup.sh
 ```
 
-Нужны запущенный контейнер `vpn-postgres`, доступ к Docker и читаемые файлы
-конфигурации. После создания дамп проверяется через `pg_restore --list`.
-Артефакты старше 14 дней удаляются только по ожидаемым шаблонам имён.
-Успешный stdout содержит пути `database=...` и `config=...`.
-
-Архив на том же диске не защищает от потери узла. После локальной проверки
-копируйте оба файла в зашифрованное внешнее хранилище и контролируйте успешность
-копирования отдельно. Скрипт не шифрует и не загружает архивы самостоятельно.
-
-## `verify_backup.sh`: проверка восстановления
-
-Проверка создаёт временную БД в существующем контейнере, полностью разворачивает
-дамп, выводит количества пользователей, подписок и клиентов, затем удаляет БД:
+Проверка dump во временной БД того же PostgreSQL:
 
 ```bash
 sudo scripts/verify_backup.sh \
-  /var/backups/vpn-service/vpn-db-20260825T120000Z.dump
+  /var/backups/vpn-service/vpn-db-<timestamp>.dump
 ```
 
-Команда не трогает рабочую БД. Тем не менее ей требуются свободное место размером
-не меньше восстановленной базы и право создавать/удалять базы. Успех
-`pg_restore --list` в `backup.sh` проверяет структуру архива, а этот скрипт —
-реальное восстановление; для регулярного disaster-recovery нужны обе проверки.
+Backup не включает БД 3x-ui. Её резервируйте отдельно.
 
-Для production-восстановления остановите пишущие сервисы, создайте чистую БД,
-восстановите дамп совместимой версией `pg_restore`, верните конфигурационный
-архив с правами `0600`, выполните миграции и только затем запустите API/worker.
-Сначала репетируйте процедуру на изолированном узле.
-
-## `deploy_vpn_node.sh`: развёртывание VPN-ноды
-
-Скрипт идемпотентно регистрирует ноду в control plane, сохраняет или создаёт
-Reality material, выпускает scoped token, загружает Quadlet units, собирает
-node-agent и проверяет Xray. Он также устанавливает SSH hardening snippets;
-поэтому перед первым запуском должен существовать отдельный проверенный SSH-сеанс.
-
-Обязательные параметры:
+Контроль наличия свежих backup-файлов:
 
 ```bash
-export NODE_SSH=root@203.0.113.10
-export NODE_NAME=do-fra1-01
-export NODE_PROVIDER=digitalocean
-export NODE_REGION=de                 # только us, nl или de
-export NODE_IP=203.0.113.10
-export CONTROL_PLANE_URL=https://control.example.com
-export ADMIN_API_URL=http://127.0.0.1:8000
-export ADMIN_USERNAME=admin
-export ADMIN_PASSWORD='...'
-scripts/deploy_vpn_node.sh
+ls -lh /var/backups/vpn-service | tail -20
 ```
 
-На управляющей машине нужны `ssh`, `scp`, `curl` и `python3`; на Fedora-ноде —
-`podman`, `systemd`, `sshd` и `openssl`. API должен быть доступен оператору, а
-`CONTROL_PLANE_URL` — самой ноде. `NODE_HOSTNAME`, `NODE_CAPACITY`, `REALITY_SNI`
-и digest `XRAY_IMAGE` имеют значения по умолчанию.
+Перед обновлением, ручными правками БД, сменой нод или массовой правкой
+пользователей сначала выполните `scripts/backup.sh`, затем
+`scripts/verify_backup.sh` для созданного dump.
 
-Повторный запуск сохраняет private key и node token. Если публичный Reality key
-или short ID не совпадает с записью control plane, выполнение останавливается:
-автоматическая перезапись сделала бы выданные URI недействительными. После успеха
-проверьте node health в админке и журналы:
+## Восстановление PostgreSQL
+
+Восстановление выполняется только с SSH-хоста, потому что оно останавливает
+сервисы и меняет рабочую БД. Скрипт имеет предохранитель и без явного
+подтверждения ничего не делает.
+
+1. Найдите нужный dump:
 
 ```bash
-ssh "$NODE_SSH" 'systemctl status vpn-xray vpn-node-agent'
-ssh "$NODE_SSH" 'journalctl -u vpn-xray -u vpn-node-agent --since=-10m'
+ls -lh /var/backups/vpn-service/vpn-db-*.dump
 ```
 
-## Сквозные проверки
-
-Эти команды предназначены для уже запущенного тестового окружения и печатают
-только безопасные идентификаторы/состояния.
-
-## Безопасное включение firewall на публичной ноде
-
-`harden_vpn_node_firewall.sh` создаёт для внешнего интерфейса отдельную зону
-firewalld с политикой `DROP` и оставляет публичным Xray TCP/443. По умолчанию SSH
-доступен с любого адреса, но скрипт сначала проверяет эффективную конфигурацию
-sshd: разрешены ключи, а парольная и keyboard-interactive аутентификация
-отключены. Таким образом, смена динамического адреса оператора не блокирует вход,
-а войти без зарегистрированного ключа нельзя. Скрипт нельзя применять через
-SSH без страховки: **до** смены зоны он запускает автоматический rollback через
-systemd. Подтвердить результат можно только из новой SSH-сессии; подтверждение
-из исходной сессии намеренно отклоняется.
-
-Сначала скопируйте скрипт. Эта команда ничего не меняет на ноде:
+2. Проверьте его во временной БД:
 
 ```bash
-NODE_SSH=root@203.0.113.10 ./scripts/copy_vpn_node_firewall.sh
+cd /home/freedman/vpn-service
+sudo scripts/verify_backup.sh /var/backups/vpn-service/vpn-db-<timestamp>.dump
 ```
 
-Подключитесь к ноде по ключу и оставьте терминал открытым. Для динамического
-адреса не задавайте `SSH_ALLOW_CIDRS`:
+3. Запустите восстановление:
 
 ```bash
-/root/harden_vpn_node_firewall.sh --apply
+cd /home/freedman/vpn-service
+sudo RESTORE_CONFIRM=I_UNDERSTAND \
+  scripts/restore_postgres.sh /var/backups/vpn-service/vpn-db-<timestamp>.dump
 ```
 
-Если нужен standalone Xray на 8443, перечислите оба порта:
+Скрипт:
+
+- останавливает `api`, `bot`, `worker`;
+- запрещает новые подключения к текущей БД `vpn`;
+- завершает активные сессии;
+- переименовывает старую БД в `vpn_before_restore_<UTC timestamp>`;
+- создаёт чистую БД `vpn`;
+- восстанавливает dump через `pg_restore`;
+- запускает `api`, `bot`, `worker`.
+
+Если после восстановления нужно откатиться, старая БД не удаляется сразу:
+она остаётся под именем `vpn_before_restore_<UTC timestamp>`.
+
+## Обновление
 
 ```bash
-XRAY_TCP_PORTS=443,8443 \
-  /root/harden_vpn_node_firewall.sh --apply
+cd /home/freedman/vpn-service
+git pull --ff-only origin newnode
+python3 scripts/configctl.py validate
+docker compose build api bot worker
+docker compose run --rm api alembic upgrade head
+docker compose up -d --remove-orphans
+curl -fsS http://127.0.0.1:8000/health
 ```
 
-Не закрывая первый терминал, откройте второй, заново войдите по SSH и только в
-нём подтвердите правила:
+Перед удалением контейнера или БД всегда создавайте backup. Не удаляйте `mydb`
+из общего PostgreSQL: VPN использует только БД `vpn`.
+
+## Тесты
 
 ```bash
-/root/harden_vpn_node_firewall.sh --confirm
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-Без подтверждения прежняя зона автоматически восстановится через 5 минут.
-Немедленный откат из первой сессии: `harden_vpn_node_firewall.sh --rollback`.
-Проверка состояния: `harden_vpn_node_firewall.sh --status`. Cloud Firewall
-провайдера настраивается отдельно: он также должен пропускать SSH-порт и нужные
-порты VPN-ноды.
+Unit-тесты не обращаются к production 3x-ui. Скрипты `e2e_*` создают реальные
+данные и запускаются только в отдельном тестовом окружении.
 
-Если позднее появится постоянная административная сеть, SSH можно ограничить ею
-явно: `SSH_ACCESS_MODE=cidr SSH_ALLOW_CIDRS=198.51.100.0/24`. Firewall не умеет
-определять SSH-ключ до установления TCP-соединения, поэтому интернет-сканеры всё
-ещё могут появляться в sshd journal, но пройти аутентификацию без ключа не смогут.
+## Восстановление старого Telegram-чека
 
-Повторный `--apply` нельзя запускать, пока предыдущая операция ожидает
-подтверждения: сначала войдите во второй SSH-сеанс и выполните `--confirm` либо
-выполните `--rollback`. Обновлённый rollback восстанавливает каждый сохранённый
-порт отдельным аргументом firewalld и понимает state-файлы первой версии, где
-порты могли храниться одной строкой (`22/tcp 443/tcp`). Ошибка
-`INVALID_PORT: bad port` в этой ситуации не означает, что SSH уже закрыт; она
-означает, что старая версия не смогла разобрать собственный snapshot.
-
-Если активная зона уже имеет `DROP` и в точности запрошенные SSH/Xray-порты,
-повторный `--apply` теперь является безопасной no-op операцией: скрипт не меняет
-firewalld, не перепривязывает интерфейс NetworkManager и не создаёт новый timer.
-При реальном изменении набора портов rollback по-прежнему обязателен.
-
-### Не проверяйте VLESS с помощью `ping`
-
-VLESS передаёт TCP и UDP, но не является IP-туннелем для ICMP. Поэтому после
-включения TUN в AmneziaVPN обычный `ping 1.1.1.1` или `ping example.com` может
-перестать отвечать даже при полностью рабочем доступе к интернету. Этот результат
-нельзя считать признаком неисправности ноды или outbound Xray.
-
-На клиентском устройстве проверяйте реальный поддерживаемый трафик:
+Если в старой записи платежа сохранился только Telegram `file_id`, одноразовый
+скрипт скачивает файл через Bot API и загружает бинарный чек в VPN API:
 
 ```bash
-curl --fail --show-error --max-time 15 https://api.ipify.org
-curl --fail --show-error --max-time 15 https://example.com/ -o /dev/null
+docker compose exec bot python -m app.backfill_receipt \
+  PAYMENT_ID USER_ID TELEGRAM_FILE_ID TELEGRAM_FILE_UNIQUE_ID photo
 ```
 
-Первый ответ должен содержать публичный адрес VPN-ноды, а второй завершиться с
-кодом `0`. Если обе команды не проходят, сравните время попытки с access log ноды:
-
-```bash
-journalctl -u vpn-xray.service --since '-5 minutes' --no-pager
-tail -n 100 /var/log/vpn-xray/access.log
-```
-
-Запись `accepted` подтверждает, что клиентский трафик дошёл до VLESS inbound.
-Отсутствие записи при установленной в приложении сессии указывает на клиентскую
-маршрутизацию/TUN, а ошибка outbound в journal — на серверную проблему. Такой
-тест разделяет установление Reality-сессии и фактический HTTPS egress; heartbeat
-node-agent проверяет только управление Xray и не заменяет эту проверку.
-
-### Полностью автономная проверка ноды
-
-#### Настройка SNI и fingerprint
-
-Для standalone Xray значения можно менять при каждом создании нового профиля:
-
-```bash
-REALITY_SNI=www.microsoft.com REALITY_FINGERPRINT=firefox \
-  PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 \
-  /root/run_standalone_xray_node.sh
-```
-
-Поддерживаемые fingerprint: `chrome`, `firefox`, `safari`, `randomized`. В
-админке при создании VLESS Reality укажите SNI и fingerprint в форме конфигурации
-ноды; значения сохраняются в JSON-конфигурации ноды и используются при выдаче
-новых URI. Смена параметров не изменяет уже выданные ссылки — для них создайте
-нового клиента или выполните ротацию.
-
-Для ноды, работающей с backend, задавайте параметры при bootstrap (на backend):
-
-```bash
-REALITY_SNI=www.microsoft.com REALITY_FINGERPRINT=firefox \
-  ./scripts/deploy_vpn_node.sh
-```
-
-`deploy_vpn_node.sh` сохраняет `sni` и `fp` в конфигурации VLESS-ноды control
-plane; бот использует их для всех новых профилей. Уже выданные URI не меняются.
-
-Чтобы исключить API, БД, node-agent и генерацию ключа ботом, скопируйте на ноду
-`scripts/run_standalone_xray_node.sh` и запустите его от root. Скрипт создаёт
-новые Reality-ключи, один статический UUID и максимально простой профиль
-VLESS Reality TCP без Vision/flow. Он сначала проверяет конфигурацию встроенным
-парсером Xray и только затем запускает отдельный Podman-контейнер. Конфигурация
-перед проверкой получает владельца UID `65532`, от которого работает закреплённый
-образ Xray; это необходимо помимо SELinux relabel `:Z` на Fedora.
-После запуска server-контейнера скрипт поднимает второй Xray как эталонный клиент,
-подключает его к Reality inbound через loopback SOCKS и сам выполняет HTTPS-запрос.
-Сообщение `Built-in Xray client egress succeeded` доказывает, что UUID, Reality
-keys, VLESS и outbound работают без AmneziaVPN. После этого повторяющиеся
-`failed to read client hello` от внешнего IP означают, что внешний клиент дошёл до
-порта, но не отправил ожидаемый Reality TLS ClientHello: проверяйте импорт URI и
-поддержку Reality в выбранной версии клиента, а не интернет на ноде.
-
-При этом `access.log` останется пустым: туда попадают принятые VLESS-запросы, а не
-соединения, отклонённые ещё до VLESS-аутентификации. Предупреждение `Listening on
-non-443 ports` для диагностического `8443` также не является ошибкой запуска.
-Сводку по server log, access log и встроенной egress-проверке можно получить так:
-
-```bash
-/root/run_standalone_xray_node.sh --diagnose
-```
-
-
-Если одновременно присутствуют `accepted ... [vless-reality >> direct]` от
-внешнего IP и `failed to read client hello`/`handshake did not complete`, это не
-противоречие: первые строки доказывают рабочие Reality, VLESS и outbound, а вторые
-относятся к отдельным TCP-пробам или незавершённым попыткам клиента. При наличии
-принятых TCP **и** UDP-запросов с адреса клиента дальнейшую потерю системного
-интернета следует искать в клиентских TUN, DNS, firewall и policy routing.
-
-`run_standalone_xray_node.sh` запускается **на VPN-ноде**. Из checkout проекта на
-управляющем сервере или рабочем компьютере его можно безопасно скопировать так:
-
-```bash
-NODE_SSH=root@203.0.113.10 ./scripts/copy_standalone_xray_node.sh
-ssh root@203.0.113.10
-PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 /root/run_standalone_xray_node.sh
-```
-
-### Независимая проверка AmneziaWG
-
-Чтобы полностью исключить Xray/Reality и сравнить другой transport, добавлен
-`run_standalone_amneziawg_node.sh`. Он не интегрирован с backend. Полный комплект
-безопасно копируется helper-скриптом (старое имя сохранено как alias).
-
-**Поддерживается только контейнерный запуск.** AmneziaWG не устанавливается и не
-запускается как host-служба: runner всегда вызывает `awg`/`awg-quick` внутри
-образа Podman `amneziavpn/amneziawg-go`. Не пытайтесь запускать `awg-quick` с
-хоста или устанавливать `amneziawg-dkms`/`amneziawg-tools`; такие пакеты не
-нужны и не являются поддерживаемым вариантом этой проверки.
-
-#### Пошаговая установка на сервер
-
-1. Выполняйте команды копирования **на сервере с checkout/backend**. На VPN-ноде
-   Git и репозиторий не требуются: helper передаёт только два готовых скрипта по
-   SSH. Проверьте доступ к ноде под root (или пользователем с разрешённым
-   `sudo`) и перейдите в checkout проекта:
-
-   ```bash
-   cd /path/to/vpnsrv                 # сервер с backend и Git
-   ssh root@203.0.113.10 'hostname && id'
-   ```
-
-2. Скопируйте оба скрипта на ноду. Единственная обязательная переменная —
-   `NODE_SSH`; helper ничего не устанавливает и не запускает:
-
-   ```bash
-   export NODE_SSH=root@203.0.113.10
-   ./scripts/copy_amneziawg_node_test.sh
-   ```
-
-   Для другого каталога назначения задайте абсолютные пути без пробелов:
-
-   ```bash
-   NODE_SSH=root@203.0.113.10 \
-   RUNNER_REMOTE_PATH=/usr/local/sbin/run-awg-test \
-   INSTALLER_REMOTE_PATH=/usr/local/sbin/install-awg-test \
-   ./scripts/copy_amneziawg_node_test.sh
-   ```
-
-3. Подключитесь к серверу и установите Podman-образ от root. Флаг подтверждения
-   обязателен и защищает от случайной установки:
-
-   ```bash
-   ssh root@203.0.113.10
-   INSTALL_AWG=1 /root/install_amneziawg_node_dependencies.sh
-   ```
-
-4. Выполните preflight без изменения firewall:
-
-   ```bash
-   /root/run_standalone_amneziawg_node.sh --check
-   ```
-
-   Если на ноде остались артефакты предыдущего запуска, перед повторной
-   установкой можно выполнить `--remove`. Команда идемпотентна: при отсутствии
-   интерфейса или контейнера она всё равно завершится успешно и сохранит ключи в
-   каталоге state. Повторный `podman pull` также может вывести `skipped: already
-   exists` — это нормальный результат, означающий, что слой образа уже загружен.
-
-5. Запустите тест, предварительно разрешив выбранный UDP-порт в cloud firewall:
-
-   ```bash
-   PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 \
-     /root/run_standalone_amneziawg_node.sh
-   ```
-
-   Выйдите из SSH-сессии ноды и скопируйте напечатанный `client.conf` **с
-   backend/операторского компьютера**, где находится подходящий SSH private key:
-
-   ```bash
-   exit
-   scp root@203.0.113.10:/etc/vpn-standalone-awg/client.conf \
-     ./amneziawg-test.conf
-   ```
-
-   Не запускайте эту команду на самой ноде: подключение ноды к собственному
-   публичному адресу потребует отсутствующий там private key и завершится
-   `Permission denied (publickey)`. Импортируйте полученный файл в AmneziaVPN и
-   проверьте трафик командами ниже. После завершения удалите интерфейс,
-   firewall-правила и контейнер через `--remove`.
-
-   В выводе `awg-quick` на узлах без kernel-модуля может появиться `Error:
-   Unknown device type`, после чего `amneziawg-go` переключается на userspace.
-   Runner принудительно разрешает этот режим через контейнерную переменную
-   `WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1`: без неё `amneziawg-go`
-   может ошибочно решить, что подходящий kernel-модуль уже доступен, завершиться
-   после информационного баннера и оставить интерфейс без работающего backend.
-   Результат такого состояния — входящие UDP-пакеты в `tcpdump`, но отсутствие
-   handshake и нулевой RX в `--status`. Предупреждения
-   firewalld `ALREADY_ENABLED`/`ZONE_ALREADY_SET` также безвредны при повторном
-   запуске; runner проверяет состояние правил перед добавлением.
-
-```bash
-NODE_SSH=root@203.0.113.10 ./scripts/copy_amneziawg_node_test.sh
-ssh root@203.0.113.10
-INSTALL_AWG=1 /root/install_amneziawg_node_dependencies.sh
-/root/run_standalone_amneziawg_node.sh --check
-```
-
-Установщик требует явного `INSTALL_AWG=1`. Он устанавливает Podman (через `dnf`, если команда отсутствует), загружает образ `docker.io/amneziavpn/amneziawg-go:latest` и сохраняет его reference в `/etc/vpn-amneziawg-image`. DKMS, `kernel-devel`, COPR и host-пакеты `awg` не используются, поэтому тест работает и на ядрах без DKMS. Образ можно переопределить переменной `AWG_IMAGE`. Copy-helper только копирует runner и установщик с правами `0700`: он ничего не устанавливает и не запускает.
-
-Runner запускает privileged-контейнер Podman с host networking; команды `awg` и `awg-quick` выполняются внутри него, а конфигурация монтируется в `/config`. Скрипт создаёт отдельный интерфейс `awg-test`, одну пару ключей клиента, PSK, runtime-правила firewalld и готовый конфиг для импорта в AmneziaVPN:
-
-```bash
-PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 \
-  /root/run_standalone_amneziawg_node.sh
-```
-
-После установки безопасно убедитесь, что Podman-образ доступен и локальный
-firewalld готов, до запуска интерфейса:
-
-```text
-AmneziaWG container image pulled: docker.io/amneziavpn/amneziawg-go:latest
-No DKMS, kernel-devel, or host awg packages are installed.
-Preflight passed: firewalld is active; WAN interface is eth0; no firewall change is pending.
-```
-
-Эти сообщения являются ожидаемым результатом установщика и `--check`: проверка
-не создаёт контейнер, интерфейс или правила firewall. Если WAN-интерфейс не
-называется `eth0`, задайте `WAN_INTERFACE` до запуска runner. Фактический запуск
-создаёт контейнер и оставляет его работающим для последующих `--status`; удаление выполняется явной командой `--remove`.
-
-Разрешите `51820/udp` также в cloud firewall. Затем скопируйте напечатанный
-`/etc/vpn-standalone-awg/client.conf` на клиент и импортируйте как AmneziaWG.
-Проверяйте VPN именно с клиентского устройства: после импорта профиля выполните
-HTTPS-запросы и одновременно наблюдайте UDP-трафик на ноде. Обычный `ping` не
-является проверкой VPN и может не работать даже при исправном туннеле:
-
-```bash
-# на клиенте, при активном профиле AmneziaWG
-curl --fail --show-error --max-time 15 https://api.ipify.org
-curl --fail --show-error --max-time 15 https://example.com/ -o /dev/null
-# параллельно на ноде
-tcpdump -ni any udp port 51820
-```
-
-Первый запрос должен вернуть публичный адрес ноды, второй — завершиться с кодом
-`0`, а в `tcpdump` должны быть UDP-пакеты клиента. Если пакетов нет, проверяйте
-cloud/firewalld; если пакеты есть, но внешний адрес не меняется, проверяйте
-импорт конфигурации, TUN-режим и маршрутизацию клиента. `--status` требует
-запущенного runner-контейнера; для нового измерения запустите runner заново.
-
-После теста удалите runtime-интерфейс и правила командой `--remove`. Никакая
-криптографическая библиотека или VPN-протокол не может гарантировать работу с
-вероятностью 100% во всех ОС и сетях; эта проверка нужна именно для независимого
-сравнения UDP AmneziaWG с TCP Reality.
-
-Если в выводе снова появляются `ALREADY_ENABLED` или `--status` сообщает
-`no container with name ...`, на ноде запущена старая копия runner. Файлы в
-checkout обновляются только на backend-сервере и автоматически на ноду не
-попадают. Повторите копирование с backend, затем удалите остатки и запустите
-тест заново:
-
-```bash
-# выполнять на сервере с Git/checkout
-NODE_SSH=root@203.0.113.10 ./scripts/copy_amneziawg_node_test.sh
-ssh root@203.0.113.10 '/root/run_standalone_amneziawg_node.sh --remove'
-ssh root@203.0.113.10 'PUBLIC_HOST=203.0.113.10 AWG_PORT=51820 /root/run_standalone_amneziawg_node.sh'
-ssh root@203.0.113.10 '/root/run_standalone_amneziawg_node.sh --status'
-```
-
-Сообщение `tcpdump ... 0 packets captured` означает только, что за время
-наблюдения клиент не отправлял UDP-трафик; сначала активируйте импортированный
-профиль AmneziaVPN и повторите захват.
-
-Путь назначения можно заменить через `REMOTE_PATH`. Скрипт копирования ничего не
-запускает на ноде и не меняет firewall; он только создаёт каталог, копирует файл и
-устанавливает права `0700`.
-
-Production `443/tcp` скрипт самостоятельно не останавливает. Для проверки на 443
-сначала остановите production Xray в отдельном SSH-сеансе либо задайте открытый в
-firewall альтернативный порт:
-
-```bash
-PUBLIC_HOST=203.0.113.10 XRAY_PORT=8443 ./scripts/run_standalone_xray_node.sh
-```
-
-Импортируйте напечатанный URI как **новый** профиль клиента. Если автономный URI
-также не открывает `https://api.ipify.org` и в `access.log` нет запросов, причина
-находится до Xray outbound: firewall/маршрут до ноды либо TUN клиента. Если есть
-`accepted`, смотрите `podman logs -f vpn-xray-standalone`. После проверки удалите
-контейнер командой `./scripts/run_standalone_xray_node.sh --remove`.
-
-### Покупка и Xray — `e2e_bot_xray.py`
-
-Запускается внутри bot-контейнера, где импортируется приложение. Нужны активный
-тариф, активная нода `us`/`nl`/`de`, доступный Xray и mock auto-confirm.
-
-```bash
-docker compose exec -T -e E2E_TELEGRAM_ID=900000001 \
-  -e E2E_EXPECT_NEW=true bot python - < scripts/e2e_bot_xray.py
-```
-
-Образ бота содержит приложение, но не каталог `scripts`, поэтому команда выше
-передаёт проверку в Python через stdin; `-T` отключает псевдотерминал.
-
-Для второго запуска с тем же Telegram ID задайте `E2E_EXPECT_NEW=false`: число
-пользователей Xray не должно измениться благодаря idempotency key.
-
-### Device token — `e2e_device_profile.py`
-
-Проверяет activation code, профиль, sensitive-debug session, немедленный отзыв
-старого токена после refresh и административный revoke устройства. Нужны
-`E2E_TELEGRAM_ID`, `SERVICE_API_TOKEN`, `ADMIN_USERNAME`, `ADMIN_PASSWORD` и при
-необходимости `E2E_API_URL`. Пользователь должен иметь активный VPN-доступ.
-
-### Webhook — `e2e_payment_webhook.py`
-
-Нужен ID отдельного тестового платежа, который допускает переход в `refunded`:
-
-```bash
-E2E_PAYMENT_ID=123 E2E_API_URL=http://127.0.0.1:8000 \
-SERVICE_API_TOKEN='...' PAYMENT_WEBHOOK_SECRET='...' \
-python3 scripts/e2e_payment_webhook.py
-```
-
-Скрипт отправляет корректный refund дважды с одним event ID и затем событие с
-неверной подписью и новым ID. Ожидаются сохранённый `refunded`, идемпотентный
-повтор и HTTP 401 для подделки.
-
-## Sensitive debug
-
-`capture_sensitive_debug.py` намеренно собирает действующие секреты. Используйте
-его только после открытия ограниченной debug session в админке:
-
-```bash
-sudo scripts/capture_sensitive_debug.py SESSION_ID --project "$PWD"
-```
-
-Утилита не пишет секреты на диск и выводит только количества, но отправляет их в
-audit/Loki через API. Закройте session сразу после диагностики, ограничьте доступ
-к журналам и ротируйте раскрытые значения согласно инцидент-процедуре. Ошибка
-посередине не закрывает session автоматически — это обязанность оператора.
-
-## Диагностика ошибок
-
-- `configuration is invalid` — выполните `configctl validate` и исправьте все
-  строки `ERROR` до `apply`.
-- `vpn-postgres` не найден — проверьте `docker compose ps postgres` и имя
-  Compose-проекта.
-- deploy остановлен на Reality mismatch — не обходите проверку; сравните запись
-  control plane, `/etc/vpn-node/xray-config.json` и ранее выданные URI.
-- E2E получает 401 — проверьте тип токена, URL окружения и синхронизацию `.env`
-  после ротации.
-- E2E не видит активный тариф/ноду — создайте тестовые данные через admin/API и
-  дождитесь успешного node-agent status перед повтором.
-
-### Проверка node-agent
-
-Для read-only проверки на VPN-ноде используйте `scripts/check_node_agent.sh` (скопируйте его helper-скриптом или отдельно):
-
-```bash
-AGENT_URL=http://127.0.0.1:10086 /root/check_node_agent.sh
-```
-Скрипт проверяет HTTP health endpoint и наличие контейнера `vpn-node-agent`; он не меняет конфигурацию.
+Последний аргумент — `photo` для изображения или `document` для PDF. Скрипту
+нужны штатные `BOT_TOKEN`, `API_URL` и `SERVICE_API_TOKEN` контейнера. Перед
+запуском сверьте `PAYMENT_ID` и `USER_ID`: API отклоняет чек, если платёж
+принадлежит другому пользователю. Повторный запуск перезаписывает сохранённый
+binary-чек этой записи платежа.

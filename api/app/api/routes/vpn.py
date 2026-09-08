@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from urllib.parse import urlencode
 from uuid import uuid4
 import time
 
@@ -14,7 +13,7 @@ from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.session import get_db
 
-from app.services.xray import XrayClient, XrayError, XrayUserNotFound
+from app.services.threexui import ThreeXUIClient, ThreeXUIError, ThreeXUIClientNotFound
 from app.core.security import require_api_access
 from app.core.config import settings
 
@@ -32,6 +31,8 @@ from app.schemas.vpn import (
 )
 from app.services.reconciliation import reconcile_node
 from app.services.node_health import effective_node_health, node_accepts_clients
+from app.services.country import country_from_ip
+from app.services.vless import build_vless_url
 
 router = APIRouter(
     prefix="/vpn",
@@ -53,6 +54,7 @@ async def get_nodes(
 ):
     result = await db.execute(
         select(VPNNode)
+        .where(VPNNode.status != "disabled")
         .order_by(VPNNode.id)
     )
 
@@ -63,7 +65,7 @@ async def get_nodes(
                 "health_status": effective_node_health(
                     node.health_status,
                     node.last_seen_at,
-                    management_mode=settings.xray_management_mode,
+                    management_mode="threexui",
                 )
             }
         )
@@ -91,10 +93,14 @@ async def create_node(
             detail="VPN node already exists",
         )
 
+    try:
+        region = data.region or await country_from_ip(data.ip_address)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     node = VPNNode(
         name=data.name,
         provider=data.provider,
-        region=data.region,
+        region=region,
         hostname=data.hostname,
         ip_address=data.ip_address,
         capacity=data.capacity,
@@ -116,6 +122,11 @@ async def update_node(node_id: int, data: VPNNodeUpdate, db: AsyncSession = Depe
     values = data.model_dump(exclude_unset=True)
     if "status" in values and values["status"] not in {"active", "offline", "maintenance", "draining", "disabled"}:
         raise HTTPException(status_code=400, detail="Unsupported node status")
+    if "ip_address" in values and "region" not in values:
+        try:
+            values["region"] = await country_from_ip(values["ip_address"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     for key, value in values.items():
         setattr(node, key, value)
     await db.commit()
@@ -128,18 +139,6 @@ async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
     node = await db.get(VPNNode, node_id)
     if not node:
         raise HTTPException(status_code=404, detail="VPN node not found")
-    if settings.xray_management_mode == "agent":
-        health_status = effective_node_health(
-            node.health_status,
-            node.last_seen_at,
-            management_mode=settings.xray_management_mode,
-        )
-        return VPNNodeHealthResponse(
-            node_id=node_id,
-            status=health_status,
-            xray_users=None,
-            error=None if health_status == "online" else "Node-agent heartbeat is missing or stale",
-        )
     result = await db.execute(select(VPNNodeConfig).where(VPNNodeConfig.node_id == node_id, VPNNodeConfig.protocol == "vless"))
     config = result.scalar_one_or_none()
     if not config:
@@ -152,16 +151,16 @@ async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
         node.health_status = "offline"
         node.last_seen_at = datetime.now(timezone.utc)
         await db.commit()
-        return VPNNodeHealthResponse(node_id=node_id, status="offline", error="Xray management address not configured")
+        return VPNNodeHealthResponse(node_id=node_id, status="offline", error="3x-ui master URL not configured")
     started = time.perf_counter()
     try:
-        users = await XrayClient(address=api_address).get_users(config.config.get("inbound_tag", "vless-reality"))
+        users = await ThreeXUIClient(address=api_address).get_users(config.config.get("inbound_tag", "vless-reality"))
         node.health_status = "online"
         node.latency_ms = round((time.perf_counter() - started) * 1000, 2)
         node.last_seen_at = datetime.now(timezone.utc)
         await db.commit()
         return VPNNodeHealthResponse(node_id=node_id, status="online", xray_users=len(users))
-    except XrayError as exc:
+    except ThreeXUIError as exc:
         node.health_status = "offline"
         node.latency_ms = round((time.perf_counter() - started) * 1000, 2)
         node.last_seen_at = datetime.now(timezone.utc)
@@ -174,16 +173,11 @@ async def check_node_health(node_id: int, db: AsyncSession = Depends(get_db)):
     response_model=VPNNodeReconciliationResponse,
 )
 async def reconcile_vpn_node(node_id: int, db: AsyncSession = Depends(get_db)):
-    if settings.xray_management_mode == "agent":
-        raise HTTPException(
-            status_code=409,
-            detail="Reconciliation is performed automatically by the node-agent",
-        )
     try:
         report = await reconcile_node(db, node_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except XrayError as exc:
+    except ThreeXUIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return VPNNodeReconciliationResponse(**report.__dict__)
 
@@ -230,6 +224,21 @@ async def create_node_config(
     if protocol == "vless":
         security = data.config.get("security", "none")
 
+        api_address = str(data.config.get("api_address", ""))
+        if api_address.startswith(("http://", "https://")):
+            try:
+                inbound_id = int(data.config.get("inbound_tag", ""))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="3x-ui configuration requires numeric inbound_tag",
+                ) from exc
+            if inbound_id <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="3x-ui inbound ID must be positive",
+                )
+
         if security == "reality":
             required_fields = [
                 "api_address",
@@ -272,10 +281,10 @@ async def create_node_config(
     existing = result.scalar_one_or_none()
 
     if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{protocol} configuration already exists for this node",
-        )
+        existing.config = data.config
+        await db.commit()
+        await db.refresh(existing)
+        return existing
 
     config = VPNNodeConfig(
         node_id=node.id,
@@ -401,6 +410,10 @@ async def create_vpn_client(
             detail="Subscription has expired",
         )
 
+    plan = await db.get(Plan, subscription.plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
     # -----------------------------------------------------
     # VPN Node
     # -----------------------------------------------------
@@ -419,7 +432,7 @@ async def create_vpn_client(
             detail="VPN node not found",
         )
 
-    if not node_accepts_clients(node, management_mode=settings.xray_management_mode):
+    if not node_accepts_clients(node, management_mode="threexui"):
         raise HTTPException(
             status_code=503,
             detail="VPN node is not available",
@@ -480,6 +493,8 @@ async def create_vpn_client(
         client_type="universal",
         flow="",
         fingerprint="chrome",
+        max_connections=plan.max_connections,
+        traffic_limit_gb=plan.traffic_limit_gb,
         client_uuid=str(uuid4()),
         status="active",
         expires_at=subscription.expires_at,
@@ -490,12 +505,11 @@ async def create_vpn_client(
     await db.flush()
 
     # -----------------------------------------------------
-    # Add client to Xray only on the single-node test stand. In agent mode the
-    # committed database row is the desired state consumed by the node agent.
+    # Add the client to the inbound managed by the 3x-ui master.
     # -----------------------------------------------------
 
-    if protocol == "vless" and settings.xray_management_mode == "direct":
-        xray = XrayClient(address=node_config.config.get("api_address"))
+    if protocol == "vless":
+        xray = ThreeXUIClient(address=node_config.config.get("api_address"))
 
         try:
             await xray.add_vless_user(
@@ -506,12 +520,16 @@ async def create_vpn_client(
                 client_uuid=client.client_uuid,
                 email=f"vpn-{client.id}",
                 flow=client.flow,
+                expiry_time=int(subscription.expires_at.timestamp() * 1000),
+                telegram_id=user.telegram_id,
+                limit_ip=client.max_connections,
+                total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
             )
-        except XrayError:
+        except ThreeXUIError:
             await db.rollback()
             raise HTTPException(
                 status_code=502,
-                detail="Failed to add VPN client to Xray",
+                detail="Failed to add VPN client to 3x-ui",
             )
 
     await db.commit()
@@ -604,15 +622,15 @@ async def revoke_vpn_client(
     if not node_config.config.get("api_address"):
         raise HTTPException(
             status_code=503,
-            detail="VPN node has no Xray management address",
+            detail="VPN node has no 3x-ui master URL",
         )
 
     # -----------------------------------------------------
-    # Remove client from Xray
+    # Remove client through the 3x-ui master.
     # -----------------------------------------------------
 
-    if client.protocol == "vless" and settings.xray_management_mode == "direct":
-        xray = XrayClient(address=node_config.config.get("api_address"))
+    if client.protocol == "vless":
+        xray = ThreeXUIClient(address=node_config.config.get("api_address"))
 
         try:
             await xray.remove_vless_user(
@@ -622,12 +640,12 @@ async def revoke_vpn_client(
                 ),
                 email=f"vpn-{client.id}",
             )
-        except XrayUserNotFound:
+        except ThreeXUIClientNotFound:
             pass
-        except XrayError:
+        except ThreeXUIError:
             raise HTTPException(
                 status_code=502,
-                detail="Failed to remove VPN client from Xray",
+                detail="Failed to remove VPN client from 3x-ui",
             )
 
     # -----------------------------------------------------
@@ -737,40 +755,19 @@ async def get_vpn_client_config(
 
     port = config.get("port", 443)
 
-    params = {
-        "type": config.get("type", "tcp"),
-        "security": config.get("security", "none"),
-        "encryption": "none",
-    }
-
-    for key in (
-        "sni",
-        "pbk",
-        "sid",
-        "alpn",
-        "path",
-        "serviceName",
-    ):
-        value = config.get(key)
-
-        if value is not None:
-            params[key] = value
-
-    params["fp"] = client.fingerprint or config.get("fp", "chrome")
+    link_config = dict(config)
+    link_config["fp"] = config.get("fp") or client.fingerprint or "firefox"
     if client.flow:
-        params["flow"] = client.flow
-
-    # HTTP Host для транспорта, если он отдельно задан
-    if config.get("host_header"):
-        params["host"] = config["host_header"]
-
-    query = urlencode(params)
+        link_config["flow"] = client.flow
 
     vless_url = client.config_override or (
-        f"vless://{client.client_uuid}"
-        f"@{host}:{port}"
-        f"?{query}"
-        f"#VPN-{client.id}"
+        build_vless_url(
+            uuid=client.client_uuid,
+            host=host,
+            port=port,
+            config=link_config,
+            remark=f"vpn-{client.id}",
+        )
     )
 
     return VPNClientConfigResponse(

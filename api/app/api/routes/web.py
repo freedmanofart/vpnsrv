@@ -1,0 +1,967 @@
+from __future__ import annotations
+
+import html
+import hmac
+import logging
+import re
+import secrets
+import base64
+import binascii
+import json
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.routes.client import build_client_uri
+from app.core.config import settings
+from app.core.cabinet_links import telegram_cabinet_link_token, verify_telegram_cabinet_link_token
+from app.db.models.cabinet_access import CabinetAccessToken
+from app.db.models.cabinet_login_code import CabinetLoginCode
+from app.db.models.audit import AccessGrant, ActivationCode, ClientDevice
+from app.db.models.plan import Plan
+from app.db.models.plan_package import PlanPackage
+from app.db.models.payment import Payment
+from app.db.models.payment_method import PaymentMethod
+from app.db.models.subscription import Subscription
+from app.db.models.user import User
+from app.db.models.vpn_client import VPNClient
+from app.db.models.vpn_node import VPNNode
+from app.db.models.vpn_node_config import VPNNodeConfig
+from app.db.session import get_db
+from app.services.email import EmailDeliveryError, send_cabinet_code
+from app.services.payments import PaymentError, create_payment
+from app.services.platega import PlategaError, create_platega_payment, is_platega_method
+from app.services.notifications import notify_payment_created, notify_payment_receipt
+from app.schemas.payment import PaymentCreate
+from app.core.security import hash_password, require_api_access, verify_password
+from app.services.audit import write_audit
+from app.services.threexui import ThreeXUIClient, ThreeXUIError
+
+
+router = APIRouter(tags=["Web cabinet"])
+logger = logging.getLogger(__name__)
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+COOKIE = "freedom_cabinet"
+MANUAL_PAYMENT_METHODS = {"sber_qr", "tbank_qr", "phone_transfer"}
+PAYMENT_RETURN_TOKEN_TTL_SECONDS = 60 * 60
+
+
+def _normalize_email(value: str) -> str:
+    cleaned = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", value or "")
+    return cleaned.strip("<>.,;:()[]{}\"'«»").lower()
+
+
+class Registration(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    plan_id: int | None = None
+    telegram_link_token: str | None = None
+
+
+class PasswordLogin(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class EmailCodeLogin(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class PasswordSet(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
+class TelegramCabinetLink(BaseModel):
+    telegram_id: int
+    email: str = Field(min_length=5, max_length=320)
+
+
+class WebOrder(BaseModel):
+    plan_id: int
+    node_id: int | None = None
+    method_code: str = Field(min_length=2, max_length=64)
+
+
+class WebReceipt(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    mime_type: str = Field(pattern=r"^image/(png|jpeg|webp)$|^application/pdf$")
+    data_base64: str = Field(min_length=4, max_length=12_000_000)
+
+
+def _digest(token: str) -> str:
+    return sha256(token.encode()).hexdigest()
+
+
+def _headers() -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    }
+
+
+def _temporary_registration_button() -> str:
+    if not settings.cabinet_allow_temporary_registration:
+        return ""
+    return '<form method="post" action="/web/temporary-register" class="actions"><button class="button primary" type="submit">Зарегистрироваться без email</button></form><p class="muted">Временный вход действует только в этом браузере. Добавьте email позже, чтобы не потерять доступ.</p>'
+
+
+async def _plans(db: AsyncSession) -> list[Plan]:
+    result = await db.execute(
+        select(Plan).where(Plan.is_active.is_(True), Plan.is_public.is_(True)).order_by(Plan.package_id, Plan.duration_days, Plan.price)
+    )
+    return list(result.scalars())
+
+
+async def _plan_packages(db: AsyncSession) -> list[PlanPackage]:
+    result = await db.execute(
+        select(PlanPackage).where(PlanPackage.is_active.is_(True)).order_by(PlanPackage.sort_order, PlanPackage.id)
+    )
+    return list(result.scalars())
+
+
+TIER_META = {
+    "lite": ("Лайт", "5 подключений", "250 ГБ трафика"),
+    "standard": ("Стандарт", "15 подключений", "650 ГБ трафика"),
+    "ultra": ("Ультра", "30 подключений", "3 ТБ трафика"),
+}
+
+
+def _tier(plan: Plan) -> str | None:
+    prefix = plan.code.partition("_")[0].lower()
+    if prefix in TIER_META:
+        return prefix
+    return next(
+        (key for key, (_, connections, _) in TIER_META.items() if connections.startswith(str(plan.max_connections))),
+        None,
+    )
+
+
+def _clean_plan_name(name: str) -> str:
+    return re.sub(r"[^\w\s%()\-]+", "", name, flags=re.UNICODE).strip()
+
+
+def _clean_payment_method_name(name: str) -> str:
+    return re.sub(r"^[^\wА-Яа-яЁё]+", "", name, flags=re.UNICODE).strip()
+
+
+def _format_gb(value: float) -> str:
+    if value <= 0:
+        return "0 ГБ"
+    if float(value).is_integer():
+        return f"{value:.0f} ГБ"
+    return f"{value:.1f} ГБ"
+
+
+def _plan_cards(plans: list[Plan]) -> str:
+    cards = []
+    for plan in plans:
+        tier = _tier(plan)
+        if tier is None:
+            continue
+        title, connections, traffic_label = TIER_META[tier]
+        devices = "без ограничений" if not plan.max_connections else str(plan.max_connections)
+        traffic = "без ограничений" if not plan.traffic_limit_gb else f"{plan.traffic_limit_gb} ГБ"
+        cards.append(
+            f'<article class="plan {"featured" if tier == "standard" else ""}"><span class="pill">{title}</span>'
+            f'<p class="plan-copy">{connections} · {traffic_label}</p>'
+            f'<div class="price">{plan.price:g} ₽ <small>/ месяц</small></div>'
+            f'<ul><li>До {devices} одновременных подключений</li><li>{traffic} трафика</li><li>Все поддерживаемые устройства</li></ul>'
+            f'<button class="button primary" data-plan="{plan.id}">Выбрать</button></article>'
+        )
+    return "".join(cards) or '<p class="muted">Публичные тарифы временно недоступны.</p>'
+
+
+def _package_code(plan: Plan, packages_by_id: dict[int, PlanPackage] | None = None) -> str | None:
+    if packages_by_id and plan.package_id and plan.package_id in packages_by_id:
+        return packages_by_id[plan.package_id].code
+    return _tier(plan)
+
+
+def _package_label(plan: Plan, packages_by_id: dict[int, PlanPackage] | None = None) -> str:
+    if packages_by_id and plan.package_id and plan.package_id in packages_by_id:
+        return packages_by_id[plan.package_id].name
+    tier = _tier(plan)
+    return TIER_META[tier][0] if tier else "Тариф"
+
+
+def _tier_selector(plans: list[Plan], packages: list[PlanPackage] | None = None) -> str:
+    packages_by_id = {item.id: item for item in packages or []}
+    groups: dict[str, list[Plan]] = {key: [] for key in TIER_META}
+    package_meta: dict[str, tuple[str, str, str]] = dict(TIER_META)
+    for package in packages or []:
+        package_meta[package.code] = (
+            package.name,
+            "без ограничений" if not package.max_connections else f"{package.max_connections} подключений",
+            "без ограничений" if not package.traffic_limit_gb else f"{package.traffic_limit_gb} ГБ трафика",
+        )
+        groups.setdefault(package.code, [])
+    for plan in plans:
+        tier = _package_code(plan, packages_by_id)
+        if tier:
+            groups[tier].append(plan)
+    cards = []
+    for tier, tier_plans in groups.items():
+        if not tier_plans:
+            continue
+        title, connections, traffic = package_meta[tier]
+        ordered_plans = sorted(
+            tier_plans,
+            key=lambda item: (abs(item.duration_days - 30), item.duration_days),
+        )
+        buttons = "".join(
+            f'<button type="button" class="duration{" duration-extra" if index else ""}" data-order-plan="{plan.id}">'
+            f'{html.escape(_clean_plan_name(plan.name))} · {plan.price:g} ₽</button>'
+            for index, plan in enumerate(ordered_plans)
+        )
+        cards.append(
+            f'<article class="tier-group" data-tier="{tier}"><h3>{title}</h3>'
+            f'<p class="muted">{connections} · {traffic}</p>'
+            f'<div class="duration-buttons">{buttons}</div></article>'
+        )
+    return "".join(cards)
+
+
+def _shell(content: str, *, title: str = "Freedom VPN") -> str:
+    return f"""<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"referrer\" content=\"no-referrer\"><title>{html.escape(title)}</title><style>
+:root{{--navy:#061541;--blue:#175cff;--green:#18a870;--ink:#111827;--muted:#667085;--line:#e6eaf2;--bg:#f5f8ff;--pink:#e85faf;--purple:#a94df1}}*{{box-sizing:border-box}}body{{margin:0;font:15px/1.55 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink);background:white}}a{{color:inherit;text-decoration:none}}.wrap{{max-width:1180px;margin:auto;padding:0 44px}}nav{{height:76px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #eef1f6}}.brand{{font-size:20px;font-weight:800;letter-spacing:-.04em;display:flex;align-items:center;gap:11px}}.brand img{{width:50px;height:50px;object-fit:contain}}.brand i{{font-style:normal;color:var(--blue)}}.links{{display:flex;gap:30px;align-items:center;color:#687386}}.button{{border:1px solid var(--line);border-radius:999px;padding:12px 19px;background:#fff;font:inherit;font-weight:700;cursor:pointer;transition:.2s}}.button:hover{{transform:translateY(-1px);box-shadow:0 8px 22px #173f9d18}}.primary{{background:var(--blue);border-color:var(--blue);color:#fff}}.hero{{background:var(--navy);color:white;border-radius:0 0 30px 30px;padding:75px 0 82px;overflow:hidden;position:relative}}.hero .button:not(.primary){{color:var(--ink)}}.hero:after{{content:"";position:absolute;width:430px;height:430px;border-radius:50%;right:-150px;top:-160px;background:#12389c55}}.hero-grid{{display:grid;grid-template-columns:1.02fr .98fr;gap:42px;align-items:center;position:relative;z-index:1}}h1{{font-size:clamp(42px,5.3vw,70px);line-height:.99;letter-spacing:-.065em;margin:15px 0 23px}}.lead{{font-size:17px;color:#b9c5df;max-width:575px}}.eyebrow{{color:#54e4c0;text-transform:uppercase;letter-spacing:.19em;font-size:11px;font-weight:800}}.preview,.panel{{background:#fff;color:var(--ink);border-radius:22px;padding:24px;border:1px solid var(--line)}}.preview{{padding:14px;box-shadow:0 25px 70px #244aa218}}.preview-logo{{width:100%;max-height:300px;object-fit:cover;border-radius:18px;margin-bottom:18px}}.key{{background:#f5f7fb;border:1px solid var(--line);padding:16px;border-radius:13px;overflow:hidden}}.key code{{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}}.stat{{border:1px solid var(--line);border-radius:13px;padding:13px}}.muted{{color:var(--muted)}}section{{padding:80px 0}}h2{{font-size:42px;letter-spacing:-.055em;line-height:1.04;margin:0 0 12px}}.plans{{display:grid;grid-template-columns:repeat(3,1fr);gap:13px;margin-top:30px}}.plan{{border:1px solid var(--line);border-radius:20px;padding:23px;background:white}}.plan.featured{{border:2px solid var(--blue);padding:22px;box-shadow:0 14px 30px #175cff14}}.plan .price{{font-size:30px;font-weight:800;margin-top:20px;letter-spacing:-.05em}}.plan .price small{{font-size:12px;color:#8993a5;letter-spacing:0}}.pill{{font-weight:800;font-size:18px}}.plan-copy{{color:#8a94a4;font-size:12px}}.plan ul{{padding-left:19px;color:#536078;min-height:105px}}.plan .button{{width:100%}}.alt{{background:var(--bg)}}.features{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}}.feature{{background:white;border:1px solid var(--line);border-radius:18px;padding:22px}}footer{{padding:36px 0;color:var(--muted)}}.modal{{display:none;position:fixed;inset:0;background:#0c173e99;z-index:5;align-items:center;justify-content:center;padding:20px}}.modal.open{{display:flex}}.modal-card{{background:white;border-radius:20px;width:min(480px,100%);padding:25px}}input,select{{width:100%;padding:13px;border:1px solid #d9dfeb;border-radius:11px;font:inherit;margin:7px 0}}.error{{color:#c83232}}.success{{color:var(--green)}}.cabinet{{padding:48px 0 80px}}.cabinet-grid{{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}}.panel{{box-shadow:none}}.status{{color:var(--green);font-weight:800}}.status.inactive{{color:#dc2626}}.actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}}.login-page{{min-height:calc(100vh - 77px);background:var(--bg);padding:48px 18px 80px}}.login-card{{max-width:620px;margin:0 auto;background:#fff;border:1px solid var(--line);border-radius:22px;padding:32px;box-shadow:none}}.login-card h1{{font-size:42px;color:var(--ink);margin:0 0 8px}}.login-card .muted{{color:var(--muted);font-size:16px}}.login-card label{{display:block;color:var(--ink);font-size:15px;font-weight:700;margin-top:26px}}.login-card input{{background:#fff;border:1px solid #d9dfeb;border-radius:11px;padding:13px;color:var(--ink);font-size:15px;margin-top:7px}}.login-tabs{{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:999px;padding:4px;margin-top:20px;background:#f7f9fd}}.login-tabs span{{padding:10px 14px;text-align:center;color:var(--muted);font-size:15px;font-weight:700;border-radius:999px}}.login-tabs .active{{background:var(--blue);color:#fff}}.gradient{{background:var(--blue);border-color:var(--blue);color:#fff;width:100%;font-size:15px;padding:13px 19px;margin-top:14px}}.tier-groups{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:18px 0}}.tier-group{{border:1px solid var(--line);border-radius:18px;padding:18px}}.tier-group.selected{{border:2px solid var(--blue);padding:17px}}.duration-buttons{{display:flex;flex-wrap:wrap;gap:7px;margin-top:13px}}.duration{{border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 10px;cursor:pointer}}.duration-extra{{display:none}}.tier-group.expanded .duration-extra{{display:inline-block}}.duration.selected{{background:var(--blue);color:#fff;border-color:var(--blue)}}@media(max-width:760px){{.wrap{{padding:0 24px}}.links a:not(.button){{display:none}}.hero-grid,.plans,.features,.cabinet-grid,.tier-groups{{grid-template-columns:1fr}}.hero{{padding:54px 0 60px}}.stats{{grid-template-columns:1fr}}.login-card{{padding:24px}}.login-card h1{{font-size:34px}}}}
+.site-top{{max-width:1180px;margin:0 auto;overflow:hidden;background:#fff}}.site-top .f-wrap{{padding:0 44px}}.f-nav{{height:76px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #eef1f6;position:relative;z-index:4}}.f-brand{{display:flex;align-items:center;gap:11px;font-size:20px;font-weight:800;letter-spacing:-.04em}}.f-brand i,.f-preview-brand i{{font-style:normal;color:var(--blue)}}.f-brand .f-mark{{display:block;width:50px;height:50px;object-fit:contain}}.f-links{{display:flex;align-items:center;gap:34px;color:#687386;font-size:14px;font-weight:550}}.f-links a:hover{{color:var(--blue)}}.f-actions{{display:flex;gap:10px;align-items:center}}.f-btn{{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--ink);font-weight:650;padding:12px 17px;cursor:pointer;transition:.2s transform,.2s box-shadow}}.f-btn:hover{{transform:translateY(-1px);box-shadow:0 8px 22px #173f9d18}}.f-btn.primary{{border-color:var(--blue);background:var(--blue);color:#fff;padding-left:21px;padding-right:21px}}.f-hero{{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(360px,.98fr);gap:42px;align-items:center;padding:75px 44px 82px;background:var(--navy);border-radius:0 0 30px 30px;position:relative;overflow:hidden}}.f-hero:before{{content:"";position:absolute;width:430px;height:430px;border-radius:50%;right:-150px;top:-160px;background:#12389c;opacity:.22;filter:blur(2px)}}.f-hero>div{{position:relative;z-index:1}}.f-kicker{{display:flex;align-items:center;gap:11px;color:#54e4c0;font-size:11px;letter-spacing:.19em;text-transform:uppercase;font-weight:800;margin-bottom:22px}}.f-kicker i{{display:block;width:28px;height:2px;background:var(--blue);border-radius:99px}}.f-hero h1{{color:#fff;font-size:clamp(42px,5.3vw,70px);line-height:.99;letter-spacing:-.065em;margin:0 0 23px;font-weight:780;max-width:570px}}.f-lead{{font-size:17px;line-height:1.6;color:#b9c5df;max-width:575px;margin:0 0 30px}}.f-hero-actions{{display:flex;gap:11px;flex-wrap:wrap}}.f-trust{{display:flex;gap:20px;flex-wrap:wrap;margin-top:28px;color:#c0cae0;font-size:12px}}.f-trust span{{display:flex;align-items:center;gap:7px}}.f-dot{{width:7px;height:7px;border-radius:50%;background:var(--green)}}.f-visual{{position:relative;min-width:0;align-self:center}}.f-preview{{border:1px solid #e2e7f0;background:#f9fbff;border-radius:27px;padding:14px;box-shadow:0 25px 70px #244aa218}}.f-preview-inner{{border-radius:18px;background:#fff;border:1px solid #edf0f5;padding:24px}}.f-preview-top{{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px}}.f-preview-brand{{display:flex;align-items:center;gap:9px;font-weight:800}}.f-preview-brand .f-mark{{width:38px;height:38px;object-fit:contain}}.f-status{{color:#159567;background:#e6f8f0;border-radius:999px;padding:7px 10px;font-size:11px;font-weight:750;display:flex;align-items:center;gap:6px}}.f-status b{{width:6px;height:6px;background:#16a570;border-radius:50%}}.f-key{{background:#f5f7fb;border:1px solid #e7ebf2;border-radius:13px;padding:16px;margin-bottom:12px}}.f-label{{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#9aa4b4;font-weight:800}}.f-code{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#44506a;font-size:11px;line-height:1.6;margin-top:8px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}}.f-statrow{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.f-stat{{border:1px solid #e7ebf2;border-radius:13px;padding:15px}}.f-stat .f-label{{display:block;margin-bottom:7px}}.f-stat strong{{font-size:15px}}.f-devices{{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}}.f-device{{padding:8px 11px;border:1px solid #e5eaf2;border-radius:999px;color:#697487;font-size:11px}}.modal{{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;align-items:flex-start}}.modal.open{{display:block}}.modal-card{{margin:auto}}.plan-modal{{width:min(820px,100%);max-height:calc(100dvh - 40px);overflow-y:auto;-webkit-overflow-scrolling:touch}}.plan-modal .tier-groups{{margin:18px 0 22px}}.login-tabs button{{border:0;background:transparent;padding:10px 14px;text-align:center;color:var(--muted);font:inherit;font-weight:700;border-radius:999px;cursor:pointer}}.login-tabs button.active{{background:var(--blue);color:#fff}}.login-mode[hidden]{{display:none}}.password-heading{{display:flex;justify-content:space-between;align-items:center;margin-top:22px}}.password-heading label{{margin:0}}.password-heading button{{border:0;background:transparent;color:var(--blue);font:inherit;font-weight:700;cursor:pointer}}.panel,.cabinet-grid>*{{min-width:0}}.cabinet-grid{{grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr)}}.key code{{white-space:normal;overflow-wrap:anywhere;word-break:break-word}}select{{appearance:none;background:#fff}}.tier-group{{cursor:pointer}}.cabinet-apps{{margin-top:34px;padding-top:26px;border-top:1px solid var(--line)}}.cabinet-apps h2{{font-size:30px;margin-bottom:12px}}.cabinet-apps .actions{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.cabinet-apps .button{{border-color:#b7ead7;background:#eefcf6;color:var(--green);border-radius:12px;box-shadow:0 10px 24px #18a87014;text-align:center;padding:14px 16px}}.cabinet-apps .button:hover{{border-color:var(--green)}}.cabinet-purchase{{padding-top:34px}}@media(max-width:900px){{.cabinet{{padding-top:32px}}.cabinet-grid,.stats{{grid-template-columns:1fr}}.stat{{min-height:0}}.key code{{font-size:13px;line-height:1.45}}.cabinet-apps .actions{{grid-template-columns:1fr;align-items:stretch}}.cabinet-apps .button{{width:100%;text-align:center}}}}@media(max-width:850px){{.site-top .f-wrap{{padding:0 24px}}.f-links{{display:none}}.f-hero{{grid-template-columns:1fr;padding:54px 24px 60px}}.f-preview{{max-width:580px}}}}@media(max-width:520px){{.f-actions .f-btn.primary{{padding-left:14px;padding-right:14px}}.f-actions .f-btn:not(.primary){{display:none}}.f-nav{{height:68px}}.f-preview-inner{{padding:17px}}.f-statrow{{grid-template-columns:1fr}}.modal{{padding:14px}}.plan-modal{{max-height:calc(100dvh - 28px)}}}}
+main.cabinet>.eyebrow,main.cabinet>h2,main.cabinet .panel,main.cabinet .cabinet-apps,main.cabinet .cabinet-purchase,main.cabinet .payment-summary h3{{text-align:center}}main.cabinet>h2{{font-size:31.5px;overflow-wrap:anywhere;word-break:break-word;margin-bottom:26px}}main.cabinet .panel>.muted,main.cabinet .panel p{{overflow-wrap:anywhere;word-break:break-word}}main.cabinet .actions{{justify-content:center}}main.cabinet .stats{{text-align:center}}main.cabinet .summary-row span{{text-align:left}}main.cabinet .summary-row b{{text-align:right;overflow-wrap:anywhere;word-break:break-word}}.f-nav,.brand{{gap:10px}}.f-brand,.brand{{min-width:0}}.f-brand span,.brand{{line-height:1.08}}.f-actions,.links{{flex-shrink:0}}.f-btn,.button{{white-space:nowrap}}@media(max-width:760px){{main.cabinet>h2{{font-size:28px}}main.cabinet .summary-row{{align-items:center}}}}@media(max-width:520px){{.site-top .f-wrap,.wrap{{padding:0 14px}}.f-nav,nav{{gap:8px;height:64px}}.f-brand,.brand{{gap:7px;font-size:18px;letter-spacing:-.05em}}.f-brand .f-mark,.brand img{{width:36px;height:36px}}.f-actions,.links{{gap:6px}}.f-actions .f-btn:not(.primary){{display:inline-flex}}.f-btn,.button{{font-size:13px;padding:9px 12px}}.f-btn.primary,.button.primary{{padding-left:13px;padding-right:13px}}}}@media(max-width:390px){{.site-top .f-wrap,.wrap{{padding:0 10px}}.f-brand,.brand{{font-size:15px;gap:5px}}.f-brand .f-mark,.brand img{{width:30px;height:30px}}.f-btn,.button{{font-size:12px;padding:8px 10px}}.f-btn.primary,.button.primary{{padding-left:10px;padding-right:10px}}}}
+</style><script>document.addEventListener('click',function(event){{const link=event.target.closest('a[href^="http"]');if(link&&window.Telegram?.WebApp?.openLink){{event.preventDefault();window.Telegram.WebApp.openLink(link.href)}}}});</script></head><body>{content}</body></html>"""
+
+
+@router.get("/", response_class=HTMLResponse)
+async def landing(db: AsyncSession = Depends(get_db)):
+    all_plans = [plan for plan in await _plans(db) if _tier(plan)]
+    monthly_plans = [plan for plan in all_plans if plan.duration_days == 30]
+    body = f"""<div class=\"site-top\"><div class=\"f-wrap\"><nav class=\"f-nav\" aria-label=\"Основная навигация\"><a class=\"f-brand\" href=\"/\"><img class=\"f-mark\" src=\"/static/freedom-vpn-logo-web.webp\" width=\"50\" height=\"50\" alt=\"\"><span>Freedom <i>VPN</i></span></a><div class=\"f-links\"><a href=\"#advantages\">Возможности</a><a href=\"#plans\">Тарифы</a></div><div class=\"f-actions\"><a class=\"f-btn\" href=\"/cabinet\">Кабинет</a><button class=\"f-btn primary\" type=\"button\" data-choose-plan>Подключить</button></div></nav></div><section class=\"f-hero\"><div><div class=\"f-kicker\"><i></i>Свободный интернет без лишнего</div><h1>Быстрый и приватный интернет</h1><p class=\"f-lead\">Freedom VPN защищает ваше соединение и открывает доступ к сайтам и сервисам. Один аккаунт — все устройства, без рекламы и слежки.</p><div class=\"f-hero-actions\"><button class=\"f-btn primary\" type=\"button\" data-choose-plan>Выбрать подписку ↗</button><a class=\"f-btn\" href=\"#advantages\">Как это работает</a></div><div class=\"f-trust\"><span><b class=\"f-dot\"></b>Сервера в 12 странах</span><span><b class=\"f-dot\"></b>Поддержка 24/7</span><span><b class=\"f-dot\"></b>Без логов</span></div></div><div class=\"f-visual\"><div class=\"f-preview\" aria-label=\"Предпросмотр личного кабинета\"><div class=\"f-preview-inner\"><div class=\"f-preview-top\"><div class=\"f-preview-brand\"><img class=\"f-mark\" src=\"/static/freedom-vpn-logo-web.webp\" width=\"38\" height=\"38\" alt=\""><span>Freedom <i>VPN</i></span></div><div class=\"f-status\"><b></b>Подключено</div></div><div class=\"f-key\"><div class=\"f-label\">Ключ доступа</div><div class=\"f-code\">freedom://vpn_7b91••••••••••••••••••••</div></div><div class=\"f-statrow\"><div class=\"f-stat\"><span class=\"f-label\">Локация</span><strong>Германия</strong></div><div class=\"f-stat\"><span class=\"f-label\">Задержка</span><strong>24 мс</strong></div></div><div class=\"f-devices\"><span class=\"f-device\">iOS</span><span class=\"f-device\">Android</span><span class=\"f-device\">Windows</span><span class=\"f-device\">Роутер</span></div></div></div></div></section></div>
+<main><section id=\"plans\"><div class=\"wrap\"><h2>Выберите свой формат</h2><div class=\"plans\">{_plan_cards(monthly_plans)}</div></div></section><section id=\"advantages\" class=\"alt\"><div class=\"wrap features\"><article class=\"feature\"><h3>Быстро везде</h3><p class=\"muted\">Оптимальные маршруты и стабильная скорость на всех устройствах.</p></article><article class=\"feature\"><h3>Приватность по умолчанию</h3><p class=\"muted\">Шифрование трафика защищает данные в любой сети.</p></article><article class=\"feature\"><h3>Все устройства</h3><p class=\"muted\">iOS, Android, Windows, macOS и роутеры.</p></article></div></section></main><footer><div class=\"wrap\">Freedom VPN · Свобода быть собой в интернете</div></footer>
+<div class=\"modal\" id=\"register\"><div class=\"modal-card plan-modal\"><h3>Выберите подписку</h3><p class=\"muted\">Нажмите на срок, чтобы раскрыть остальные планы этой группы.</p><div class=\"tier-groups\">{_tier_selector(all_plans)}</div><input id=\"plan\" type=\"hidden\"><p id=\"result\"></p><div class=\"actions\"><button class=\"button\" type=\"button\" onclick=\"closeModal()\">Отмена</button><button class=\"button primary\" type=\"button\" onclick=\"checkout()\">Оплата</button></div></div></div>
+<script>const modal=document.getElementById('register'),plan=document.getElementById('plan');function openPlans(id=''){{modal.classList.add('open');if(id)selectPlan(id)}}function selectPlan(id){{plan.value=id;document.querySelectorAll('[data-order-plan]').forEach(x=>x.classList.toggle('selected',x.dataset.orderPlan===String(id)));document.querySelectorAll('.tier-group').forEach(x=>x.classList.toggle('selected',!!x.querySelector('.selected')));document.querySelector(`[data-order-plan="${{id}}"]`)?.closest('.tier-group')?.classList.add('expanded')}}document.querySelectorAll('[data-choose-plan]').forEach(b=>b.onclick=()=>openPlans());document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>openPlans(b.dataset.plan));document.querySelectorAll('.plan-modal .tier-group').forEach(group=>group.onclick=event=>{{if(!event.target.closest('[data-order-plan]'))group.classList.toggle('expanded')}});document.querySelectorAll('[data-order-plan]').forEach(b=>b.onclick=event=>{{event.stopPropagation();selectPlan(b.dataset.orderPlan)}});function closeModal(){{modal.classList.remove('open')}}function checkout(){{const out=document.getElementById('result');if(!plan.value){{out.className='error';out.textContent='Выберите подписку';return}}location.href=`/cabinet?checkout=1&plan_id=${{encodeURIComponent(plan.value)}}#payment`}}</script>"""
+    return HTMLResponse(_shell(body), headers=_headers())
+
+
+def _code_digest(user_id: int, code: str) -> str:
+    return hmac.new(
+        settings.service_api_token.encode(),
+        f"cabinet-login:{user_id}:{code}".encode(),
+        sha256,
+    ).hexdigest()
+
+
+async def _issue_code(user: User, email_address: str, db: AsyncSession) -> tuple[datetime, str]:
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.cabinet_email_code_ttl_minutes
+    )
+    await db.execute(delete(CabinetLoginCode).where(CabinetLoginCode.user_id == user.id))
+    db.add(
+        CabinetLoginCode(
+            user_id=user.id,
+            code_hash=_code_digest(user.id, code),
+            plain_code=code,
+            expires_at=expires,
+        )
+    )
+    try:
+        await send_cabinet_code(
+            email_address,
+            code,
+            settings.cabinet_email_code_ttl_minutes,
+        )
+    except EmailDeliveryError as exc:
+        await db.rollback()
+        await write_audit(
+            db,
+            action="email.cabinet_code.send",
+            result="failed",
+            actor_type="web",
+            actor_id=str(user.id),
+            resource_type="user",
+            resource_id=user.id,
+            details={
+                "event_type": "cabinet_login_code_email_failed",
+                "email": email_address,
+                "ttl_minutes": settings.cabinet_email_code_ttl_minutes,
+                "error": str(exc),
+            },
+        )
+        logger.exception(
+            "cabinet_login_code_email_failed",
+            extra={
+                "event": {
+                    "event_type": "cabinet_login_code_email_failed",
+                    "user_id": user.id,
+                    "email": email_address,
+                    "ttl_minutes": settings.cabinet_email_code_ttl_minutes,
+                }
+            },
+        )
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await db.commit()
+    logger.info(
+        "cabinet_login_code_sent",
+        extra={
+            "event": {
+                "event_type": "cabinet_login_code_sent",
+                "user_id": user.id,
+                "email": email_address,
+                "ttl_minutes": settings.cabinet_email_code_ttl_minutes,
+                "expires_at": expires.isoformat(),
+            }
+        },
+    )
+    await write_audit(
+        db,
+        action="email.cabinet_code.send",
+        result="success",
+        actor_type="web",
+        actor_id=str(user.id),
+        resource_type="user",
+        resource_id=user.id,
+        details={
+            "event_type": "cabinet_login_code_sent",
+            "email": email_address,
+            "ttl_minutes": settings.cabinet_email_code_ttl_minutes,
+            "expires_at": expires.isoformat(),
+        },
+    )
+    return expires, code
+
+
+def _set_cabinet_cookie(response: Response, raw: str) -> None:
+    secure = urlparse(settings.public_base_url).scheme == "https"
+    response.set_cookie(
+        COOKIE,
+        raw,
+        max_age=settings.cabinet_token_ttl_days * 86400,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
+
+
+def _payment_return_signature(payload: str) -> str:
+    secret = settings.payment_webhook_secret or settings.service_api_token
+    return hmac.new(secret.encode(), payload.encode(), sha256).hexdigest()
+
+
+def _payment_return_token(user_id: int) -> str:
+    payload = json.dumps(
+        {
+            "user_id": user_id,
+            "exp": int(datetime.now(timezone.utc).timestamp()) + PAYMENT_RETURN_TOKEN_TTL_SECONDS,
+            "nonce": secrets.token_urlsafe(12),
+        },
+        separators=(",", ":"),
+    )
+    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return f"{encoded}.{_payment_return_signature(encoded)}"
+
+
+def _verify_payment_return_token(token: str) -> int | None:
+    try:
+        encoded, signature = token.split(".", 1)
+    except ValueError:
+        return None
+    if not hmac.compare_digest(signature, _payment_return_signature(encoded)):
+        return None
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        user_id = int(payload["user_id"])
+        expires_at = int(payload["exp"])
+    except (KeyError, TypeError, ValueError, binascii.Error, json.JSONDecodeError):
+        return None
+    if expires_at < int(datetime.now(timezone.utc).timestamp()):
+        return None
+    return user_id
+
+
+async def _create_cabinet_session(db: AsyncSession, user: User, response: Response) -> None:
+    raw = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc) + timedelta(days=settings.cabinet_token_ttl_days)
+    db.add(CabinetAccessToken(user_id=user.id, token_hash=_digest(raw), expires_at=expires))
+    _set_cabinet_cookie(response, raw)
+
+
+async def _merge_web_user_into_telegram_user(db: AsyncSession, web_user: User, telegram_user: User) -> User:
+    if web_user.id == telegram_user.id:
+        return telegram_user
+    if web_user.telegram_id > 0 and web_user.telegram_id != telegram_user.telegram_id:
+        raise HTTPException(status_code=409, detail="Этот email уже связан с другим Telegram аккаунтом")
+
+    web_active_subscription = await db.scalar(
+        select(Subscription.id)
+        .where(Subscription.user_id == web_user.id, Subscription.status == "active")
+        .limit(1)
+    )
+    telegram_active_subscription = await db.scalar(
+        select(Subscription.id)
+        .where(Subscription.user_id == telegram_user.id, Subscription.status == "active")
+        .limit(1)
+    )
+    if web_active_subscription is not None and telegram_active_subscription is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="У web и Telegram аккаунтов уже есть активные подписки. Нужно объединить вручную в админке.",
+        )
+
+    web_email = web_user.email
+    web_password_hash = web_user.password_hash
+    web_user.email = None
+    await db.flush()
+
+    if web_email:
+        telegram_user.email = web_email
+    if web_password_hash and not telegram_user.password_hash:
+        telegram_user.password_hash = web_password_hash
+
+    for model in (
+        CabinetAccessToken,
+        CabinetLoginCode,
+        Subscription,
+        VPNClient,
+        Payment,
+        ClientDevice,
+        ActivationCode,
+    ):
+        await db.execute(
+            update(model)
+            .where(model.user_id == web_user.id)
+            .values(user_id=telegram_user.id)
+        )
+    try:
+        await db.execute(
+            update(AccessGrant)
+            .where(AccessGrant.user_id == web_user.id)
+            .values(user_id=telegram_user.id)
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Не удалось объединить пробный доступ автоматически. Нужно объединить вручную в админке.",
+        ) from exc
+
+    await db.delete(web_user)
+    await db.flush()
+    logger.info(
+        "cabinet_users_merged",
+        extra={
+            "event": {
+                "event_type": "cabinet_users_merged",
+                "target_user_id": telegram_user.id,
+                "merged_user_id": web_user.id,
+                "telegram_id": telegram_user.telegram_id,
+            }
+        },
+    )
+    return telegram_user
+
+
+@router.post("/web/register")
+async def register(data: Registration, db: AsyncSession = Depends(get_db)):
+    email_address = _normalize_email(data.email)
+    if not EMAIL_RE.fullmatch(email_address):
+        raise HTTPException(status_code=422, detail="Укажите корректный email")
+    if data.plan_id is not None:
+        plan = await db.get(Plan, data.plan_id)
+        if plan is None or not plan.is_active or not plan.is_public:
+            raise HTTPException(status_code=404, detail="Тариф не найден")
+    linked_user = None
+    if data.telegram_link_token:
+        linked_user_id = verify_telegram_cabinet_link_token(data.telegram_link_token)
+        if linked_user_id is None:
+            raise HTTPException(status_code=401, detail="Ссылка Telegram устарела. Откройте web-кабинет из бота ещё раз.")
+        linked_user = await db.get(User, linked_user_id)
+        if linked_user is None or linked_user.status != "active":
+            raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+
+    user = await db.scalar(select(User).where(User.email == email_address))
+    if linked_user is not None:
+        if user is not None and user.id != linked_user.id:
+            user = await _merge_web_user_into_telegram_user(db, user, linked_user)
+        else:
+            user = linked_user
+        linked_user.email = email_address
+    elif user is None:
+        user = User(telegram_id=-secrets.randbelow(9_000_000_000_000_000) - 1, email=email_address, status="active")
+        db.add(user)
+        try:
+            await db.flush()
+        except IntegrityError:
+            await db.rollback()
+            user = await db.scalar(select(User).where(User.email == email_address))
+            if user is None:
+                raise HTTPException(status_code=409, detail="Не удалось создать пользователя")
+    expires, _ = await _issue_code(user, email_address, db)
+    return {"message": "Код для входа отправлен на почту", "expires_at": expires}
+
+
+@router.post("/web/code/login")
+async def email_code_login(data: EmailCodeLogin, db: AsyncSession = Depends(get_db)):
+    email_address = _normalize_email(data.email)
+    user = await db.scalar(select(User).where(User.email == email_address))
+    login_code = None
+    if user is not None:
+        login_code = await db.scalar(
+            select(CabinetLoginCode)
+            .where(CabinetLoginCode.user_id == user.id)
+            .order_by(CabinetLoginCode.id.desc())
+            .with_for_update()
+        )
+
+    now = datetime.now(timezone.utc)
+    expires_at = None if login_code is None else login_code.expires_at.replace(
+        tzinfo=login_code.expires_at.tzinfo or timezone.utc
+    )
+    submitted_hash = _code_digest(user.id if user is not None else 0, data.code)
+    valid = (
+        user is not None
+        and user.status == "active"
+        and login_code is not None
+        and login_code.used_at is None
+        and login_code.attempts < 5
+        and expires_at is not None
+        and expires_at > now
+        and secrets.compare_digest(login_code.code_hash, submitted_hash)
+    )
+    if not valid:
+        if login_code is not None and login_code.used_at is None:
+            login_code.attempts += 1
+            if login_code.attempts >= 5 or (expires_at is not None and expires_at <= now):
+                login_code.used_at = now
+            await db.commit()
+        raise HTTPException(status_code=401, detail="Неверный или просроченный код")
+
+    login_code.used_at = now
+    raw = secrets.token_urlsafe(32)
+    session_expires = now + timedelta(days=settings.cabinet_token_ttl_days)
+    db.add(
+        CabinetAccessToken(
+            user_id=user.id,
+            token_hash=_digest(raw),
+            expires_at=session_expires,
+        )
+    )
+    await db.commit()
+    response = JSONResponse(
+        {"message": "Вход выполнен", "next_url": "/cabinet"},
+        headers=_headers(),
+    )
+    _set_cabinet_cookie(response, raw)
+    return response
+
+
+@router.post("/web/password/login")
+async def password_login(data: PasswordLogin, db: AsyncSession = Depends(get_db)):
+    email_address = _normalize_email(data.email)
+    user = await db.scalar(select(User).where(User.email == email_address))
+    if user is None or user.status != "active" or not verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Неверный email или пароль")
+    raw = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc) + timedelta(days=settings.cabinet_token_ttl_days)
+    db.add(CabinetAccessToken(user_id=user.id, token_hash=_digest(raw), expires_at=expires))
+    await db.commit()
+    response = JSONResponse({"message": "Вход выполнен"}, headers=_headers())
+    _set_cabinet_cookie(response, raw)
+    return response
+
+
+@router.post("/web/telegram-cabinet-link", dependencies=[Depends(require_api_access)])
+async def telegram_cabinet_link(data: TelegramCabinetLink, db: AsyncSession = Depends(get_db)):
+    email_address = _normalize_email(data.email)
+    if not EMAIL_RE.fullmatch(email_address):
+        raise HTTPException(status_code=422, detail="Укажите корректный email")
+    user = await db.scalar(select(User).where(User.telegram_id == data.telegram_id))
+    if user is None:
+        raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
+    owner = await db.scalar(select(User).where(User.email == email_address, User.id != user.id))
+    if owner is not None:
+        user = await _merge_web_user_into_telegram_user(db, owner, user)
+    user.email = email_address
+    expires, code = await _issue_code(user, email_address, db)
+    token = telegram_cabinet_link_token(user.id)
+    return {"message": "Код для входа отправлен на почту", "expires_at": expires, "code": code, "cabinet_url": f"/cabinet?tg={token}"}
+
+
+@router.post("/web/temporary-register")
+async def temporary_register(db: AsyncSession = Depends(get_db)):
+    if not settings.cabinet_allow_temporary_registration:
+        raise HTTPException(status_code=404, detail="Временная регистрация отключена")
+    user = User(
+        telegram_id=-secrets.randbelow(9_000_000_000_000_000) - 1,
+        status="active",
+    )
+    db.add(user)
+    await db.flush()
+    raw = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc) + timedelta(days=settings.cabinet_token_ttl_days)
+    db.add(CabinetAccessToken(user_id=user.id, token_hash=_digest(raw), expires_at=expires))
+    await db.commit()
+    response = RedirectResponse("/cabinet", status_code=303, headers=_headers())
+    secure = urlparse(settings.public_base_url).scheme == "https"
+    response.set_cookie(
+        COOKIE,
+        raw,
+        max_age=settings.cabinet_token_ttl_days * 86400,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+async def _access(raw: str | None, db: AsyncSession) -> tuple[User, CabinetAccessToken] | None:
+    if not raw:
+        return None
+    access = await db.scalar(select(CabinetAccessToken).where(CabinetAccessToken.token_hash == _digest(raw)))
+    now = datetime.now(timezone.utc)
+    if access is None or access.revoked_at is not None or access.expires_at.replace(tzinfo=access.expires_at.tzinfo or timezone.utc) <= now:
+        return None
+    user = await db.get(User, access.user_id)
+    return (user, access) if user and user.status == "active" else None
+
+
+async def _require_cabinet(raw: str | None, db: AsyncSession) -> tuple[User, CabinetAccessToken]:
+    found = await _access(raw, db)
+    if found is None:
+        raise HTTPException(status_code=401, detail="Требуется вход в кабинет")
+    return found
+
+
+@router.post("/web/password")
+async def set_password(
+    data: PasswordSet,
+    cabinet_token: str | None = Cookie(default=None, alias=COOKIE),
+    db: AsyncSession = Depends(get_db),
+):
+    user, _ = await _require_cabinet(cabinet_token, db)
+    user.password_hash = hash_password(data.password)
+    await db.commit()
+    return {"message": "Пароль сохранён"}
+
+
+@router.get("/cabinet/payment-return")
+async def cabinet_payment_return(token: str, payment: str = "success", db: AsyncSession = Depends(get_db)):
+    user_id = _verify_payment_return_token(token)
+    if user_id is None:
+        return RedirectResponse("/cabinet?payment=return_expired", status_code=303, headers=_headers())
+    user = await db.get(User, user_id)
+    if user is None or user.status != "active":
+        return RedirectResponse("/cabinet?payment=return_expired", status_code=303, headers=_headers())
+    response = RedirectResponse(f"/cabinet?payment={html.escape(payment)}", status_code=303, headers=_headers())
+    await _create_cabinet_session(db, user, response)
+    await db.commit()
+    return response
+
+
+@router.get("/cabinet/password", response_class=HTMLResponse)
+async def password_setup_page(
+    cabinet_token: str | None = Cookie(default=None, alias=COOKIE),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_cabinet(cabinet_token, db)
+    body = '''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a></nav><main class="login-page"><section class="login-card"><h1>Создайте пароль</h1><p class="muted">После этого вы сможете выбирать вход по письму или паролю.</p><label for="new-password">Пароль</label><input id="new-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" placeholder="Не менее 8 символов"><button class="button gradient" type="button" onclick="savePassword()">Сохранить и открыть кабинет</button><p id="password-result"></p><p class="login-footer"><a href="/cabinet">Настроить позже</a></p></section></main><script>async function savePassword(){const out=document.getElementById('password-result');out.textContent='Сохраняем…';const r=await fetch('/web/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('new-password').value})});const d=await r.json();if(r.ok){location.href='/cabinet';return}out.className='error';out.textContent=d.detail||'Не удалось сохранить пароль'}</script>'''
+    return HTMLResponse(_shell(body, title="Создание пароля — Freedom VPN"), headers=_headers())
+
+
+@router.get("/cabinet/access/{token}")
+async def cabinet_access(token: str, db: AsyncSession = Depends(get_db)):
+    found = await _access(token, db)
+    if found is None:
+        return HTMLResponse(_shell('<main class="wrap cabinet"><div class="panel"><h2>Ссылка недействительна</h2><p class="muted">Запросите новую ссылку на главной странице.</p><a class="button primary" href="/">На главную</a></div></main>'), status_code=401, headers=_headers())
+    user, access = found
+    access.last_used_at = datetime.now(timezone.utc)
+    await db.commit()
+    response = RedirectResponse(
+        "/cabinet/password" if not user.password_hash else "/cabinet",
+        status_code=303,
+        headers=_headers(),
+    )
+    _set_cabinet_cookie(response, token)
+    return response
+
+
+@router.get("/cabinet", response_class=HTMLResponse)
+async def cabinet(
+    plan_id: int | None = None,
+    checkout: bool = False,
+    cabinet_token: str | None = Cookie(default=None, alias=COOKIE),
+    db: AsyncSession = Depends(get_db),
+):
+    found = await _access(cabinet_token, db)
+    if found is None:
+        body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><a class="button" href="/">На главную</a></nav></div><main class="login-page"><section class="login-card"><h1>Вход в аккаунт</h1><p class="muted">Рады видеть вас снова.</p><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="email" placeholder="you@example.com"><div class="login-tabs"><button class="active" type="button" data-login-mode="email">Код из письма</button><button type="button" data-login-mode="password">Пароль</button></div><div class="login-mode" data-mode-panel="email"><p class="muted" style="margin-top:22px">Пришлём шестизначный одноразовый код — пароль не нужен.</p><button class="button gradient" type="button" onclick="requestLogin()">Получить код на email</button><label for="login-code">Код из письма</label><input id="login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{{6}}" placeholder="000000"><button class="button gradient" type="button" onclick="codeLogin()">Войти по коду</button></div><div class="login-mode" data-mode-panel="password" hidden><div class="password-heading"><label for="login-password">Пароль</label><button type="button" onclick="requestPasswordReset()">Получить код</button></div><input id="login-password" type="password" autocomplete="current-password" minlength="8" placeholder="••••••••"><button class="button gradient" type="button" onclick="passwordLogin()">Войти</button></div><p id="login-result"></p>{_temporary_registration_button()}</section></main><script>const params=new URLSearchParams(location.search);const telegramLinkToken=params.get('tg')||'';const paymentReturn=params.get('payment');const paymentReturnToken=sessionStorage.getItem('freedom_payment_return_token');if(paymentReturn&&paymentReturnToken){{sessionStorage.removeItem('freedom_payment_return_token');location.replace('/cabinet/payment-return?payment='+encodeURIComponent(paymentReturn)+'&token='+encodeURIComponent(paymentReturnToken))}}const tabs=document.querySelectorAll('[data-login-mode]');function selectLoginMode(mode){{tabs.forEach(x=>x.classList.toggle('active',x.dataset.loginMode===mode));document.querySelectorAll('[data-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.modePanel!==mode)}}tabs.forEach(tab=>tab.onclick=()=>selectLoginMode(tab.dataset.loginMode));async function requestLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Отправляем код…';const body={{email:document.getElementById('login-email').value}};if(telegramLinkToken)body.telegram_link_token=telegramLinkToken;const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка отправки');if(r.ok)document.getElementById('login-code').focus()}}async function requestPasswordReset(){{selectLoginMode('email');await requestLogin()}}async function codeLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем код…';const r=await fetch('/web/code/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,code:document.getElementById('login-code').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}}async function passwordLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем…';const r=await fetch('/web/password/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,password:document.getElementById('login-password').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}};</script>'''
+        return HTMLResponse(_shell(body, title="Вход — Freedom VPN"), status_code=401, headers=_headers())
+    user, access = found
+    access.last_used_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    subscription = (await db.execute(select(Subscription).where(Subscription.user_id == user.id).order_by(Subscription.id.desc()))).scalars().first()
+    plan = await db.get(Plan, subscription.plan_id) if subscription else None
+    client = None
+    vpn_uri = ""
+    node = None
+    if subscription:
+        client = (await db.execute(select(VPNClient).where(VPNClient.subscription_id == subscription.id, VPNClient.status == "active").order_by(VPNClient.id.desc()))).scalars().first()
+    if client:
+        node = await db.get(VPNNode, client.node_id)
+        config = await db.scalar(select(VPNNodeConfig).where(VPNNodeConfig.node_id == client.node_id, VPNNodeConfig.protocol == client.protocol))
+        if node and config:
+            vpn_uri = client.config_override or build_client_uri(client, node, config.config)
+    traffic_remaining_bytes = None
+    traffic_limit_bytes = None
+    traffic_used_bytes = None
+    if client and client.traffic_limit_gb:
+        traffic_limit_bytes = client.traffic_limit_gb * 1024 * 1024 * 1024
+        traffic_remaining_bytes = traffic_limit_bytes
+        if node and config:
+            try:
+                traffic_stats = await ThreeXUIClient(config.config.get("api_address")).get_client_traffic(f"vpn-{client.id}")
+                traffic_used_bytes = int(traffic_stats.get("up", 0)) + int(traffic_stats.get("down", 0))
+                total_bytes = int(traffic_stats.get("total", 0)) or traffic_limit_bytes
+                traffic_limit_bytes = total_bytes
+                traffic_remaining_bytes = max(total_bytes - traffic_used_bytes, 0)
+            except (ThreeXUIError, TypeError, ValueError):
+                logger.warning(
+                    "cabinet_traffic_lookup_failed",
+                    exc_info=True,
+                    extra={"event_type": "cabinet_traffic_lookup_failed", "client_id": client.id},
+                )
+    traffic_exhausted = bool(traffic_limit_bytes and traffic_remaining_bytes is not None and traffic_remaining_bytes <= 0)
+    active = bool(
+        subscription
+        and subscription.status == "active"
+        and subscription.expires_at.replace(tzinfo=subscription.expires_at.tzinfo or timezone.utc) > now
+        and not traffic_exhausted
+    )
+    days = max(0, int(((subscription.expires_at.replace(tzinfo=subscription.expires_at.tzinfo or timezone.utc) - now).total_seconds() + 86399) // 86400)) if subscription else 0
+    if client and not client.traffic_limit_gb:
+        traffic = "Без ограничений"
+    elif traffic_remaining_bytes is not None and traffic_limit_bytes:
+        remaining_gb = traffic_remaining_bytes / 1024 / 1024 / 1024
+        limit_gb = traffic_limit_bytes / 1024 / 1024 / 1024
+        traffic = f"{_format_gb(remaining_gb)} из {_format_gb(limit_gb)}"
+    elif client:
+        traffic = f"{client.traffic_limit_gb} ГБ"
+    else:
+        traffic = "—"
+    devices = "Без ограничений" if client and not client.max_connections else (str(client.max_connections) if client else "—")
+    public_plans = await _plans(db)
+    packages = await _plan_packages(db)
+    packages_by_id = {item.id: item for item in packages}
+    methods = list((await db.execute(select(PaymentMethod).where(PaymentMethod.is_active.is_(True)).order_by(PaymentMethod.sort_order))).scalars())
+    payments = list((await db.execute(select(Payment).where(Payment.user_id == user.id).order_by(Payment.id.desc()).limit(10))).scalars())
+    requested_plan = next((item for item in public_plans if item.id == plan_id), None)
+    current_plan = next((item for item in public_plans if plan and item.id == plan.id), None)
+    initial_plan = requested_plan or current_plan or (public_plans[0] if public_plans else None)
+    initial_plan_id = initial_plan.id if initial_plan else 0
+    method_options = "".join(
+        f'<option value="{html.escape(m.code)}" data-url="{html.escape(m.url or "")}">{html.escape(_clean_payment_method_name(m.name))}</option>'
+        for m in methods
+    )
+    plan_payload = {
+        item.id: {
+            "name": _clean_plan_name(item.name),
+            "package": _package_label(item, packages_by_id),
+            "duration_days": item.duration_days,
+            "price": f"{item.price:g}",
+            "currency": item.currency,
+        }
+        for item in public_plans
+    }
+    method_payload = {
+        item.code: {
+            "name": _clean_payment_method_name(item.name),
+            "url": item.url or "",
+            "manual": item.code in MANUAL_PAYMENT_METHODS,
+        }
+        for item in methods
+    }
+    plan_json = json.dumps(plan_payload, ensure_ascii=False)
+    method_json = json.dumps(method_payload, ensure_ascii=False)
+    payment_rows = "".join(f'<li>Платёж #{p.id}: {p.amount:g} {html.escape(p.currency)} — <b>{html.escape(p.status)}</b></li>' for p in payments) or "<li>Платежей ещё нет</li>"
+    status_class = "status" if active else "status inactive"
+    status_text = "активна" if active else "не активна"
+    key_block = '<p class="muted">Ключ появится после подтверждения оплаты и выдачи подписки.</p>'
+    if vpn_uri:
+        key_block = (
+            f'<div class="key"><code id="vpn-key">{html.escape(vpn_uri)}</code></div>'
+            '<div class="actions"><button class="button" onclick="copyKey(this)">Копировать ключ</button></div>'
+        )
+    body = f"""
+<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><div class="links"><form method="post" action="/cabinet/logout"><button class="button">Выйти</button></form></div></nav>
+<main class="cabinet"><div class="eyebrow">Управление подпиской</div><h2>{html.escape(user.email or "Ваш кабинет")}</h2><div class="cabinet-stack">
+<section class="panel cabinet-renew" id="payment"><div class="cabinet-two"><div><h3>Подписка <span class="{status_class}">{status_text}</span></h3><p><b>{html.escape(_clean_plan_name(plan.name)) if plan else 'Тариф не выбран'}</b></p><div class="stats"><div class="stat"><small class="muted">Осталось</small><br><b>{days} дн.</b></div><div class="stat"><small class="muted">Трафик</small><br><b>{traffic}</b></div><div class="stat"><small class="muted">Подключения</small><br><b>{devices}</b></div></div></div><div class="renew-box"><h3>Выберите способ оплаты</h3><input type="hidden" id="order-plan" value="{initial_plan_id}"><label>Способ оплаты<select id="order-method">{method_options}</select></label><div id="order-summary" class="payment-summary"></div><div class="actions renew-actions"><button class="button primary" type="button" onclick="openPayment()">Продлить</button><a class="button" href="/cabinet/tariffs">Сменить тариф</a></div></div></div></section>
+<section class="panel"><div class="cabinet-two"><div><h3>Ключ доступа</h3>{key_block}<p class="muted">Сервер назначается автоматически: {html.escape(node.region or node.name) if node else 'после оплаты'}</p></div><div class="cabinet-apps"><h3>Скачать приложения</h3><div class="actions"><a class="button" href="https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_windows_x64.exe">Windows</a><a class="button" href="https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_macos.zip">macOS</a><a class="button" href="https://play.google.com/store/apps/details?id=org.amnezia.vpn">Android</a><a class="button" href="https://apps.apple.com/ru/app/defaultvpn/id6744725017">iOS</a></div></div></div></section>
+<section class="panel"><h3>Последние платежи</h3><ul>{payment_rows}</ul></section>
+<section class="panel"><h3>Пароль для входа</h3><p class="muted">Задайте или смените пароль, чтобы потом входить в кабинет через вкладку «Пароль» без кода из письма.</p><label>Новый пароль<input id="cabinet-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" placeholder="Не менее 8 символов"></label><button class="button primary" type="button" onclick="saveCabinetPassword()">Сохранить пароль</button><p id="password-result"></p></section>
+</div></main></div><div class="modal" id="payment-modal"><div class="modal-card payment-modal-card"><h3>Оплата</h3><p class="muted">Проверьте сумму и выбранный способ оплаты перед продолжением.</p><div id="payment-summary-modal" class="payment-summary"></div><div id="order-result"></div><div class="actions"><button class="button" type="button" onclick="closePayment()">Назад</button><button class="button primary" type="button" onclick="confirmPayment()">Продлить</button></div></div></div>
+<style>.cabinet-stack{{display:grid;gap:18px}}.cabinet-two{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}}.cabinet-renew{{border-color:#dfe7f4}}.renew-box{{background:#f8fbff;border:1px solid var(--line);border-radius:18px;padding:18px}}.renew-actions{{justify-content:center}}.payment-summary{{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:16px;background:#fff}}.payment-summary h3{{margin:0 0 12px;text-align:center}}.summary-row{{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #e7edf8}}.summary-row:last-child{{border-bottom:0}}.summary-row span{{color:var(--muted)}}.summary-row b{{text-align:right}}.summary-total b{{font-size:20px;color:var(--ink)}}.payment-modal-card{{width:min(620px,100%)}}#order-result img{{display:block;margin:12px 0;border-radius:16px;border:1px solid var(--line)}}#order-result input[type=file]{{margin:12px 0}}.cabinet-apps{{margin-top:0;padding-top:0;border-top:0}}.cabinet-apps h3{{margin-top:0}}.cabinet-apps .actions{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.cabinet-apps .button{{border-color:#b7ead7;background:#eefcf6;color:var(--green);border-radius:12px;text-align:center;padding:14px 16px}}@media(max-width:620px){{.cabinet-two{{grid-template-columns:1fr}}}}</style>
+<script>const planData={plan_json};const methodData={method_json};function durationLabel(days){{if(!days)return 'срок не указан';if(days%30===0){{const months=days/30;return months+' мес.'}}return days+' дн.'}}function selectedPlan(){{return planData[String(document.getElementById('order-plan').value)]}}function selectedMethod(){{const select=document.getElementById('order-method');const fallback=select?.selectedOptions?.[0];return methodData[select?.value]||{{name:fallback?.textContent||'Способ оплаты',url:fallback?.dataset?.url||'',manual:true}}}}function renderPaymentSummary(targetId='order-summary'){{const target=document.getElementById(targetId);if(!target)return;const plan=selectedPlan(),method=selectedMethod();if(!plan){{target.innerHTML='<p class="error">Выберите подписку</p>';return}}target.innerHTML=`<h3>К оплате</h3><div class="summary-row"><span>Пакет</span><b>${{plan.package}}</b></div><div class="summary-row"><span>Тариф</span><b>${{plan.name}}</b></div><div class="summary-row"><span>Срок</span><b>${{durationLabel(plan.duration_days)}}</b></div><div class="summary-row summary-total"><span>Сумма</span><b>${{plan.price}} ${{plan.currency}}</b></div><div class="summary-row"><span>Способ оплаты</span><b>${{method.name}}</b></div>`}}document.getElementById('order-method')?.addEventListener('change',()=>renderPaymentSummary());renderPaymentSummary();function openPayment(){{const out=document.getElementById('order-result');if(out){{out.className='';out.innerHTML=''}}renderPaymentSummary('payment-summary-modal');if(!selectedPlan())return;document.getElementById('payment-modal').classList.add('open')}}function closePayment(){{document.getElementById('payment-modal').classList.remove('open')}}function copyKey(button){{navigator.clipboard.writeText(document.getElementById('vpn-key').textContent);button.textContent='Скопировано ✓'}}async function saveCabinetPassword(){{const out=document.getElementById('password-result'),input=document.getElementById('cabinet-password');out.className='';out.textContent='Сохраняем…';const r=await fetch('/web/password',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{password:input.value}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?'Пароль сохранён. Теперь можно входить по email и паролю.':(d.detail||'Не удалось сохранить пароль');if(r.ok)input.value=''}}async function confirmPayment(){{await createOrder()}}async function createOrder(){{const out=document.getElementById('order-result');out.className='';out.textContent='Создаём платёж…';const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:document.getElementById('order-method').value}})}});const d=await r.json();if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}if(d.redirect){{if(d.payment_return_token)sessionStorage.setItem('freedom_payment_return_token',d.payment_return_token);out.innerHTML='<p>Платёж создан. Открываем страницу оплаты…</p>';location.href=d.redirect;return}}out.className='';out.innerHTML=d.qr_url?`<p>Оплатите <b>${{d.amount}} ${{d.currency}}</b> выбранным способом, затем загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><p><b>Сумма: ${{d.amount}} ${{d.currency}}</b></p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`}}async function uploadReceipt(id){{const file=document.getElementById('receipt').files[0];if(!file)return alert('Выберите файл чека');const data=await new Promise(ok=>{{const reader=new FileReader();reader.onload=()=>ok(reader.result.split(',')[1]);reader.readAsDataURL(file)}});const r=await fetch(`/web/payments/${{id}}/receipt`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{filename:file.name,mime_type:file.type,data_base64:data}})}});const d=await r.json();if(r.ok){{alert('Чек отправлен. Платёж ожидает проверки администратора.');location.reload()}}else alert(d.detail||'Ошибка загрузки')}};</script>"""
+    await db.commit()
+    return HTMLResponse(_shell(body, title="Управление подпиской — Freedom VPN"), headers=_headers())
+
+
+@router.get("/cabinet/tariffs", response_class=HTMLResponse)
+async def cabinet_tariffs(
+    cabinet_token: str | None = Cookie(default=None, alias=COOKIE),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_cabinet(cabinet_token, db)
+    plans = await _plans(db)
+    packages = await _plan_packages(db)
+    packages_by_id = {item.id: item for item in packages}
+    groups: dict[str, list[Plan]] = {}
+    package_order: list[tuple[str, str, str]] = []
+    for package in packages:
+        groups.setdefault(package.code, [])
+        package_order.append(
+            (
+                package.code,
+                package.name,
+                package.description
+                or (
+                    ("без ограничений" if not package.max_connections else f"{package.max_connections} подключений")
+                    + " · "
+                    + ("без ограничений" if not package.traffic_limit_gb else f"{package.traffic_limit_gb} ГБ трафика")
+                ),
+            )
+        )
+    for plan in plans:
+        code = _package_code(plan, packages_by_id)
+        if not code:
+            continue
+        groups.setdefault(code, []).append(plan)
+        if code not in {item[0] for item in package_order}:
+            label = _package_label(plan, packages_by_id)
+            package_order.append((code, label, ""))
+
+    cards = []
+    for code, label, description in package_order:
+        tier_plans = sorted(groups.get(code, []), key=lambda item: (item.duration_days, item.price))
+        if not tier_plans:
+            continue
+        buttons = "".join(
+            f'<a class="duration" href="/cabinet?plan_id={plan.id}#payment">{html.escape(_clean_plan_name(plan.name))} · {plan.price:g} ₽</a>'
+            for plan in tier_plans
+        )
+        cards.append(
+            f'<article class="tier-group"><h3>{html.escape(label)}</h3>'
+            f'<p class="muted">{html.escape(description)}</p><div class="duration-buttons">{buttons}</div></article>'
+        )
+    body = f'''<div class="wrap"><nav><a class="brand" href="/"><img src="/static/freedom-vpn-logo-web.webp" alt="">Freedom <i>VPN</i></a><a class="button" href="/cabinet">В кабинет</a></nav><main class="cabinet"><h2>Сменить тариф</h2><p class="muted">Выберите пакет и срок. После выбора вернём вас в кабинет, где можно оплатить продление.</p><div class="tier-groups tariff-page">{''.join(cards) or '<p class="muted">Тарифы временно недоступны.</p>'}</div></main></div><style>.tariff-page .tier-group{{cursor:default}}.tariff-page .duration{{display:inline-flex;text-decoration:none}}</style>'''
+    return HTMLResponse(_shell(body, title="Сменить тариф — Freedom VPN"), headers=_headers())
+
+
+@router.post("/cabinet/logout")
+async def cabinet_logout():
+    response = RedirectResponse("/cabinet", status_code=303, headers=_headers())
+    response.delete_cookie(COOKIE, path="/")
+    return response
+
+
+@router.post("/web/payments/manual")
+async def web_manual_payment(data: WebOrder, cabinet_token: str | None = Cookie(default=None, alias=COOKIE), db: AsyncSession = Depends(get_db)):
+    user, _ = await _require_cabinet(cabinet_token, db)
+    method = await db.scalar(select(PaymentMethod).where(PaymentMethod.code == data.method_code, PaymentMethod.is_active.is_(True)))
+    if method is None:
+        raise HTTPException(status_code=404, detail="Способ оплаты не найден")
+    if method.code in {"sber_qr", "tbank_qr"} and method.image_data is None:
+        raise HTTPException(status_code=409, detail=f"QR для способа оплаты «{method.name}» ещё не загружен")
+    node_id = data.node_id
+    if node_id is None:
+        active_client = await db.scalar(
+            select(VPNClient)
+            .where(VPNClient.user_id == user.id, VPNClient.status == "active")
+            .order_by(VPNClient.id.desc())
+        )
+        node_id = active_client.node_id if active_client else None
+    node = await db.get(VPNNode, node_id) if node_id is not None else None
+    if node is None or node.status != "active":
+        node = await db.scalar(
+            select(VPNNode).where(VPNNode.status == "active").order_by(VPNNode.id)
+        )
+    if node is None:
+        raise HTTPException(status_code=409, detail="Сейчас нет доступного VPN-сервера")
+    try:
+        if is_platega_method(method.code):
+            return_token = _payment_return_token(user.id)
+            base_url = settings.public_base_url.rstrip("/")
+            payment = await create_platega_payment(
+                db,
+                PaymentCreate(user_id=user.id, plan_id=data.plan_id, node_id=node.id, client_type="universal", flow="", fingerprint="firefox", idempotency_key=f"web:{user.id}:{secrets.token_hex(12)}"),
+                method_code=method.code,
+                source="web_cabinet",
+                return_url=f"{base_url}/cabinet/payment-return?payment=success&token={return_token}",
+                failed_url=f"{base_url}/cabinet/payment-return?payment=failed&token={return_token}",
+            )
+            platega = (payment.details or {}).get("platega") or {}
+            return {
+                "payment_id": payment.id,
+                "status": payment.status,
+                "amount": str(payment.amount),
+                "currency": payment.currency,
+                "redirect": platega.get("redirect"),
+                "payment_return_token": return_token,
+                "instructions": "Откройте ссылку Platega для оплаты. После подтверждения платежа VPN будет выдан автоматически.",
+            }
+        payment = await create_payment(
+            db,
+            PaymentCreate(user_id=user.id, plan_id=data.plan_id, node_id=node.id, client_type="universal", flow="", fingerprint="firefox", idempotency_key=f"web:{user.id}:{secrets.token_hex(12)}"),
+            provider="manual_bank",
+        )
+    except PaymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PlategaError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    payment.details = {**(payment.details or {}), "method_code": method.code, "source": "web_cabinet"}
+    await db.commit()
+    await db.refresh(payment)
+    await notify_payment_created(db, payment)
+    return {"payment_id": payment.id, "status": payment.status, "amount": str(payment.amount), "currency": payment.currency, "instructions": method.url, "qr_url": f"/web/payment-methods/{method.id}/image" if method.image_data else None}
+
+
+@router.get("/web/payment-methods/{method_id}/image")
+async def web_payment_image(method_id: int, cabinet_token: str | None = Cookie(default=None, alias=COOKIE), db: AsyncSession = Depends(get_db)):
+    await _require_cabinet(cabinet_token, db)
+    method = await db.get(PaymentMethod, method_id)
+    if method is None or method.image_data is None or not method.is_active:
+        raise HTTPException(status_code=404, detail="QR не найден")
+    return Response(content=method.image_data, media_type=method.image_mime_type or "image/png", headers=_headers())
+
+
+@router.post("/web/payments/{payment_id}/receipt")
+async def web_payment_receipt(payment_id: int, data: WebReceipt, cabinet_token: str | None = Cookie(default=None, alias=COOKIE), db: AsyncSession = Depends(get_db)):
+    user, _ = await _require_cabinet(cabinet_token, db)
+    payment = await db.get(Payment, payment_id)
+    if payment is None or payment.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Платёж не найден")
+    if payment.provider != "manual_bank" or payment.status not in {"pending", "processing"}:
+        raise HTTPException(status_code=409, detail="Этот платёж не принимает чек")
+    try:
+        receipt = base64.b64decode(data.data_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Некорректный файл") from exc
+    if not receipt or len(receipt) > 8_000_000:
+        raise HTTPException(status_code=413, detail="Размер чека должен быть от 1 байта до 8 МБ")
+    payment.receipt_data = receipt
+    payment.receipt_filename = data.filename
+    payment.receipt_mime_type = data.mime_type
+    payment.status = "processing"
+    payment.details = {**(payment.details or {}), "receipt": {"source": "web_cabinet", "media_type": "document"}}
+    await db.commit()
+    await db.refresh(payment)
+    await notify_payment_receipt(db, payment)
+    return {"payment_id": payment.id, "status": payment.status}

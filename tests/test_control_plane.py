@@ -1,10 +1,12 @@
 import os
+import base64
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
+from unittest.mock import AsyncMock, patch
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from unittest import IsolatedAsyncioTestCase
@@ -13,14 +15,17 @@ from unittest import IsolatedAsyncioTestCase
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
 import app.main as main_module
+from app.core.config import settings
 from app.db.base import Base
 from app.db.models import (
     AuditLog,
+    CabinetAccessToken,
+    Payment,
     Plan,
+    PlanPackage,
     Subscription,
     User,
     VPNClient,
@@ -38,10 +43,21 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             await connection.run_sync(Base.metadata.create_all)
         async with self.session_factory() as db:
             user = User(telegram_id=42424242, username="device-user", status="active")
+            package = PlanPackage(
+                code="lite",
+                name="Лайт",
+                description="",
+                max_connections=5,
+                traffic_limit_gb=250,
+                sort_order=10,
+            )
+            db.add(package)
+            await db.flush()
             plan = Plan(
                 code="control-plane",
-                name="Control plane",
+                name="1 день",
                 duration_days=30,
+                package_id=package.id,
                 price=Decimal("1.00"),
                 currency="USD",
                 is_active=True,
@@ -99,6 +115,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             self.user_id = user.id
             self.telegram_id = user.telegram_id
             self.node_id = node.id
+            self.package_id = package.id
 
         async def override_db():
             async with self.session_factory() as db:
@@ -120,35 +137,797 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         main_module.AsyncSessionLocal = self.original_audit_factory
         await self.engine.dispose()
 
-    async def test_node_agent_credential_state_and_status(self) -> None:
-        credential = await self.client.post(
-            f"/agent/v1/credentials/{self.node_id}/rotate",
-            auth=self.admin_auth,
+    async def test_root_serves_landing_and_admin_stays_protected(self) -> None:
+        response = await self.client.get("/", follow_redirects=False)
+        self.assertEqual(200, response.status_code)
+        self.assertIn("Freedom VPN", response.text)
+        self.assertIn("Выберите свой формат", response.text)
+        self.assertNotIn("Тарифы из административной панели", response.text)
+        self.assertNotIn("синхронизированы с VPN API", response.text)
+        unauthenticated = await self.client.get("/admin")
+        self.assertEqual(401, unauthenticated.status_code)
+        authenticated = await self.client.get("/admin", auth=self.admin_auth)
+        self.assertEqual(200, authenticated.status_code)
+        self.assertIn("Добавить пакет тарифа", authenticated.text)
+        self.assertIn('name="is_active"', authenticated.text)
+
+    async def test_admin_docs_and_infrastructure_resources_are_available(self) -> None:
+        overview = await self.client.get("/admin/overview", auth=self.admin_auth)
+        self.assertEqual(200, overview.status_code, overview.text)
+        data = overview.json()
+        doc_ids = {item["id"] for item in data["docs"]}
+        self.assertIn("notifications", doc_ids)
+        self.assertIn("vpn_lifecycle", doc_ids)
+        self.assertIn("database_reference", doc_ids)
+        doc = await self.client.get("/admin/docs/notifications", auth=self.admin_auth)
+        self.assertEqual(200, doc.status_code, doc.text)
+        self.assertIn("Уведомления", doc.text)
+
+        resources = {item["name"]: item for item in data["resources"]}
+        self.assertIn("Swagger UI", resources)
+        self.assertIn("PostgreSQL", resources)
+        self.assertIn("PostgreSQL backups", resources)
+        self.assertIn("Tailscale Funnel", resources)
+        self.assertIn("3x-ui master SSH forward", resources)
+        self.assertIn("target", resources["PostgreSQL"])
+        self.assertIn("command", resources["Tailscale Funnel"])
+        self.assertIn("path", resources["PostgreSQL backups"])
+        scripts = {item["id"]: item for item in data["scripts"] if item.get("id")}
+        self.assertIn("master_cert_renew", scripts)
+        self.assertIn(f"node_cert_renew:{self.node_id}", scripts)
+        self.assertIn("renew_master_cert.sh", scripts["master_cert_renew"]["command"])
+        self.assertIn("deploy/node/renew_3xui_ip_cert.sh", scripts[f"node_cert_renew:{self.node_id}"]["command"])
+
+        node_renew = await self.client.post(f"/admin/scripts/node_cert_renew:{self.node_id}/run", auth=self.admin_auth)
+        self.assertEqual(200, node_renew.status_code, node_renew.text)
+        self.assertEqual("host_required", node_renew.json()["status"])
+        self.assertIn("root@203.0.113.20", node_renew.json()["command"])
+
+    async def test_web_registration_emails_one_time_code_and_opens_cabinet(self) -> None:
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
+            registered = await self.client.post(
+                "/web/register",
+                json={"email": "Web.User@example.com", "plan_id": 1},
+            )
+        self.assertEqual(200, registered.status_code, registered.text)
+        code = send.await_args.args[1]
+        self.assertRegex(code, r"^\d{6}$")
+        self.assertEqual(10, send.await_args.args[2])
+
+        from app.db.models.cabinet_login_code import CabinetLoginCode
+
+        async with self.session_factory() as db:
+            web_user = await db.scalar(select(User).where(User.email == "web.user@example.com"))
+            self.assertIsNotNone(web_user)
+            login_code = await db.scalar(
+                select(CabinetLoginCode).where(CabinetLoginCode.user_id == web_user.id)
+            )
+            self.assertNotEqual(code, login_code.code_hash)
+
+        wrong_code = "000000" if code != "000000" else "000001"
+        rejected_code = await self.client.post(
+            "/web/code/login",
+            json={"email": "web.user@example.com", "code": wrong_code},
         )
-        self.assertEqual(200, credential.status_code, credential.text)
-        token = credential.json()["token"]
-        headers = {"Authorization": f"Bearer {token}"}
-        state = await self.client.get("/agent/v1/state", headers=headers)
-        self.assertEqual(200, state.status_code, state.text)
-        self.assertEqual("vpn-1", state.json()["clients"][0]["email"])
-        report = await self.client.post(
-            "/agent/v1/status",
-            headers=headers,
+        self.assertEqual(401, rejected_code.status_code)
+        code_login = await self.client.post(
+            "/web/code/login",
+            json={"email": "WEB.USER@example.com", "code": code},
+        )
+        self.assertEqual(200, code_login.status_code, code_login.text)
+        self.assertEqual("/cabinet", code_login.json()["next_url"])
+        replayed = await self.client.post(
+            "/web/code/login",
+            json={"email": "web.user@example.com", "code": code},
+        )
+        self.assertEqual(401, replayed.status_code)
+
+        password_saved = await self.client.post(
+            "/web/password", json={"password": "correct-horse-123"}
+        )
+        self.assertEqual(200, password_saved.status_code, password_saved.text)
+        cabinet = await self.client.get("/cabinet")
+        self.assertEqual(200, cabinet.status_code, cabinet.text)
+        self.assertIn("web.user@example.com", cabinet.text)
+
+        await self.client.post("/cabinet/logout")
+        password_login = await self.client.post(
+            "/web/password/login",
+            json={"email": "WEB.USER@example.com", "password": "correct-horse-123"},
+        )
+        self.assertEqual(200, password_login.status_code, password_login.text)
+        self.assertEqual(200, (await self.client.get("/cabinet")).status_code)
+        rejected = await self.client.post(
+            "/web/password/login",
+            json={"email": "web.user@example.com", "password": "wrong-password"},
+        )
+        self.assertEqual(401, rejected.status_code)
+
+    async def test_web_cabinet_creates_payment_and_uploads_receipt(self) -> None:
+        from app.db.models import CabinetAccessToken, PaymentMethod
+        from app.core.tokens import token_hash
+
+        raw = "web-test-token"
+        async with self.session_factory() as db:
+            user = await db.get(User, self.user_id)
+            user.email = "paid@example.com"
+            db.add(CabinetAccessToken(user_id=user.id, token_hash=token_hash(raw), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
+            db.add(PaymentMethod(code="sber_qr", name="Сбербанк QR", is_active=True, sort_order=1, image_data=b"qr", image_mime_type="image/png"))
+            await db.commit()
+        self.client.cookies.set("freedom_cabinet", raw)
+        created = await self.client.post(
+            "/web/payments/manual",
+            json={"plan_id": 1, "method_code": "sber_qr"},
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertIn("qr_url", created.json())
+        receipt = await self.client.post(
+            f"/web/payments/{created.json()['payment_id']}/receipt",
+            json={"filename": "receipt.png", "mime_type": "image/png", "data_base64": base64.b64encode(b"receipt").decode()},
+        )
+        self.assertEqual(200, receipt.status_code, receipt.text)
+        self.assertEqual("processing", receipt.json()["status"])
+
+    async def test_platega_return_restores_web_cabinet_session(self) -> None:
+        from app.api.routes.web import _payment_return_token
+
+        token = _payment_return_token(self.user_id)
+        self.client.cookies.clear()
+        returned = await self.client.get(
+            f"/cabinet/payment-return?payment=success&token={token}",
+            follow_redirects=False,
+        )
+
+        self.assertEqual(303, returned.status_code, returned.text)
+        self.assertEqual("/cabinet?payment=success", returned.headers["location"])
+        self.assertIn("freedom_cabinet=", returned.headers["set-cookie"])
+        self.assertIn("SameSite=strict", returned.headers["set-cookie"])
+
+        cabinet = await self.client.get("/cabinet")
+        self.assertEqual(200, cabinet.status_code, cabinet.text)
+
+    async def test_cabinet_payment_return_fallback_script_is_available(self) -> None:
+        self.client.cookies.clear()
+        response = await self.client.get("/cabinet?payment=success")
+
+        self.assertEqual(401, response.status_code, response.text)
+        self.assertIn("freedom_payment_return_token", response.text)
+        self.assertIn("/cabinet/payment-return", response.text)
+
+    async def test_web_platega_payment_returns_restore_token(self) -> None:
+        from types import SimpleNamespace
+        from app.db.models import CabinetAccessToken, PaymentMethod
+        from app.core.tokens import token_hash
+
+        raw = "web-platega-token"
+        async with self.session_factory() as db:
+            db.add(CabinetAccessToken(user_id=self.user_id, token_hash=token_hash(raw), expires_at=datetime.now(timezone.utc) + timedelta(days=1)))
+            db.add(PaymentMethod(code="platega_sbp_qr", name="Platega СБП", is_active=True, sort_order=1))
+            await db.commit()
+        self.client.cookies.set("freedom_cabinet", raw)
+        fake_payment = SimpleNamespace(
+            id=123,
+            status="pending",
+            amount=Decimal("1.00"),
+            currency="RUB",
+            details={"platega": {"redirect": "https://platega.test/pay"}},
+        )
+
+        notify_created = AsyncMock()
+        with (
+            patch("app.api.routes.web.create_platega_payment", new=AsyncMock(return_value=fake_payment)) as create,
+            patch("app.api.routes.web.notify_payment_created", new=notify_created),
+        ):
+            created = await self.client.post(
+                "/web/payments/manual",
+                json={"plan_id": 1, "method_code": "platega_sbp_qr"},
+            )
+
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual("https://platega.test/pay", created.json()["redirect"])
+        self.assertIn("payment_return_token", created.json())
+        _, kwargs = create.await_args
+        self.assertIn("/cabinet/payment-return?payment=success&token=", kwargs["return_url"])
+        self.assertIn("/cabinet/payment-return?payment=failed&token=", kwargs["failed_url"])
+        notify_created.assert_not_awaited()
+
+    async def test_api_platega_payment_creation_does_not_notify_before_payment(self) -> None:
+        async with self.session_factory() as db:
+            payment = Payment(
+                user_id=self.user_id,
+                plan_id=1,
+                node_id=self.node_id,
+                provider="platega",
+                provider_payment_id="platega-created-test",
+                idempotency_key="platega-created-test",
+                amount=Decimal("1.00"),
+                currency="RUB",
+                status="pending",
+                client_type="universal",
+                flow="",
+                fingerprint="firefox",
+                details={"platega": {"redirect": "https://platega.test/pay"}},
+            )
+            db.add(payment)
+            await db.commit()
+            await db.refresh(payment)
+
+        notify_created = AsyncMock()
+        with (
+            patch("app.api.routes.payments.create_platega_payment", new=AsyncMock(return_value=payment)) as create,
+            patch("app.api.routes.payments.notify_payment_created", new=notify_created),
+        ):
+            created = await self.client.post(
+                "/payments/manual",
+                headers=self.service_headers,
+                json={
+                    "user_id": self.user_id,
+                    "plan_id": 1,
+                    "node_id": self.node_id,
+                    "client_type": "universal",
+                    "flow": "",
+                    "fingerprint": "firefox",
+                    "idempotency_key": "platega-created-test",
+                    "method_code": "platega_sbp_qr",
+                },
+            )
+
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual("platega", created.json()["provider"])
+        self.assertEqual("https://t.me/vpn142323srv_bot", create.await_args.kwargs["return_url"])
+        self.assertEqual("https://t.me/vpn142323srv_bot", create.await_args.kwargs["failed_url"])
+        notify_created.assert_not_awaited()
+
+    async def test_platega_webhook_accepts_confirmed_payment(self) -> None:
+        old_merchant = settings.platega_merchant_id
+        old_secret = settings.platega_secret
+        settings.platega_merchant_id = "merchant-test"
+        settings.platega_secret = "secret-test"
+        try:
+            async with self.session_factory() as db:
+                subscription = (
+                    await db.execute(select(Subscription).where(Subscription.user_id == self.user_id))
+                ).scalar_one()
+                payment = Payment(
+                    user_id=self.user_id,
+                    plan_id=subscription.plan_id,
+                    node_id=self.node_id,
+                    subscription_id=subscription.id,
+                    provider="platega",
+                    provider_payment_id="platega-confirmed-1",
+                    idempotency_key="platega-confirmed-1",
+                    amount=Decimal("10.00"),
+                    currency="RUB",
+                    status="pending",
+                    client_type="amnezia",
+                    flow="xtls-rprx-vision",
+                    fingerprint="chrome",
+                    details={},
+                )
+                db.add(payment)
+                await db.commit()
+                payment_id = payment.id
+
+            with patch("app.api.routes.payments.notify_payment_paid", new=AsyncMock()) as notify_paid:
+                response = await self.client.post(
+                    "/payments/webhooks/platega",
+                    headers={
+                        "X-MerchantId": "merchant-test",
+                        "X-Secret": "secret-test",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "id": "platega-confirmed-1",
+                        "amount": 10,
+                        "currency": "RUB",
+                        "status": "CONFIRMED",
+                        "paymentMethod": 2,
+                    },
+                )
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("ok", response.json()["status"])
+            self.assertEqual("paid", response.json()["payment_status"])
+            notify_paid.assert_awaited_once()
+
+            async with self.session_factory() as db:
+                saved = await db.get(Payment, payment_id)
+                self.assertEqual("paid", saved.status)
+                self.assertIsNotNone(saved.paid_at)
+        finally:
+            settings.platega_merchant_id = old_merchant
+            settings.platega_secret = old_secret
+
+    async def test_platega_webhook_unknown_payment_returns_200(self) -> None:
+        old_merchant = settings.platega_merchant_id
+        old_secret = settings.platega_secret
+        settings.platega_merchant_id = "merchant-test"
+        settings.platega_secret = "secret-test"
+        try:
+            response = await self.client.post(
+                "/payments/webhooks/platega",
+                headers={
+                    "X-MerchantId": "merchant-test",
+                    "X-Secret": "secret-test",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "id": "platega-missing-1",
+                    "amount": 10,
+                    "currency": "RUB",
+                    "status": "CONFIRMED",
+                    "paymentMethod": 2,
+                },
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("ignored", response.json()["status"])
+            self.assertEqual("payment_not_found", response.json()["reason"])
+        finally:
+            settings.platega_merchant_id = old_merchant
+            settings.platega_secret = old_secret
+
+    async def test_bot_can_link_existing_telegram_user_to_email(self) -> None:
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
+            response = await self.client.post(
+                "/web/telegram-cabinet-link",
+                headers=self.service_headers,
+                json={"telegram_id": self.telegram_id, "email": "owner@example.com"},
+            )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("owner@example.com", send.await_args.args[0])
+        self.assertRegex(send.await_args.args[1], r"^\d{6}$")
+        async with self.session_factory() as db:
+            user = await db.get(User, self.user_id)
+            self.assertEqual("owner@example.com", user.email)
+
+        unauthenticated = await self.client.post(
+            "/web/telegram-cabinet-link",
+            json={"telegram_id": self.telegram_id, "email": "other@example.com"},
+        )
+        self.assertEqual(401, unauthenticated.status_code)
+
+    async def test_bot_link_merges_existing_web_user_into_telegram_user(self) -> None:
+        from app.core.tokens import token_hash
+
+        raw = "web-first-token"
+        async with self.session_factory() as db:
+            web_user = User(
+                telegram_id=-12345,
+                email="webfirst@example.com",
+                password_hash="hashed-password",
+                status="active",
+            )
+            db.add(web_user)
+            await db.flush()
+            web_user_id = web_user.id
+            db.add(
+                CabinetAccessToken(
+                    user_id=web_user.id,
+                    token_hash=token_hash(raw),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            await db.commit()
+
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
+            response = await self.client.post(
+                "/web/telegram-cabinet-link",
+                headers=self.service_headers,
+                json={"telegram_id": self.telegram_id, "email": "webfirst@example.com"},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("webfirst@example.com", send.await_args.args[0])
+        async with self.session_factory() as db:
+            merged_web_user = await db.get(User, web_user_id)
+            telegram_user = await db.get(User, self.user_id)
+            moved_token = await db.scalar(
+                select(CabinetAccessToken).where(CabinetAccessToken.token_hash == token_hash(raw))
+            )
+            self.assertIsNone(merged_web_user)
+            self.assertEqual("webfirst@example.com", telegram_user.email)
+            self.assertEqual("hashed-password", telegram_user.password_hash)
+            self.assertEqual(self.user_id, moved_token.user_id)
+
+    async def test_web_registration_with_telegram_link_uses_existing_user(self) -> None:
+        from app.core.cabinet_links import telegram_cabinet_link_token
+
+        token = telegram_cabinet_link_token(self.user_id)
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
+            response = await self.client.post(
+                "/web/register",
+                json={
+                    "email": "linked@example.com",
+                    "telegram_link_token": token,
+                },
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("linked@example.com", send.await_args.args[0])
+        async with self.session_factory() as db:
+            users = list((await db.execute(select(User))).scalars())
+            linked = await db.get(User, self.user_id)
+            self.assertEqual(1, len(users))
+            self.assertEqual("linked@example.com", linked.email)
+
+    async def test_web_registration_with_telegram_link_merges_existing_web_email(self) -> None:
+        from app.core.cabinet_links import telegram_cabinet_link_token
+
+        async with self.session_factory() as db:
+            web_user = User(telegram_id=-54321, email="claimed@example.com", status="active")
+            db.add(web_user)
+            await db.flush()
+            web_user_id = web_user.id
+            await db.commit()
+
+        token = telegram_cabinet_link_token(self.user_id)
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()):
+            response = await self.client.post(
+                "/web/register",
+                json={
+                    "email": "claimed@example.com",
+                    "telegram_link_token": token,
+                },
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        async with self.session_factory() as db:
+            self.assertIsNone(await db.get(User, web_user_id))
+            telegram_user = await db.get(User, self.user_id)
+            self.assertEqual("claimed@example.com", telegram_user.email)
+
+    async def test_web_registration_rejects_email_owned_by_another_user(self) -> None:
+        from app.core.cabinet_links import telegram_cabinet_link_token
+
+        async with self.session_factory() as db:
+            db.add(User(telegram_id=999999, email="busy@example.com", status="active"))
+            await db.commit()
+
+        token = telegram_cabinet_link_token(self.user_id)
+        response = await self.client.post(
+            "/web/register",
             json={
-                "status": "online",
-                "latency_ms": 12.5,
-                "xray_users": 1,
-                "active_connections": 1,
-                "restored": 0,
-                "removed": 0,
-                "errors": [],
+                "email": "busy@example.com",
+                "telegram_link_token": token,
             },
         )
-        self.assertEqual(200, report.status_code, report.text)
+
+        self.assertEqual(409, response.status_code, response.text)
+
+    async def test_temporary_registration_opens_cabinet_without_email(self) -> None:
+        from app.core.config import settings
+
+        previous = settings.cabinet_allow_temporary_registration
+        settings.cabinet_allow_temporary_registration = True
+        try:
+            response = await self.client.post(
+                "/web/temporary-register", follow_redirects=False
+            )
+            self.assertEqual(303, response.status_code, response.text)
+            self.assertEqual("/cabinet", response.headers["location"])
+            cabinet = await self.client.get("/cabinet")
+            self.assertEqual(200, cabinet.status_code, cabinet.text)
+            self.assertIn("Выберите способ оплаты", cabinet.text)
+            self.assertIn(">Продлить<", cabinet.text)
+            self.assertIn("Сменить тариф", cabinet.text)
+        finally:
+            settings.cabinet_allow_temporary_registration = previous
+
+    async def test_cabinet_tariffs_page_selects_plan(self) -> None:
+        from app.core.tokens import token_hash
+
+        raw = "tariff-page-token"
         async with self.session_factory() as db:
-            node = await db.get(VPNNode, self.node_id)
-            self.assertEqual("online", node.health_status)
-            self.assertEqual(12.5, node.latency_ms)
+            extra = Plan(
+                code="lite_30d",
+                name="1 мес (-3%)",
+                duration_days=30,
+                max_connections=5,
+                traffic_limit_gb=250,
+                package_id=self.package_id,
+                price=Decimal("390.00"),
+                currency="RUB",
+                is_active=True,
+                is_public=True,
+            )
+            db.add_all([extra, CabinetAccessToken(user_id=self.user_id, token_hash=token_hash(raw), expires_at=datetime.now(timezone.utc) + timedelta(days=1))])
+            await db.commit()
+
+        self.client.cookies.set("freedom_cabinet", raw)
+        response = await self.client.get("/cabinet/tariffs")
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("Сменить тариф", response.text)
+        self.assertIn("Лайт", response.text)
+        self.assertIn("/cabinet?plan_id=", response.text)
+
+    async def test_cabinet_shows_remaining_traffic(self) -> None:
+        from app.core.tokens import token_hash
+        from app.db.models import CabinetAccessToken
+
+        raw = "traffic-test-token"
+        async with self.session_factory() as db:
+            user = await db.get(User, self.user_id)
+            user.email = "traffic@example.com"
+            client = (
+                await db.execute(select(VPNClient).where(VPNClient.user_id == self.user_id))
+            ).scalar_one()
+            client.traffic_limit_gb = 10
+            db.add(
+                CabinetAccessToken(
+                    user_id=user.id,
+                    token_hash=token_hash(raw),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            await db.commit()
+
+        self.client.cookies.set("freedom_cabinet", raw)
+        with patch("app.api.routes.web.ThreeXUIClient") as panel:
+            panel.return_value.get_client_traffic = AsyncMock(
+                return_value={
+                    "email": "vpn-1",
+                    "up": 2 * 1024**3,
+                    "down": 3 * 1024**3,
+                    "total": 10 * 1024**3,
+                }
+            )
+            response = await self.client.get("/cabinet")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("5 ГБ из 10 ГБ", response.text)
+        self.assertIn('Подписка <span class="status">активна</span>', response.text)
+
+    async def test_cabinet_marks_subscription_inactive_when_traffic_is_exhausted(self) -> None:
+        from app.core.tokens import token_hash
+        from app.db.models import CabinetAccessToken
+
+        raw = "traffic-empty-token"
+        async with self.session_factory() as db:
+            user = await db.get(User, self.user_id)
+            user.email = "empty@example.com"
+            client = (
+                await db.execute(select(VPNClient).where(VPNClient.user_id == self.user_id))
+            ).scalar_one()
+            client.traffic_limit_gb = 10
+            db.add(
+                CabinetAccessToken(
+                    user_id=user.id,
+                    token_hash=token_hash(raw),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            await db.commit()
+
+        self.client.cookies.set("freedom_cabinet", raw)
+        with patch("app.api.routes.web.ThreeXUIClient") as panel:
+            panel.return_value.get_client_traffic = AsyncMock(
+                return_value={
+                    "email": "vpn-1",
+                    "up": 10 * 1024**3,
+                    "down": 1,
+                    "total": 10 * 1024**3,
+                }
+            )
+            response = await self.client.get("/cabinet")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("0 ГБ из 10 ГБ", response.text)
+        self.assertIn('Подписка <span class="status inactive">не активна</span>', response.text)
+
+        with patch("app.api.routes.user_status.ThreeXUIClient") as panel:
+            panel.return_value.get_client_traffic = AsyncMock(
+                return_value={
+                    "email": "vpn-1",
+                    "up": 10 * 1024**3,
+                    "down": 1,
+                    "total": 10 * 1024**3,
+                }
+            )
+            status = await self.client.get(
+                f"/users/{self.telegram_id}/vpn-status",
+                headers=self.service_headers,
+            )
+
+        self.assertEqual(200, status.status_code, status.text)
+        self.assertEqual("expired", status.json()["subscription"]["status"])
+        self.assertEqual("1 день", status.json()["subscription"]["plan_name"])
+        self.assertEqual("Лайт", status.json()["subscription"]["package_name"])
+
+    async def test_plan_delete_rejects_used_and_removes_unused(self) -> None:
+        used = await self.client.delete("/plans/1", headers=self.service_headers)
+        self.assertEqual(409, used.status_code, used.text)
+
+        created = await self.client.post(
+            "/plans",
+            headers=self.service_headers,
+            json={
+                "code": "unused-plan",
+                "name": "Unused",
+                "duration_days": 5,
+                "max_connections": 3,
+                "traffic_limit_gb": 250,
+                "price": "2.00",
+                "currency": "USD",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual(3, created.json()["max_connections"])
+        self.assertEqual(250, created.json()["traffic_limit_gb"])
+        plan_id = created.json()["id"]
+        deleted = await self.client.delete(
+            f"/plans/{plan_id}", headers=self.service_headers
+        )
+        self.assertEqual(204, deleted.status_code, deleted.text)
+        async with self.session_factory() as db:
+            self.assertIsNone(await db.get(Plan, plan_id))
+
+    async def test_admin_can_cancel_pending_payment(self) -> None:
+        async with self.session_factory() as db:
+            payment = Payment(
+                user_id=self.user_id,
+                plan_id=1,
+                node_id=self.node_id,
+                provider="mock",
+                provider_payment_id="admin-cancel-test",
+                idempotency_key="admin-cancel-test",
+                amount=Decimal("1.00"),
+                currency="USD",
+                status="pending",
+                client_type="universal",
+                flow="",
+                fingerprint="firefox",
+                details={},
+            )
+            db.add(payment)
+            await db.commit()
+            await db.refresh(payment)
+            payment_id = payment.id
+
+        response = await self.client.post(
+            f"/admin/payments/{payment_id}/status",
+            auth=self.admin_auth,
+            json={"status": "cancelled"},
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("cancelled", response.json()["status"])
+
+        invalid = await self.client.post(
+            f"/admin/payments/{payment_id}/status",
+            auth=self.admin_auth,
+            json={"status": "deleted"},
+        )
+        self.assertEqual(422, invalid.status_code, invalid.text)
+
+    async def test_platega_payment_cannot_be_manually_approved(self) -> None:
+        async with self.session_factory() as db:
+            payment = Payment(
+                user_id=self.user_id,
+                plan_id=1,
+                node_id=self.node_id,
+                provider="platega",
+                provider_payment_id="platega-manual-paid-test",
+                idempotency_key="platega-manual-paid-test",
+                amount=Decimal("1.00"),
+                currency="RUB",
+                status="pending",
+                client_type="universal",
+                flow="",
+                fingerprint="firefox",
+                details={},
+            )
+            db.add(payment)
+            await db.commit()
+            await db.refresh(payment)
+            payment_id = payment.id
+
+        admin_response = await self.client.post(
+            f"/admin/payments/{payment_id}/status",
+            auth=self.admin_auth,
+            json={"status": "paid"},
+        )
+        self.assertEqual(409, admin_response.status_code, admin_response.text)
+
+        service_response = await self.client.post(
+            f"/payments/{payment_id}/status",
+            headers=self.service_headers,
+            json={"status": "paid"},
+        )
+        self.assertEqual(409, service_response.status_code, service_response.text)
+
+    async def test_admin_manages_public_payment_methods(self) -> None:
+        created = await self.client.post(
+            "/payment-methods",
+            auth=self.admin_auth,
+            json={"code": "sbp", "name": "СБП, QR (рубли)", "sort_order": 10},
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        method_id = created.json()["id"]
+        image = await self.client.put(
+            f"/payment-methods/{method_id}/image",
+            auth=self.admin_auth,
+            json={
+                "filename": "qr.png",
+                "mime_type": "image/png",
+                "data_base64": base64.b64encode(b"fake-png").decode(),
+            },
+        )
+        self.assertEqual(200, image.status_code, image.text)
+        self.assertTrue(image.json()["has_image"])
+        downloaded = await self.client.get(
+            f"/payment-methods/{method_id}/image", headers=self.service_headers
+        )
+        self.assertEqual(b"fake-png", downloaded.content)
+        self.assertEqual("image/png", downloaded.headers["content-type"])
+        visible = await self.client.get("/payment-methods", headers=self.service_headers)
+        self.assertEqual(["sbp"], [item["code"] for item in visible.json()])
+        disabled = await self.client.patch(
+            f"/payment-methods/{method_id}",
+            auth=self.admin_auth,
+            json={"is_active": False},
+        )
+        self.assertEqual(200, disabled.status_code, disabled.text)
+        visible = await self.client.get("/payment-methods", headers=self.service_headers)
+        self.assertEqual([], visible.json())
+
+    async def test_manual_bank_receipt_waits_for_admin_confirmation(self) -> None:
+        created = await self.client.post(
+            "/payments/manual",
+            headers=self.service_headers,
+            json={
+                "user_id": self.user_id,
+                "plan_id": 1,
+                "node_id": self.node_id,
+                "method_code": "sber_qr",
+                "idempotency_key": "manual-receipt-test",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual("pending", created.json()["status"])
+        payment_id = created.json()["id"]
+        receipt = await self.client.post(
+            f"/payments/{payment_id}/receipt",
+            headers=self.service_headers,
+            json={
+                "user_id": self.user_id,
+                "telegram_file_id": "telegram-file-id",
+                "telegram_file_unique_id": "unique-id",
+                "media_type": "photo",
+                "filename": "receipt.jpg",
+                "mime_type": "image/jpeg",
+                "data_base64": base64.b64encode(b"fake-receipt").decode(),
+            },
+        )
+        self.assertEqual(200, receipt.status_code, receipt.text)
+        self.assertEqual("processing", receipt.json()["status"])
+        self.assertEqual(
+            "telegram-file-id",
+            receipt.json()["details"]["receipt"]["telegram_file_id"],
+        )
+        downloaded = await self.client.get(
+            f"/admin/payments/{payment_id}/receipt", auth=self.admin_auth
+        )
+        self.assertEqual(200, downloaded.status_code, downloaded.text)
+        self.assertEqual(b"fake-receipt", downloaded.content)
+
+    async def test_service_can_update_payment_status_for_telegram_admin_button(self) -> None:
+        created = await self.client.post(
+            "/payments/manual",
+            headers=self.service_headers,
+            json={
+                "user_id": self.user_id,
+                "plan_id": 1,
+                "node_id": self.node_id,
+                "method_code": "sber_qr",
+                "idempotency_key": "telegram-admin-button-test",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        updated = await self.client.post(
+            f"/payments/{created.json()['id']}/status",
+            headers=self.service_headers,
+            json={"status": "failed"},
+        )
+        self.assertEqual(200, updated.status_code, updated.text)
+        self.assertEqual("failed", updated.json()["status"])
 
     async def test_promo_extends_subscription_once(self) -> None:
         async with self.session_factory() as db:

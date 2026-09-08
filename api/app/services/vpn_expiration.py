@@ -7,10 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.subscription import Subscription
 from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node_config import VPNNodeConfig
-from app.services.xray import (
-    XrayClient,
-    XrayError,
-    XrayUserNotFound,
+from app.services.threexui import (
+    ThreeXUIClient,
+    ThreeXUIError,
+    ThreeXUIClientNotFound,
 )
 
 
@@ -19,7 +19,7 @@ async def revoke_vpn_client(
     client: VPNClient,
     now: datetime,
     *,
-    xray_factory: Callable[..., XrayClient] = XrayClient,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> bool:
     """
     Отзывает VPN-клиента.
@@ -63,7 +63,7 @@ async def revoke_vpn_client(
         return False
 
     if client.protocol == "vless":
-        xray = xray_factory(address=api_address)
+        xray = panel_factory(address=api_address)
 
         try:
             await xray.remove_vless_user(
@@ -74,7 +74,7 @@ async def revoke_vpn_client(
                 email=f"vpn-{client.id}",
             )
 
-        except XrayUserNotFound:
+        except ThreeXUIClientNotFound:
             # Идемпотентный revoke:
             # клиента уже нет в Xray, значит с точки зрения
             # конечного состояния всё уже правильно.
@@ -84,7 +84,7 @@ async def revoke_vpn_client(
                 flush=True,
             )
 
-        except XrayError as exc:
+        except ThreeXUIError as exc:
             # Xray действительно недоступен или произошла
             # другая ошибка. DB пока не меняем.
             print(
@@ -111,7 +111,7 @@ async def revoke_vpn_client(
 async def expire_subscriptions(
     db: AsyncSession,
     *,
-    xray_factory: Callable[..., XrayClient] = XrayClient,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> int:
     """
     Обрабатывает истёкшие подписки.
@@ -158,7 +158,7 @@ async def expire_subscriptions(
                 db=db,
                 client=client,
                 now=now,
-                xray_factory=xray_factory,
+                panel_factory=panel_factory,
             )
 
             if not revoked:
@@ -185,7 +185,7 @@ async def expire_subscriptions(
 async def expire_vpn_clients(
     db: AsyncSession,
     *,
-    xray_factory: Callable[..., XrayClient] = XrayClient,
+    panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> int:
     """
     Дополнительная страховка.
@@ -217,7 +217,7 @@ async def expire_vpn_clients(
             db=db,
             client=client,
             now=now,
-            xray_factory=xray_factory,
+            panel_factory=panel_factory,
         )
 
         if revoked:
