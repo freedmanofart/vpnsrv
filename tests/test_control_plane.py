@@ -475,6 +475,49 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(401, unauthenticated.status_code)
 
+    async def test_bot_link_merges_existing_web_user_into_telegram_user(self) -> None:
+        from app.core.tokens import token_hash
+
+        raw = "web-first-token"
+        async with self.session_factory() as db:
+            web_user = User(
+                telegram_id=-12345,
+                email="webfirst@example.com",
+                password_hash="hashed-password",
+                status="active",
+            )
+            db.add(web_user)
+            await db.flush()
+            web_user_id = web_user.id
+            db.add(
+                CabinetAccessToken(
+                    user_id=web_user.id,
+                    token_hash=token_hash(raw),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            await db.commit()
+
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
+            response = await self.client.post(
+                "/web/telegram-cabinet-link",
+                headers=self.service_headers,
+                json={"telegram_id": self.telegram_id, "email": "webfirst@example.com"},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("webfirst@example.com", send.await_args.args[0])
+        async with self.session_factory() as db:
+            merged_web_user = await db.get(User, web_user_id)
+            telegram_user = await db.get(User, self.user_id)
+            moved_token = await db.scalar(
+                select(CabinetAccessToken).where(CabinetAccessToken.token_hash == token_hash(raw))
+            )
+            self.assertIsNone(merged_web_user)
+            self.assertEqual("webfirst@example.com", telegram_user.email)
+            self.assertEqual("hashed-password", telegram_user.password_hash)
+            self.assertEqual(self.user_id, moved_token.user_id)
+
     async def test_web_registration_with_telegram_link_uses_existing_user(self) -> None:
         from app.core.cabinet_links import telegram_cabinet_link_token
 
@@ -496,11 +539,37 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             self.assertEqual(1, len(users))
             self.assertEqual("linked@example.com", linked.email)
 
+    async def test_web_registration_with_telegram_link_merges_existing_web_email(self) -> None:
+        from app.core.cabinet_links import telegram_cabinet_link_token
+
+        async with self.session_factory() as db:
+            web_user = User(telegram_id=-54321, email="claimed@example.com", status="active")
+            db.add(web_user)
+            await db.flush()
+            web_user_id = web_user.id
+            await db.commit()
+
+        token = telegram_cabinet_link_token(self.user_id)
+        with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()):
+            response = await self.client.post(
+                "/web/register",
+                json={
+                    "email": "claimed@example.com",
+                    "telegram_link_token": token,
+                },
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        async with self.session_factory() as db:
+            self.assertIsNone(await db.get(User, web_user_id))
+            telegram_user = await db.get(User, self.user_id)
+            self.assertEqual("claimed@example.com", telegram_user.email)
+
     async def test_web_registration_rejects_email_owned_by_another_user(self) -> None:
         from app.core.cabinet_links import telegram_cabinet_link_token
 
         async with self.session_factory() as db:
-            db.add(User(telegram_id=-999, email="busy@example.com", status="active"))
+            db.add(User(telegram_id=999999, email="busy@example.com", status="active"))
             await db.commit()
 
         token = telegram_cabinet_link_token(self.user_id)

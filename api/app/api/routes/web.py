@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ from app.core.config import settings
 from app.core.cabinet_links import telegram_cabinet_link_token, verify_telegram_cabinet_link_token
 from app.db.models.cabinet_access import CabinetAccessToken
 from app.db.models.cabinet_login_code import CabinetLoginCode
+from app.db.models.audit import AccessGrant, ActivationCode, ClientDevice
 from app.db.models.plan import Plan
 from app.db.models.plan_package import PlanPackage
 from app.db.models.payment import Payment
@@ -394,6 +395,80 @@ async def _create_cabinet_session(db: AsyncSession, user: User, response: Respon
     _set_cabinet_cookie(response, raw)
 
 
+async def _merge_web_user_into_telegram_user(db: AsyncSession, web_user: User, telegram_user: User) -> User:
+    if web_user.id == telegram_user.id:
+        return telegram_user
+    if web_user.telegram_id > 0 and web_user.telegram_id != telegram_user.telegram_id:
+        raise HTTPException(status_code=409, detail="Этот email уже связан с другим Telegram аккаунтом")
+
+    web_active_subscription = await db.scalar(
+        select(Subscription.id)
+        .where(Subscription.user_id == web_user.id, Subscription.status == "active")
+        .limit(1)
+    )
+    telegram_active_subscription = await db.scalar(
+        select(Subscription.id)
+        .where(Subscription.user_id == telegram_user.id, Subscription.status == "active")
+        .limit(1)
+    )
+    if web_active_subscription is not None and telegram_active_subscription is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="У web и Telegram аккаунтов уже есть активные подписки. Нужно объединить вручную в админке.",
+        )
+
+    web_email = web_user.email
+    web_password_hash = web_user.password_hash
+    web_user.email = None
+    await db.flush()
+
+    if web_email:
+        telegram_user.email = web_email
+    if web_password_hash and not telegram_user.password_hash:
+        telegram_user.password_hash = web_password_hash
+
+    for model in (
+        CabinetAccessToken,
+        CabinetLoginCode,
+        Subscription,
+        VPNClient,
+        Payment,
+        ClientDevice,
+        ActivationCode,
+    ):
+        await db.execute(
+            update(model)
+            .where(model.user_id == web_user.id)
+            .values(user_id=telegram_user.id)
+        )
+    try:
+        await db.execute(
+            update(AccessGrant)
+            .where(AccessGrant.user_id == web_user.id)
+            .values(user_id=telegram_user.id)
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Не удалось объединить пробный доступ автоматически. Нужно объединить вручную в админке.",
+        ) from exc
+
+    await db.delete(web_user)
+    await db.flush()
+    logger.info(
+        "cabinet_users_merged",
+        extra={
+            "event": {
+                "event_type": "cabinet_users_merged",
+                "target_user_id": telegram_user.id,
+                "merged_user_id": web_user.id,
+                "telegram_id": telegram_user.telegram_id,
+            }
+        },
+    )
+    return telegram_user
+
+
 @router.post("/web/register")
 async def register(data: Registration, db: AsyncSession = Depends(get_db)):
     email_address = _normalize_email(data.email)
@@ -415,9 +490,10 @@ async def register(data: Registration, db: AsyncSession = Depends(get_db)):
     user = await db.scalar(select(User).where(User.email == email_address))
     if linked_user is not None:
         if user is not None and user.id != linked_user.id:
-            raise HTTPException(status_code=409, detail="Этот email уже связан с другим аккаунтом")
+            user = await _merge_web_user_into_telegram_user(db, user, linked_user)
+        else:
+            user = linked_user
         linked_user.email = email_address
-        user = linked_user
     elif user is None:
         user = User(telegram_id=-secrets.randbelow(9_000_000_000_000_000) - 1, email=email_address, status="active")
         db.add(user)
@@ -512,7 +588,7 @@ async def telegram_cabinet_link(data: TelegramCabinetLink, db: AsyncSession = De
         raise HTTPException(status_code=404, detail="Пользователь Telegram не найден")
     owner = await db.scalar(select(User).where(User.email == email_address, User.id != user.id))
     if owner is not None:
-        raise HTTPException(status_code=409, detail="Этот email уже связан с другим аккаунтом")
+        user = await _merge_web_user_into_telegram_user(db, owner, user)
     user.email = email_address
     expires, code = await _issue_code(user, email_address, db)
     token = telegram_cabinet_link_token(user.id)
