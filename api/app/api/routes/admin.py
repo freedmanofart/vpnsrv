@@ -96,6 +96,7 @@ HOST_COMMANDS = {
     "platega_check": "docker cp scripts/check_platega_payment.py vpn-api:/tmp/check_platega_payment.py && docker exec vpn-api python /tmp/check_platega_payment.py --method all --amount 10 --currency RUB --description \"Freedom VPN Platega admin check\"",
     "tailscale_recover": "scripts/recover_tailscale.sh",
     "tailscale_funnel": "tailscale funnel status",
+    "tailscale_cert_units": "systemctl status vpn-tailscale-cert.service vpn-tailscale-cert.timer --no-pager && systemctl list-timers vpn-tailscale-cert.timer --all --no-pager && journalctl -u vpn-tailscale-cert.service -n 40 --no-pager",
     "master_cert_renew": "scripts/renew_master_cert.sh",
 }
 
@@ -279,6 +280,68 @@ def _check_smtp() -> dict:
             "details": str(exc),
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
+
+
+def _check_tailscale_cert_units() -> dict:
+    started = time.perf_counter()
+    command = [
+        "systemctl",
+        "is-active",
+        "vpn-tailscale-cert.timer",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "name": "Tailscale cert service/timer",
+            "status": "degraded",
+            "details": (
+                "Host-only проверка: выполните на сервере "
+                "`systemctl status vpn-tailscale-cert.service vpn-tailscale-cert.timer --no-pager`. "
+                f"Из контейнера: {exc}"
+            ),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    timer_state = completed.stdout.strip() or completed.stderr.strip()
+    if completed.returncode == 0 and timer_state == "active":
+        next_run = subprocess.run(
+            ["systemctl", "list-timers", "vpn-tailscale-cert.timer", "--all", "--no-pager"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        details = "timer active"
+        lines = [line.strip() for line in next_run.stdout.splitlines() if "vpn-tailscale-cert.timer" in line]
+        if lines:
+            details = lines[0]
+        return {
+            "name": "Tailscale cert service/timer",
+            "status": "online",
+            "details": details,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    service = subprocess.run(
+        ["systemctl", "is-failed", "vpn-tailscale-cert.service"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    service_state = service.stdout.strip() or service.stderr.strip()
+    status = "offline" if service_state == "failed" else "degraded"
+    return {
+        "name": "Tailscale cert service/timer",
+        "status": status,
+        "details": f"timer={timer_state or 'unknown'}, service={service_state or 'unknown'}",
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+    }
 
 
 async def _check_nodes(db: AsyncSession) -> list[dict]:
@@ -676,6 +739,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
             {"id": "platega_check", "name": "Проверить Platega: СБП, МИР, крипта", "command": "scripts/check_platega_payment.py --method all --amount 10 --currency RUB", "runnable": True},
             {"id": "mail_chain_recover", "name": "Проверить почту и быстро переподнять api/bot", "command": "scripts/check_mail_chain.sh", "runnable": True},
             {"id": "tailscale_recover", "name": "Быстро переподнять Tailscale, Funnel и сертификат", "command": "scripts/recover_tailscale.sh", "runnable": True},
+            {"id": "tailscale_cert_units", "name": "Проверить Tailscale cert service/timer", "command": "systemctl status vpn-tailscale-cert.service vpn-tailscale-cert.timer", "runnable": True},
             {"id": "master_cert_renew", "name": "Обновить SSL-сертификат master/site", "command": "scripts/renew_master_cert.sh", "runnable": True},
             *[
                 {
@@ -740,6 +804,7 @@ async def health_dashboard(db: AsyncSession = Depends(get_db)):
     )
     checks.extend(public_results)
     checks.extend(await _check_ssl_targets(db))
+    checks.append(await asyncio.to_thread(_check_tailscale_cert_units))
     checks.append(await asyncio.to_thread(_check_smtp))
     checks.extend(await _check_nodes(db))
     return {
