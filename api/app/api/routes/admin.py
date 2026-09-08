@@ -155,6 +155,7 @@ def _resource_rows(xui_links: list[str]) -> list[dict]:
 
 
 ADMIN_DOCS = [
+    {"id": "mvp_presentation", "name": "Презентационный обзор MVP", "path": "docs/mvp-presentation.md"},
     {"id": "frontend", "name": "Frontend-структура сайта и web-кабинета", "path": "docs/frontend-site-structure.md"},
     {"id": "web_cabinet", "name": "Web-кабинет, почта, коды и пароли", "path": "docs/web-cabinet.md"},
     {"id": "notifications", "name": "Уведомления: email, bot, lifecycle", "path": "docs/notifications.md"},

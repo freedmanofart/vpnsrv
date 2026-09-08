@@ -67,6 +67,8 @@ Inbound может работать на master или быть назначен
 
 Подробная настройка master и child описана в
 [`docs/3x-ui-master.md`](docs/3x-ui-master.md).
+Презентационный обзор MVP с реализованными возможностями:
+[`docs/mvp-presentation.md`](docs/mvp-presentation.md).
 Добавление новой ноды скриптом описано в
 [`docs/add-3x-ui-node.md`](docs/add-3x-ui-node.md).
 Полный жизненный цикл тарифа, оплаты, выдачи, продления и отзыва описан в
