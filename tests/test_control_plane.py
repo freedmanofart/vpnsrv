@@ -1,6 +1,8 @@
 import os
 import base64
+import json
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +20,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
 import app.main as main_module
+from app.api.routes import admin as admin_routes
 from app.core.config import settings
 from app.db.base import Base
 from app.db.models import (
@@ -184,6 +187,25 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, node_renew.status_code, node_renew.text)
         self.assertEqual("host_required", node_renew.json()["status"])
         self.assertIn("root@203.0.113.20", node_renew.json()["command"])
+
+    async def test_tailscale_cert_health_reads_host_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            health_file = Path(temporary_directory) / "tailscale-cert-health.json"
+            health_file.write_text(
+                json.dumps(
+                    {
+                        "status": "online",
+                        "details": "timer active, last renewal successful",
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(admin_routes, "TAILSCALE_CERT_HEALTH_FILE", health_file):
+                result = admin_routes._check_tailscale_cert_units()
+
+        self.assertEqual("online", result["status"])
+        self.assertIn("timer active", result["details"])
 
     async def test_web_registration_emails_one_time_code_and_opens_cabinet(self) -> None:
         with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:

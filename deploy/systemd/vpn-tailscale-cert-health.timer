@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Freedom VPN Tailscale certificate health every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=vpn-tailscale-cert-health.service
+
+[Install]
+WantedBy=timers.target

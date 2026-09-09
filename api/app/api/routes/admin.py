@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
 import html
+import json
 import logging
 import os
 from pathlib import Path
@@ -101,6 +102,12 @@ HOST_COMMANDS = {
 }
 
 BACKUP_DIR = Path(os.getenv("VPN_BACKUP_DIR", "/var/backups/vpn-service"))
+TAILSCALE_CERT_HEALTH_FILE = Path(
+    os.getenv(
+        "TAILSCALE_CERT_HEALTH_FILE",
+        str(BACKUP_DIR / "tailscale-cert-health.json"),
+    )
+)
 
 
 def _repo_root() -> Path:
@@ -284,64 +291,43 @@ def _check_smtp() -> dict:
 
 def _check_tailscale_cert_units() -> dict:
     started = time.perf_counter()
-    command = [
-        "systemctl",
-        "is-active",
-        "vpn-tailscale-cert.timer",
-    ]
     try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        payload = json.loads(TAILSCALE_CERT_HEALTH_FILE.read_text(encoding="utf-8"))
+        generated_at = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        if generated_at.tzinfo is None:
+            generated_at = generated_at.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((datetime.now(timezone.utc) - generated_at).total_seconds()))
+        status = str(payload.get("status", "degraded"))
+        if status not in {"online", "degraded", "offline"}:
+            status = "degraded"
+        details = str(payload.get("details") or "Нет подробностей от host health-check")
+        if age_seconds > 900:
+            status = "degraded"
+            details = f"Данные устарели ({age_seconds // 60} мин.). {details}"
+        return {
+            "name": "Tailscale cert service/timer",
+            "status": status,
+            "details": details,
+            "generated_at": generated_at,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    except FileNotFoundError:
         return {
             "name": "Tailscale cert service/timer",
             "status": "degraded",
             "details": (
-                "Host-only проверка: выполните на сервере "
-                "`systemctl status vpn-tailscale-cert.service vpn-tailscale-cert.timer --no-pager`. "
-                f"Из контейнера: {exc}"
+                f"Host health-файл не найден: {TAILSCALE_CERT_HEALTH_FILE}. "
+                "Запустите vpn-tailscale-cert-health.timer на master-сервере."
             ),
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
-    timer_state = completed.stdout.strip() or completed.stderr.strip()
-    if completed.returncode == 0 and timer_state == "active":
-        next_run = subprocess.run(
-            ["systemctl", "list-timers", "vpn-tailscale-cert.timer", "--all", "--no-pager"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        details = "timer active"
-        lines = [line.strip() for line in next_run.stdout.splitlines() if "vpn-tailscale-cert.timer" in line]
-        if lines:
-            details = lines[0]
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         return {
             "name": "Tailscale cert service/timer",
-            "status": "online",
-            "details": details,
+            "status": "degraded",
+            "details": f"Не удалось прочитать host health-файл: {exc}",
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
-    service = subprocess.run(
-        ["systemctl", "is-failed", "vpn-tailscale-cert.service"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    service_state = service.stdout.strip() or service.stderr.strip()
-    status = "offline" if service_state == "failed" else "degraded"
-    return {
-        "name": "Tailscale cert service/timer",
-        "status": status,
-        "details": f"timer={timer_state or 'unknown'}, service={service_state or 'unknown'}",
-        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
-    }
 
 
 async def _check_nodes(db: AsyncSession) -> list[dict]:
@@ -820,6 +806,8 @@ async def run_admin_script(script_id: str, db: AsyncSession = Depends(get_db)):
         return await health_dashboard(db)
     if script_id == "smtp_check":
         return {"status": "done", "checks": [await asyncio.to_thread(_check_smtp)]}
+    if script_id == "tailscale_cert_units":
+        return {"status": "done", "checks": [await asyncio.to_thread(_check_tailscale_cert_units)]}
     if script_id == "mail_chain_recover":
         return await _mail_chain_recover(db)
     if script_id == "backup_postgres":

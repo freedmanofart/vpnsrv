@@ -1,0 +1,10 @@
+[Unit]
+Description=Publish Freedom VPN Tailscale certificate health for the admin API
+After=vpn-tailscale-cert.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/freedman/vpn-service
+Environment=TAILSCALE_CERT_HEALTH_FILE=/var/backups/vpn-service/tailscale-cert-health.json
+ExecStart=/home/freedman/vpn-service/scripts/check_tailscale_cert_units.sh
