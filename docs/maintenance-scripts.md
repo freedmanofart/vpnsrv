@@ -65,7 +65,10 @@ web-админку.
 - SSL-сертификатов VPN-нод: по HTTPS `vpn_node_configs.config.api_address`,
   а если API-адрес внутренний HTTP — по публичному `vpn_nodes.ip_address:443`;
 - механизма обновления master-сертификата: `vpn-tailscale-cert.service` и
-  `vpn-tailscale-cert.timer`;
+  `vpn-tailscale-cert.timer`. Host-таймер
+  `vpn-tailscale-cert-health.timer` каждые 5 минут записывает результат в
+  `/var/backups/vpn-service/tailscale-cert-health.json`, который доступен
+  API-контейнеру через существующий bind mount;
 - SMTP-логина для писем web-кабинета;
 - каждой активной VPN-ноды через её `api_address` master 3x-ui.
 
@@ -192,9 +195,9 @@ email. Если клиент есть в БД, но `panel: not found`, пров
 
 В `/admin` → `Скрипты` есть:
 
-- `Проверить Tailscale cert service/timer` — возвращает host-only команду
-  проверки `vpn-tailscale-cert.service`, `vpn-tailscale-cert.timer`, следующего
-  запуска timer и последних строк журнала;
+- `Проверить Tailscale cert service/timer` — показывает актуальный host-снимок
+  состояния `vpn-tailscale-cert.service`, `vpn-tailscale-cert.timer`, срока
+  сертификата, следующего запуска и последнего срабатывания;
 - `Обновить SSL-сертификат master/site` — возвращает host-only команду
   `scripts/renew_master_cert.sh`;
 - `Обновить SSL-сертификат ноды #...` — отдельная кнопка для каждой активной
@@ -205,11 +208,25 @@ email. Если клиент есть в БД, но `panel: not found`, пров
 
 ```bash
 cd /home/freedman/vpn-service
+install -m 0755 scripts/check_tailscale_cert_units.sh \
+  /home/freedman/vpn-service/scripts/check_tailscale_cert_units.sh
+install -m 0644 deploy/systemd/vpn-tailscale-cert-health.service \
+  deploy/systemd/vpn-tailscale-cert-health.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now vpn-tailscale-cert-health.timer
+systemctl start vpn-tailscale-cert-health.service
 systemctl status vpn-tailscale-cert.service vpn-tailscale-cert.timer --no-pager
+systemctl status vpn-tailscale-cert-health.service vpn-tailscale-cert-health.timer --no-pager
 systemctl list-timers vpn-tailscale-cert.timer --all --no-pager
 journalctl -u vpn-tailscale-cert.service -n 40 --no-pager
+cat /var/backups/vpn-service/tailscale-cert-health.json
 sudo scripts/renew_master_cert.sh
 ```
+
+API считает снимок устаревшим через 15 минут. Если health-таймер не работает,
+в админке будет `degraded`; если renew-таймер выключен, последний renew завершён
+ошибкой или сертификат отсутствует/истёк — `offline`. Срок менее 7 дней даёт
+`degraded`.
 
 Для child-ноды с short-lived Let's Encrypt certificate на IP используется
 node-скрипт `deploy/node/renew_3xui_ip_cert.sh`, который устанавливается на

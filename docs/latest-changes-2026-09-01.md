@@ -135,9 +135,13 @@ API через `host.docker.internal:25`.
 `/usr/local/sbin/renew_3xui_ip_cert.sh`; timer
 `vpn-3xui-ip-cert-renew.timer` запускает renew каждые 5 дней. В `/admin` →
 `Health` теперь проверяется не только API 3x-ui, но и SSL master/site, SSL
-каждой активной ноды и состояние `vpn-tailscale-cert.timer`. В `/admin` →
-`Скрипты` есть отдельная кнопка проверки Tailscale cert service/timer, кнопка
-renew для master и отдельная кнопка для каждой ноды из БД.
+каждой активной ноды и состояние `vpn-tailscale-cert.timer`. Для проверки
+host-systemd добавлены `scripts/check_tailscale_cert_units.sh` и timer
+`vpn-tailscale-cert-health.timer`: они публикуют JSON-снимок в общий с API
+каталог `/var/backups/vpn-service`. Поэтому админка показывает реальный статус,
+последний результат renew, следующий запуск и срок сертификата, не вызывая
+`systemctl` внутри контейнера. В `/admin` → `Скрипты` есть отдельная кнопка
+этой проверки, кнопка renew для master и отдельная кнопка для каждой ноды из БД.
 
 ## Развёртывание
 
