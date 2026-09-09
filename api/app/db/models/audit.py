@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -84,7 +84,7 @@ class ActivationCode(Base):
 class AccessGrant(Base):
     __tablename__ = "access_grants"
     __table_args__ = (
-        UniqueConstraint("user_id", "kind", "code", name="uq_access_grant_user_kind_code"),
+        Index("ix_access_grants_user_kind_code", "user_id", "kind", "code"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

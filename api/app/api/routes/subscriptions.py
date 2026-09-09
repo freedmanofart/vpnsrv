@@ -3,12 +3,13 @@ from decimal import Decimal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.user import User
 from app.db.models.plan import Plan
+from app.db.models.promo_code import PromoCode
 from app.db.models.subscription import Subscription
 from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
@@ -108,6 +109,8 @@ async def grant_trial_or_promo(
         raise HTTPException(status_code=404, detail="User not found")
 
     kind = data.kind.lower()
+    promo_plan: Plan | None = None
+    per_user_limit: int | None = 1
     if kind == "trial":
         code = "TRIAL"
         days = 3
@@ -135,22 +138,48 @@ async def grant_trial_or_promo(
             raise HTTPException(status_code=409, detail="Paid trial is available only once")
     elif kind == "promo":
         code = (data.code or "").strip().upper()
-        days = promo_catalog().get(code, 0)
+        promo = await db.scalar(
+            select(PromoCode)
+            .where(PromoCode.code == code, PromoCode.is_active.is_(True))
+            .with_for_update()
+        )
+        if promo is not None:
+            if promo.starts_at is not None and aware(promo.starts_at) > datetime.now(timezone.utc):
+                raise HTTPException(status_code=404, detail="Promo code is invalid")
+            if promo.expires_at is not None and aware(promo.expires_at) <= datetime.now(timezone.utc):
+                raise HTTPException(status_code=404, detail="Promo code is invalid")
+            if promo.max_redemptions is not None:
+                redemption_count = await db.scalar(
+                    select(func.count(AccessGrant.id)).where(
+                        AccessGrant.kind == "promo",
+                        AccessGrant.code == code,
+                    )
+                )
+                if int(redemption_count or 0) >= promo.max_redemptions:
+                    raise HTTPException(status_code=409, detail="Promo code redemption limit reached")
+            promo_plan = await db.get(Plan, promo.plan_id)
+            if promo_plan is None or not promo_plan.is_active:
+                raise HTTPException(status_code=404, detail="Promo code is invalid")
+            days = promo_plan.duration_days
+            per_user_limit = promo.max_redemptions_per_user
+        else:
+            days = promo_catalog().get(code, 0)
         duration = timedelta(days=days)
         if not days:
             raise HTTPException(status_code=404, detail="Promo code is invalid")
     else:
         raise HTTPException(status_code=400, detail="Unsupported access grant")
 
-    used_result = await db.execute(
-        select(AccessGrant.id).where(
-            AccessGrant.user_id == user.id,
-            AccessGrant.kind == kind,
-            AccessGrant.code == code,
+    if per_user_limit is not None:
+        user_redemption_count = await db.scalar(
+            select(func.count(AccessGrant.id)).where(
+                AccessGrant.user_id == user.id,
+                AccessGrant.kind == kind,
+                AccessGrant.code == code,
+            )
         )
-    )
-    if used_result.scalar_one_or_none() is not None:
-        raise HTTPException(status_code=409, detail="Access grant was already used")
+        if int(user_redemption_count or 0) >= per_user_limit:
+            raise HTTPException(status_code=409, detail="Access grant was already used")
 
     now = datetime.now(timezone.utc)
     active_result = await db.execute(
@@ -187,7 +216,7 @@ async def grant_trial_or_promo(
         await db.commit()
         subscription = active
     else:
-        plan = await system_access_plan(db, max(days, 1))
+        plan = promo_plan if kind == "promo" and promo_plan is not None else await system_access_plan(db, max(days, 1))
         try:
             result = await provision_subscription(
                 db,
@@ -219,7 +248,12 @@ async def grant_trial_or_promo(
         actor_type="service",
         resource_type="subscription",
         resource_id=subscription.id,
-        details={"days": days, "hours": int(duration.total_seconds() // 3600), "code": code},
+        details={
+            "days": days,
+            "hours": int(duration.total_seconds() // 3600),
+            "code": code,
+            "promo_plan_id": promo_plan.id if kind == "promo" and promo_plan is not None else None,
+        },
     )
     return subscription
 

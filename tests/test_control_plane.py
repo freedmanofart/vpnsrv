@@ -3,6 +3,7 @@ import base64
 import json
 import sys
 import tempfile
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -29,6 +30,7 @@ from app.db.models import (
     Payment,
     Plan,
     PlanPackage,
+    PromoCode,
     Subscription,
     User,
     VPNClient,
@@ -991,6 +993,123 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(409, repeated.status_code)
+
+    async def test_database_promo_grants_lite_day_without_global_limit(self) -> None:
+        second_telegram_id = 43434343
+        new_telegram_id = 44444444
+        async with self.session_factory() as db:
+            promo_plan = Plan(
+                code="lite_1d_promo_test",
+                name="1 день",
+                duration_days=1,
+                max_connections=5,
+                traffic_limit_gb=250,
+                package_id=self.package_id,
+                price=Decimal("70.00"),
+                currency="RUB",
+                is_active=True,
+                is_public=True,
+            )
+            second_user = User(
+                telegram_id=second_telegram_id,
+                username="second-promo-user",
+                status="active",
+            )
+            new_user = User(
+                telegram_id=new_telegram_id,
+                username="new-promo-user",
+                status="active",
+            )
+            db.add_all([promo_plan, second_user, new_user])
+            await db.flush()
+            promo_plan_id = promo_plan.id
+            db.add(
+                PromoCode(
+                    code="LIGHT1DAY",
+                    plan_id=promo_plan.id,
+                    max_redemptions=None,
+                    max_redemptions_per_user=None,
+                    is_active=True,
+                )
+            )
+            db.add(
+                Subscription(
+                    user_id=second_user.id,
+                    plan_id=promo_plan.id,
+                    status="active",
+                    starts_at=datetime.now(timezone.utc),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=2),
+                )
+            )
+            await db.commit()
+
+        for telegram_id in (self.telegram_id, second_telegram_id):
+            async with self.session_factory() as db:
+                user = await db.scalar(select(User).where(User.telegram_id == telegram_id))
+                subscription = await db.scalar(
+                    select(Subscription).where(Subscription.user_id == user.id)
+                )
+                before = subscription.expires_at
+            response = await self.client.post(
+                "/subscriptions/access-grants",
+                headers=self.service_headers,
+                json={
+                    "telegram_id": telegram_id,
+                    "kind": "promo",
+                    "code": "light1day",
+                    "node_id": self.node_id,
+                },
+            )
+            self.assertEqual(200, response.status_code, response.text)
+            extended = datetime.fromisoformat(response.json()["expires_at"])
+            if before.tzinfo is None:
+                before = before.replace(tzinfo=timezone.utc)
+            if extended.tzinfo is None:
+                extended = extended.replace(tzinfo=timezone.utc)
+            self.assertEqual(timedelta(days=1), extended - before)
+
+        repeated = await self.client.post(
+            "/subscriptions/access-grants",
+            headers=self.service_headers,
+            json={
+                "telegram_id": self.telegram_id,
+                "kind": "promo",
+                "code": "LIGHT1DAY",
+                "node_id": self.node_id,
+            },
+        )
+        self.assertEqual(200, repeated.status_code, repeated.text)
+
+        async def fake_provision(db, **kwargs):
+            now = datetime.now(timezone.utc)
+            subscription = Subscription(
+                user_id=kwargs["user_id"],
+                plan_id=kwargs["plan_id"],
+                status="active",
+                starts_at=now,
+                expires_at=now + kwargs["access_duration"],
+            )
+            db.add(subscription)
+            await db.flush()
+            return SimpleNamespace(subscription=subscription)
+
+        with patch(
+            "app.api.routes.subscriptions.provision_subscription",
+            new=AsyncMock(side_effect=fake_provision),
+        ) as provision:
+            created = await self.client.post(
+                "/subscriptions/access-grants",
+                headers=self.service_headers,
+                json={
+                    "telegram_id": new_telegram_id,
+                    "kind": "promo",
+                    "code": "LIGHT1DAY",
+                    "node_id": self.node_id,
+                },
+            )
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual(promo_plan_id, created.json()["plan_id"])
+        self.assertEqual(promo_plan_id, provision.await_args.kwargs["plan_id"])
 
     async def test_device_activation_profile_refresh_and_sensitive_debug(self) -> None:
         code_response = await self.client.post(
