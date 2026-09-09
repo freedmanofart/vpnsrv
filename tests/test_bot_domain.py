@@ -149,6 +149,14 @@ class ContentTests(unittest.TestCase):
         self.assertIn("Freedom VPN", content["texts"]["welcome"])
         self.assertIn("веб-кабинет", content["texts"]["welcome"])
 
+    def test_android_download_uses_canonical_google_play_url(self):
+        content = load_content()
+        android = next(item for item in content["platforms"] if item["id"] == "android")
+        self.assertEqual(
+            "https://play.google.com/store/apps/details?id=llc.itdev.incy",
+            android["url"],
+        )
+
     def test_content_file_expands_environment_links(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "content.json"

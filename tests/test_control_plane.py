@@ -701,6 +701,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn("5 ГБ из 10 ГБ", response.text)
         self.assertIn('Подписка <span class="status">активна</span>', response.text)
+        self.assertIn(
+            'data-native-store href="https://play.google.com/store/apps/details?id=llc.itdev.incy"',
+            response.text,
+        )
 
     async def test_cabinet_marks_subscription_inactive_when_traffic_is_exhausted(self) -> None:
         from app.core.tokens import token_hash
