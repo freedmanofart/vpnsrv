@@ -2,7 +2,7 @@
   "texts": {
     "welcome": "⚡ <b><a href=\"https://t.me/vpn142323srv_bot\">Freedom VPN</a> — быстрый доступ к любимым сервисам</b>\n\nYouTube · Instagram · ChatGPT · TikTok · Discord · WhatsApp и другие — без тормозов.\n\n🚀 Стабильное и быстрое подключение\n🔒 Безопасная передача данных\n📱 iPhone · Android · Windows · Mac · роутеры\n💳 Карта, СБП и другие способы оплаты\n📊 Трафик и число подключений зависят от выбранного тарифа\n🛡 Поддержка на связи\n\n👇 <b>Откройте <a href=\"https://freedomvpn.taile485ac.ts.net/cabinet\">веб-кабинет</a>:</b>\nТам можно приобрести или продлить подписку, выбрать страну, отправить чек и получить VPN-ключ без Telegram.\n\n🌐 <a href=\"https://freedomvpn.taile485ac.ts.net/\">Сайт Freedom VPN</a>",
     "main_menu": "🏠 <b>Главное меню</b>\n\nВыберите действие:",
-    "platforms_intro": "📱 <b>Выберите устройство</b>\n\nНа следующем шаге будет официальная ссылка на клиент AmneziaVPN.",
+    "platforms_intro": "📱 <b>Выберите устройство</b>\n\nНа следующем шаге будет официальная ссылка на подходящий VPN-клиент.",
     "instructions": "ℹ️ <b>Информация Freedom VPN</b>\n\n<b>Как подключиться</b>\n\n1. Нажмите «Приобрести подписку» и выберите устройство.\n2. Установите VPN-клиент по ссылке из меню.\n3. Выберите страну, пакет и срок.\n4. Выберите способ оплаты.\n5. После подтверждения отсканируйте QR VPN-ключа либо скопируйте ссылку.\n6. В приложении нажмите «Добавить → Вставить ключ из буфера».\n\n📄 <b>Документы Freedom VPN</b>\n\nДата актуализации: <b>2 сентября 2026</b>\nTelegram-бот: <b>@vpn142323srv_bot</b>\n\nНиже доступны два документа: политика конфиденциальности и пользовательское соглашение. Откройте нужный документ кнопкой под сообщением.",
     "try": "🧪 <b>Попробовать VPN</b>\n\nТестовый доступ стоит <b>50 ₽</b>. После оплаты отправьте подтверждение поддержке — тестовый ключ будет выдан отдельно.",
     "promo": "🏷 <b>Введите промокод одним сообщением</b>",
@@ -24,16 +24,16 @@
     {
       "id": "android",
       "label": "Android",
-      "client": "AmneziaVPN",
-      "url": "https://play.google.com/store/apps/details?id=org.amnezia.vpn",
-      "description": "Android 9 и новее. Установите AmneziaVPN из Google Play."
+      "client": "Incy",
+      "url": "https://play.google.com/store/apps/details?id=llc.itdev.incy&hl=ru",
+      "description": "Установите Incy из Google Play."
     },
     {
       "id": "ios",
       "label": "IOS (iPhone)",
-      "client": "DefaultVPN",
-      "url": "https://apps.apple.com/ru/app/defaultvpn/id6744725017",
-      "description": "Альтернативный VLESS-клиент для iPhone из App Store."
+      "client": "Incy",
+      "url": "https://apps.apple.com/ca/app/incy/id6756943388",
+      "description": "Установите Incy для iPhone из App Store."
     },
     {
       "id": "macos",
