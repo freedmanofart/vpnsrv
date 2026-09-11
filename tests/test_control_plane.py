@@ -23,9 +23,11 @@ os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 import app.main as main_module
 from app.api.routes import admin as admin_routes
 from app.core.config import settings
+from app.core.tokens import token_hash
 from app.db.base import Base
 from app.db.models import (
     AccessGrant,
+    ActivationCode,
     AuditLog,
     CabinetAccessToken,
     Payment,
@@ -229,10 +231,16 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         doc_ids = {item["id"] for item in data["docs"]}
         self.assertIn("notifications", doc_ids)
         self.assertIn("vpn_lifecycle", doc_ids)
+        self.assertIn("provider_code_mobile", doc_ids)
         self.assertIn("database_reference", doc_ids)
         doc = await self.client.get("/admin/docs/notifications", auth=self.admin_auth)
         self.assertEqual(200, doc.status_code, doc.text)
         self.assertIn("Уведомления", doc.text)
+        provider_doc = await self.client.get(
+            "/admin/docs/provider_code_mobile", auth=self.admin_auth
+        )
+        self.assertEqual(200, provider_doc.status_code, provider_doc.text)
+        self.assertIn("Подключение Freedom VPN", provider_doc.text)
 
         resources = {item["name"]: item for item in data["resources"]}
         self.assertIn("Swagger UI", resources)
@@ -1197,6 +1205,15 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(200, activation.status_code, activation.text)
+        repeated = await self.client.post(
+            "/v1/client/activate",
+            json={
+                "code": code_response.json()["code"],
+                "name": "Second phone",
+                "platform": "android",
+            },
+        )
+        self.assertEqual(400, repeated.status_code, repeated.text)
         old_token = activation.json()["access_token"]
         device_headers = {"Authorization": f"Bearer {old_token}"}
         profile = await self.client.get("/v1/client/profile", headers=device_headers)
@@ -1238,3 +1255,37 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {new_token}"},
         )
         self.assertEqual(200, accepted.status_code, accepted.text)
+
+    async def test_provider_activation_code_rejects_unknown_expired_and_invalid_codes(self) -> None:
+        unknown_user = await self.client.post(
+            "/v1/client/activation-codes",
+            headers=self.service_headers,
+            json={"telegram_id": 999999999, "ttl_minutes": 10},
+        )
+        self.assertEqual(404, unknown_user.status_code, unknown_user.text)
+
+        code_response = await self.client.post(
+            "/v1/client/activation-codes",
+            headers=self.service_headers,
+            json={"telegram_id": self.telegram_id, "ttl_minutes": 10},
+        )
+        self.assertEqual(200, code_response.status_code, code_response.text)
+        code = code_response.json()["code"]
+        async with self.session_factory() as db:
+            result = await db.execute(
+                select(ActivationCode).where(ActivationCode.code_hash == token_hash(code))
+            )
+            activation_code = result.scalar_one()
+            activation_code.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            await db.commit()
+
+        expired = await self.client.post(
+            "/v1/client/activate",
+            json={"code": code, "name": "Expired phone", "platform": "ios"},
+        )
+        self.assertEqual(400, expired.status_code, expired.text)
+        invalid_format = await self.client.post(
+            "/v1/client/activate",
+            json={"code": "123456", "name": "Invalid phone", "platform": "ios"},
+        )
+        self.assertEqual(422, invalid_format.status_code, invalid_format.text)

@@ -180,6 +180,7 @@ ADMIN_DOCS = [
     {"id": "notifications", "name": "Уведомления: email, bot, lifecycle", "path": "docs/notifications.md"},
     {"id": "platega", "name": "Подключение Platega: бот и web-кабинет", "path": "docs/platega-bot-payment-integration.md"},
     {"id": "vpn_lifecycle", "name": "Жизненный цикл VPN API", "path": "docs/vpn-api-lifecycle.md"},
+    {"id": "provider_code_mobile", "name": "Подключение мобильного провайдера по коду", "path": "docs/provider-code-mobile.md"},
     {"id": "database_reference", "name": "Справочник по базе данных", "path": "docs/database-reference.md"},
     {"id": "latest_changes", "name": "Последние изменения", "path": "docs/latest-changes-2026-09-01.md"},
     {"id": "access", "name": "Доступы и переменные", "path": "docs/access-and-credentials.md"},

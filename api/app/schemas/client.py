@@ -14,7 +14,7 @@ class ActivationCodeResponse(BaseModel):
 
 
 class DeviceActivate(BaseModel):
-    code: str = Field(min_length=6, max_length=32)
+    code: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
     name: str = Field(min_length=1, max_length=255)
     platform: str = Field(min_length=1, max_length=64)
 
