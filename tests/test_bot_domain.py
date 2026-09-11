@@ -17,6 +17,7 @@ from bot.app.domain import (
     select_public_plans,
     subscription_payload,
     supports_threexui,
+    vpn_key_copy_message,
 )
 
 
@@ -43,6 +44,14 @@ class KeyTests(unittest.TestCase):
                 "fingerprint": "firefox",
             },
         )
+
+    def test_vpn_key_is_rendered_as_a_standalone_copyable_code_block(self):
+        key = "vless://user@example.test:8443?security=reality&x=1"
+        rendered = vpn_key_copy_message(key)
+        self.assertIn("<pre>", rendered)
+        self.assertIn("</pre>", rendered)
+        self.assertIn("vless://user@example.test:8443?security=reality&amp;x=1", rendered)
+        self.assertNotIn("copy_text", rendered)
 
 
 class PlanSelectionTests(unittest.TestCase):

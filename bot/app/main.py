@@ -24,6 +24,7 @@ from app.domain import (
     select_public_plans,
     subscription_payload,
     supports_threexui,
+    vpn_key_copy_message,
 )
 from app.logging_config import configure_logging
 from aiogram.exceptions import TelegramBadRequest
@@ -349,6 +350,20 @@ def active_vpn_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔑 Показать ключ и QR", callback_data="vpn_key")],
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
     ])
+
+
+def vpn_key_copy_keyboard(client_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 Скопировать ключ",
+                    callback_data=f"vpn_key_copy:{client_id}",
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+        ]
+    )
 
 
 def human_traffic(value: int | None) -> str:
@@ -840,12 +855,14 @@ async def show_try_payment(target: Message | CallbackQuery) -> None:
 async def send_key_message(message: Message, client_id: int) -> None:
     data = await get_vpn_client_config(client_id)
     value = data["config"]
-    instruction = "Импортируйте ссылку или QR-код в совместимое VLESS-приложение."
     await message.answer_photo(
         photo=qr_file(value),
-        caption=f"🔑 <b>Ваш VPN-ключ</b>\n\n<code>{html.escape(value)}</code>\n\n{instruction}",
+        caption=(
+            "🔑 <b>Ваш VPN-ключ</b>\n\n"
+            "Отсканируйте QR-код или нажмите «Скопировать ключ»."
+        ),
         parse_mode="HTML",
-        reply_markup=active_vpn_keyboard(),
+        reply_markup=vpn_key_copy_keyboard(client_id),
     )
 
 
@@ -1873,6 +1890,32 @@ async def vpn_key_handler(callback: CallbackQuery):
     except Exception:
         logging.exception("Failed to show VPN key")
         await callback.answer("Не удалось получить ключ", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("vpn_key_copy:"))
+async def vpn_key_copy_handler(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        client_id = int(callback.data.split(":", 1)[1])
+        status_data = await get_vpn_status(callback.from_user.id)
+        active_client = status_data.get("vpn_client")
+        if not active_client or int(active_client["id"]) != client_id:
+            await callback.message.answer(
+                "Этот VPN-ключ больше не активен. Откройте управление подпиской и запросите актуальный ключ."
+            )
+            return
+        data = await get_vpn_client_config(client_id)
+        await callback.message.answer(
+            vpn_key_copy_message(data["config"]),
+            parse_mode="HTML",
+            reply_markup=active_vpn_keyboard(),
+        )
+    except (KeyError, TypeError, ValueError):
+        logging.exception("Invalid VPN key copy callback")
+        await callback.message.answer("Не удалось определить VPN-ключ")
+    except Exception:
+        logging.exception("Failed to prepare VPN key for copying")
+        await callback.message.answer("Не удалось получить ключ. Попробуйте ещё раз.")
 
 
 @router.callback_query(F.data == "vpn_reissue")

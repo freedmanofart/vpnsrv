@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+
 
 PLAN_TIERS = {
     "lite": {
@@ -181,3 +183,12 @@ def supports_threexui(configs: list[dict]) -> bool:
             if int(inbound_id) > 0:
                 return True
     return False
+
+
+def vpn_key_copy_message(value: str) -> str:
+    """Render a full VPN key as a standalone Telegram copyable code block."""
+    return (
+        "📋 <b>Скопировать VPN-ключ</b>\n\n"
+        "Нажмите на блок с ключом или удерживайте его, затем выберите «Скопировать».\n\n"
+        f"<pre>{html.escape(value)}</pre>"
+    )

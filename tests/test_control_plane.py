@@ -328,7 +328,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, password_saved.status_code, password_saved.text)
         cabinet = await self.client.get("/cabinet")
         self.assertEqual(200, cabinet.status_code, cabinet.text)
-        self.assertIn("web.user@example.com", cabinet.text)
+        self.assertIn("w•••@example.com", cabinet.text)
 
         await self.client.post("/cabinet/logout")
         password_login = await self.client.post(
@@ -707,8 +707,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             cabinet = await self.client.get("/cabinet")
             self.assertEqual(200, cabinet.status_code, cabinet.text)
             self.assertIn("Выберите способ оплаты", cabinet.text)
-            self.assertIn(">Продлить<", cabinet.text)
-            self.assertIn("Сменить тариф", cabinet.text)
+            self.assertIn('class="cabinet-card renew-card"', cabinet.text)
+            self.assertIn('class="payment-picker"', cabinet.text)
+            self.assertIn("Изменить тариф", cabinet.text)
+            self.assertIn("Пароль для входа", cabinet.text)
         finally:
             settings.cabinet_allow_temporary_registration = previous
 
@@ -774,7 +776,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn("5 ГБ из 10 ГБ", response.text)
-        self.assertIn('Подписка <span class="status">активна</span>', response.text)
+        self.assertIn('class="status-badge status">Активна</span>', response.text)
         self.assertIn(
             'data-native-store href="https://play.google.com/store/apps/details?id=llc.itdev.incy"',
             response.text,
@@ -815,7 +817,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn("0 ГБ из 10 ГБ", response.text)
-        self.assertIn('Подписка <span class="status inactive">не активна</span>', response.text)
+        self.assertIn('class="status-badge status inactive">Не активна</span>', response.text)
 
         with patch("app.api.routes.user_status.ThreeXUIClient") as panel:
             panel.return_value.get_client_traffic = AsyncMock(
