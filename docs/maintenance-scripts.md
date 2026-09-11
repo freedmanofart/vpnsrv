@@ -437,7 +437,7 @@ sudo RESTORE_CONFIRM=I_UNDERSTAND \
 
 ```bash
 cd /home/freedman/vpn-service
-git pull --ff-only origin newnode
+git pull --ff-only origin НАЗВАНИЕ ВЕТКИ
 python3 scripts/configctl.py validate
 docker compose build api bot worker
 docker compose run --rm api alembic upgrade head
