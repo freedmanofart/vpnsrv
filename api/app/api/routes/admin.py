@@ -20,11 +20,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Literal
 from fastapi.responses import HTMLResponse, Response as FastAPIResponse
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.plan import Plan
 from app.db.models.plan_package import PlanPackage
+from app.db.models.promo_code import PromoCode
 from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.vpn_client import VPNClient
@@ -84,6 +85,16 @@ class AdminUserPasswordSet(BaseModel):
 class AdminContactsUpdate(BaseModel):
     admin_notification_email: str = Field(max_length=320)
     bot_admin_chat_id: int = 0
+
+
+class AdminPromoCodeCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    plan_id: int = Field(gt=0)
+    max_redemptions: int | None = Field(default=None, ge=1)
+    max_redemptions_per_user: int | None = Field(default=None, ge=1)
+    is_active: bool = True
+    starts_at: datetime | None = None
+    expires_at: datetime | None = None
 
 
 logger = logging.getLogger(__name__)
@@ -608,6 +619,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
     users = await rows(User)
     plans = await rows(Plan)
     plan_packages = await rows(PlanPackage)
+    promo_codes = await rows(PromoCode)
     nodes = await rows(VPNNode)
     subscriptions = await rows(Subscription)
     clients = await rows(VPNClient)
@@ -624,6 +636,14 @@ async def overview(db: AsyncSession = Depends(get_db)):
         .order_by(AccessGrant.id.desc())
     )
     paid_trial_grants = paid_trial_result.scalars().all()
+    promo_redemptions_result = await db.execute(
+        select(func.upper(AccessGrant.code), func.count(AccessGrant.id))
+        .where(AccessGrant.kind == "promo", AccessGrant.code.is_not(None))
+        .group_by(func.upper(AccessGrant.code))
+    )
+    promo_redemptions = {
+        str(code): int(count) for code, count in promo_redemptions_result.all()
+    }
     email_result = await db.execute(
         select(AuditLog)
         .where(AuditLog.action.like("email.%"))
@@ -710,6 +730,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "users": user_rows,
         "plan_packages": [{"id": x.id, "code": x.code, "name": x.name, "description": x.description, "max_connections": x.max_connections, "traffic_limit_gb": x.traffic_limit_gb, "sort_order": x.sort_order, "is_active": x.is_active} for x in sorted(plan_packages, key=lambda item: (item.sort_order, item.id))],
         "plans": [{"id": x.id, "code": x.code, "name": x.name, "duration_days": x.duration_days, "max_connections": x.max_connections, "traffic_limit_gb": x.traffic_limit_gb, "package_id": x.package_id, "price": str(x.price), "currency": x.currency, "active": x.is_active, "public": x.is_public} for x in plans],
+        "promo_codes": [{"id": x.id, "code": x.code, "plan_id": x.plan_id, "plan": plan_map[x.plan_id].name if x.plan_id in plan_map else None, "plan_code": plan_map[x.plan_id].code if x.plan_id in plan_map else None, "redemptions": promo_redemptions.get(x.code.upper(), 0), "max_redemptions": x.max_redemptions, "max_redemptions_per_user": x.max_redemptions_per_user, "is_active": x.is_active, "starts_at": x.starts_at, "expires_at": x.expires_at, "created_at": x.created_at} for x in promo_codes],
         "nodes": [{"id": x.id, "name": x.name, "provider": x.provider, "region": x.region, "ip": x.ip_address, "status": x.status, "health": x.health_status, "latency_ms": x.latency_ms, "last_seen_at": x.last_seen_at, "capacity": x.capacity, "connections": x.active_connections} for x in nodes if x.status != "disabled"],
         "subscriptions": [{"id": x.id, "user_id": x.user_id, "plan_id": x.plan_id, "status": x.status, "expires_at": x.expires_at} for x in subscriptions],
         "clients": [{"id": x.id, "user_id": x.user_id, "subscription_id": x.subscription_id, "node_id": x.node_id, "client_type": x.client_type, "flow": x.flow, "max_connections": x.max_connections, "status": x.status, "expires_at": x.expires_at, "last_connected_at": x.last_connected_at, "last_ip": x.last_ip, "link_overridden": bool(x.config_override)} for x in clients],
@@ -769,6 +790,94 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "debug": [{"id": x.id, "created_by": x.created_by, "reason": x.reason, "status": x.status, "expires_at": x.expires_at} for x in debug_sessions],
         "audit": [{"id": x.id, "created_at": x.created_at, "actor": f"{x.actor_type}:{x.actor_id or '-'}", "action": x.action, "resource": f"{x.resource_type or '-'}:{x.resource_id or '-'}", "result": x.result, "node_id": x.node_id, "sensitive": x.sensitive, "details": x.details} for x in audit_logs],
     }
+
+
+@router.post("/promo-codes", dependencies=[Depends(require_admin)])
+async def create_promo_code(
+    data: AdminPromoCodeCreate,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    code = data.code.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9_-]+", code):
+        raise HTTPException(
+            status_code=422,
+            detail="Код может содержать только латинские буквы, цифры, _ и -",
+        )
+    if data.starts_at and data.expires_at and _aware(data.starts_at) >= _aware(data.expires_at):
+        raise HTTPException(
+            status_code=422,
+            detail="Дата окончания должна быть позже даты начала",
+        )
+    plan = await db.get(Plan, data.plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Тариф не найден")
+    existing_result = await db.execute(
+        select(PromoCode.id).where(func.upper(PromoCode.code) == code).limit(1)
+    )
+    if existing_result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="Промокод уже существует")
+
+    promo_code = PromoCode(
+        code=code,
+        plan_id=plan.id,
+        max_redemptions=data.max_redemptions,
+        max_redemptions_per_user=data.max_redemptions_per_user,
+        is_active=data.is_active,
+        starts_at=data.starts_at,
+        expires_at=data.expires_at,
+    )
+    db.add(promo_code)
+    await db.commit()
+    await db.refresh(promo_code)
+    await write_audit(
+        db,
+        action="promo_code.create",
+        result="success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="promo_code",
+        resource_id=promo_code.id,
+        details={
+            "code": promo_code.code,
+            "plan_id": promo_code.plan_id,
+            "max_redemptions": promo_code.max_redemptions,
+            "max_redemptions_per_user": promo_code.max_redemptions_per_user,
+            "is_active": promo_code.is_active,
+        },
+    )
+    return {
+        "id": promo_code.id,
+        "code": promo_code.code,
+        "plan_id": promo_code.plan_id,
+        "is_active": promo_code.is_active,
+    }
+
+
+@router.delete("/promo-codes/{promo_code_id}", status_code=204, dependencies=[Depends(require_admin)])
+async def delete_promo_code(
+    promo_code_id: int,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    promo_code = await db.get(PromoCode, promo_code_id)
+    if promo_code is None:
+        raise HTTPException(status_code=404, detail="Промокод не найден")
+    code = promo_code.code
+    plan_id = promo_code.plan_id
+    await db.delete(promo_code)
+    await db.commit()
+    await write_audit(
+        db,
+        action="promo_code.delete",
+        result="success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="promo_code",
+        resource_id=promo_code_id,
+        details={"code": code, "plan_id": plan_id},
+    )
+    return FastAPIResponse(status_code=204)
 
 
 @router.get("/health-dashboard", dependencies=[Depends(require_admin)])
@@ -1399,6 +1508,7 @@ ADMIN_HTML = r"""<!doctype html>
 <body><div class="layout"><aside class="sidebar"><h1>VPN Admin</h1><div id="notice">Загрузка…</div><div class="sidebar-actions"><button onclick="load()">Обновить</button><a class="action" href="/" target="_blank" rel="noopener">Открыть сайт</a></div><nav id="nav"></nav></aside><main class="content">
 <section id="plan_packages"><h2>Пакеты тарифов</h2><p class="muted">Пакет — отдельная сущность для группировки тарифов: Лайт, Стандарт, Ультра или новый пакет. После создания выберите пакет в карточке тарифа.</p><form onsubmit="createPlanPackage(event)"><label>Код пакета<input name="code" placeholder="lite / standard / ultra" required></label><label>Название<input name="name" placeholder="Лайт" required></label><label class="wide">Описание<input name="description" placeholder="5 подключений · 250 ГБ трафика"></label><label>Подключений<input name="max_connections" type="number" min="0" max="100" value="5" title="0 — без ограничений" required></label><label>Трафик, ГБ<input name="traffic_limit_gb" type="number" min="0" value="250" title="0 — без ограничений" required></label><label>Порядок<input name="sort_order" type="number" value="100" required></label><label>Активен<select name="is_active"><option value="true" selected>Да</option><option value="false">Нет</option></select></label><button>Добавить пакет тарифа</button></form><div class="table"></div></section>
 <section id="plans" class="hidden"><h2>Тарифы</h2><form onsubmit="createPlan(event)"><input name="code" placeholder="Код" required><input name="name" placeholder="Название" required><input name="duration_days" type="number" placeholder="Дней" required><input name="max_connections" type="number" min="0" max="100" value="5" title="0 — без ограничений" required><input name="traffic_limit_gb" type="number" min="0" value="250" title="0 — без ограничений" required><select name="package_id" data-package-select><option value="">Без пакета</option></select><input name="price" type="number" step="0.01" placeholder="Цена" required><input name="currency" value="RUB" required><button>Создать тариф</button></form><p>Лимиты: количество одновременных IP и трафик в ГБ; 0 снимает соответствующее ограничение.</p><div class="table"></div></section>
+<section id="promo_codes" class="hidden"><h2>Промокоды</h2><p class="muted">Промокод выдаёт выбранный тариф. Пустые лимиты означают неограниченное число применений. Удаление запрещает новые активации, но не отзывает уже выданные подписки.</p><form onsubmit="createPromoCode(event)"><label>Промокод<input name="code" maxlength="64" placeholder="STANDARD1MONTH" pattern="[A-Za-z0-9_-]+" required></label><label>Тариф<select name="plan_id" data-promo-plan-select required></select></label><label>Общий лимит<input name="max_redemptions" type="number" min="1" placeholder="Без ограничений"></label><label>Лимит на пользователя<input name="max_redemptions_per_user" type="number" min="1" placeholder="Без ограничений"></label><label>Начало действия<input name="starts_at" type="datetime-local"></label><label>Окончание действия<input name="expires_at" type="datetime-local"></label><label>Активен<select name="is_active"><option value="true" selected>Да</option><option value="false">Нет</option></select></label><button>Создать промокод</button></form><div class="table"></div></section>
 <section id="nodes" class="hidden"><h2>VPN-ноды</h2><form onsubmit="createNode(event)"><input name="name" placeholder="Имя" required><input name="provider" placeholder="Провайдер" required><input name="ip_address" placeholder="Публичный IP" required><input name="hostname" placeholder="Hostname"><input name="capacity" type="number" value="100"><button>Создать ноду</button></form><p>Страна определяется автоматически по публичному IP.</p><details><summary>Привязать inbound из 3x-ui master</summary><form onsubmit="createConfig(event)"><input name="node_id" type="number" placeholder="Node ID в VPN Admin" required><input name="api_address" placeholder="https://master.example/base-path" required><input name="host" placeholder="Публичный адрес ноды" required><input name="port" type="number" value="443" required><input name="sni" placeholder="Reality SNI" required><input name="fingerprint" placeholder="Fingerprint" value="chrome" required><input name="pbk" placeholder="Reality public key" required><input name="sid" placeholder="Reality short ID" required><input name="inbound_tag" type="number" min="1" placeholder="3x-ui inbound ID" required><button>Привязать</button></form></details><div class="table"></div></section>
 <section id="users" class="hidden"><h2>Пользователи</h2><div class="table"></div></section>
 <section id="subscriptions" class="hidden"><h2>Подписки</h2><div class="table"></div></section>
@@ -1417,9 +1527,9 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="audit" class="hidden"><h2>Audit log</h2><div class="table"></div></section>
 </main></div>
 <dialog id="accessDialog"><h2>Управление доступом</h2><form id="accessForm" onsubmit="saveAccess(event)"><input name="user_id" type="hidden"><label>Тариф<select name="plan_id" required></select></label><label>VPN-нода<select name="node_id" required></select></label><label>Статус<select name="active"><option value="true">Активен</option><option value="false">Не активен</option></select></label><label>Действует до<input name="expires_at" type="datetime-local" required></label><label class="wide">Выданная VPN-ссылка<textarea name="vpn_link" rows="6" placeholder="Пусто — генерировать автоматически"></textarea></label><div class="wide" id="activityInfo"></div><div class="dialog-actions"><button type="button" class="danger" onclick="resetAccess()">Сбросить план и ссылку</button><button type="button" onclick="document.getElementById('accessDialog').close()">Отмена</button><button>Сохранить</button></div></form></dialog><script>
-let state={};const sections=['health','plan_packages','plans','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','email_logs','settings','docs','scripts','resources','debug','audit'];
-const labels={health:'Health',plan_packages:'Пакеты тарифов',plans:'Тарифы',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',email_logs:'Email-логи',settings:'Настройки',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
-const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',paid_trial:'Пробный доступ',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',expires_at:'Действует до',client_id:'Клиент ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',description:'Описание',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',package_id:'Пакет ID',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
+let state={};const sections=['health','plan_packages','plans','promo_codes','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','email_logs','settings','docs','scripts','resources','debug','audit'];
+const labels={health:'Health',plan_packages:'Пакеты тарифов',plans:'Тарифы',promo_codes:'Промокоды',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',email_logs:'Email-логи',settings:'Настройки',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
+const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',paid_trial:'Пробный доступ',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',plan_code:'Код тарифа',redemptions:'Использований',max_redemptions:'Общий лимит',max_redemptions_per_user:'Лимит на пользователя',starts_at:'Начало действия',expires_at:'Действует до',client_id:'Клиент ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',description:'Описание',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',package_id:'Пакет ID',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
 function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===id))}
 function prettyDate(v){if(!v)return '';let d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString('ru-RU',{year:'2-digit',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}
@@ -1430,7 +1540,7 @@ function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[],box
 function clearTableFilters(btn){let tableEl=btn.closest('table');tableEl.querySelectorAll('[data-filter-key]').forEach(i=>i.value='');applyTableFilters(tableEl)}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
 function paymentActions(p){let receipt=p.receipt_url?`<a class="action" href="${esc(p.receipt_url)}" target="_blank" rel="noopener">Открыть чек</a> `:'';if(p.provider==='platega'&&['pending','processing'].includes(p.status))return receipt+'<span class="muted">Ожидает callback Platega</span>';if(['pending','processing'].includes(p.status))return receipt+`<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return receipt+`<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return receipt}
-async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';renderPackageSelects();table('plan_packages',state.plan_packages,r=>`<button onclick="editPlanPackage(${r.id})">Изменить</button>`);table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''} ${r.paid_trial&&r.paid_trial!=='не использован'?`<button class="danger" onclick="resetPaidTrial(${r.id})">Сбросить пробник</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderAdminContacts();renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';renderPackageSelects();renderPromoPlanSelects();table('plan_packages',state.plan_packages,r=>`<button onclick="editPlanPackage(${r.id})">Изменить</button>`);table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('promo_codes',state.promo_codes,r=>`<button class="danger" onclick="deletePromoCode(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''} ${r.paid_trial&&r.paid_trial!=='не использован'?`<button class="danger" onclick="resetPaidTrial(${r.id})">Сбросить пробник</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderAdminContacts();renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button data-section="${x}" onclick="show('${x}')">${labels[x]}</button>`).join('');
 function renderAdminContacts(){let f=document.getElementById('adminContactsForm'),c=state.admin_contacts||{};if(!f)return;f.admin_notification_email.value=c.admin_notification_email||'';f.bot_admin_chat_id.value=c.bot_admin_chat_id||0}
 async function saveAdminContacts(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let out=document.getElementById('settings-result');out.className='';out.textContent='Сохраняю…';try{state.admin_contacts=await request('/admin/settings/admin-contacts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_notification_email:f.admin_notification_email||'',bot_admin_chat_id:Number(f.bot_admin_chat_id||0)})});renderAdminContacts();out.className='ok';out.textContent='Контакты сохранены'}catch(err){out.className='bad';out.textContent=err.message}}
@@ -1442,8 +1552,11 @@ async function loadHealth(){try{let data=await request('/admin/health-dashboard'
 async function runScript(id,btn){let out=document.getElementById('script-output-'+id);btn.disabled=true;out.textContent='Выполняю…';try{let data=await request('/admin/scripts/'+id+'/run',{method:'POST'});out.textContent=JSON.stringify(data,null,2);if(data.checks)renderHealth(data)}catch(e){out.textContent=e.message}finally{btn.disabled=false}}
 async function sendForm(e,url,map){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));for(let k of ['duration_days','max_connections','traffic_limit_gb','price','capacity','node_id','port'])if(k in f)f[k]=Number(f[k]);if(map)f=map(f);try{await request(url(f),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await load()}catch(err){alert(err.message)}}
 function renderPackageSelects(){let options='<option value="">Без пакета</option>'+(state.plan_packages||[]).map(p=>`<option value="${p.id}">${esc(p.name)} (#${p.id})</option>`).join('');document.querySelectorAll('[data-package-select]').forEach(s=>s.innerHTML=options)}
+function renderPromoPlanSelects(){let options=(state.plans||[]).map(p=>`<option value="${p.id}">${esc(p.name)} · ${esc(p.code)} (#${p.id})${p.active?'':' — отключён'}</option>`).join('');document.querySelectorAll('[data-promo-plan-select]').forEach(s=>s.innerHTML=options)}
 function createPlan(e){return sendForm(e,()=>'/plans',f=>({...f,package_id:f.package_id?Number(f.package_id):null}))}
 function createPlanPackage(e){return sendForm(e,()=>'/plans/packages',f=>({...f,description:f.description||'',max_connections:Number(f.max_connections),traffic_limit_gb:Number(f.traffic_limit_gb),sort_order:Number(f.sort_order),is_active:f.is_active==='true'}))}
+function createPromoCode(e){return sendForm(e,()=>'/admin/promo-codes',f=>({...f,code:String(f.code||'').trim().toUpperCase(),plan_id:Number(f.plan_id),max_redemptions:f.max_redemptions?Number(f.max_redemptions):null,max_redemptions_per_user:f.max_redemptions_per_user?Number(f.max_redemptions_per_user):null,is_active:f.is_active==='true',starts_at:f.starts_at?new Date(f.starts_at).toISOString():null,expires_at:f.expires_at?new Date(f.expires_at).toISOString():null}))}
+async function deletePromoCode(id){let p=(state.promo_codes||[]).find(x=>x.id===id);if(!p)return;if(!confirm(`Удалить промокод «${p.code}»?\n\nНовые активации станут невозможны. Уже выданные подписки и история применений сохранятся.`))return;try{await request('/admin/promo-codes/'+id,{method:'DELETE'});await load()}catch(err){alert(err.message)}}
 function createPaymentMethod(e){return sendForm(e,()=>'/payment-methods',f=>({...f,sort_order:Number(f.sort_order),url:f.url||null,is_active:true}))}
 function createNode(e){return sendForm(e,()=>'/vpn/nodes')}
 async function createConfig(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let id=Number(f.node_id);delete f.node_id;f.port=Number(f.port);f.fp=f.fingerprint;delete f.fingerprint;let body={protocol:'vless',config:{...f,type:'tcp',security:'reality'}};try{await request('/vpn/nodes/'+id+'/configs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await load()}catch(err){alert(err.message)}}

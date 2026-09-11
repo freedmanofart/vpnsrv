@@ -25,6 +25,7 @@ from app.api.routes import admin as admin_routes
 from app.core.config import settings
 from app.db.base import Base
 from app.db.models import (
+    AccessGrant,
     AuditLog,
     CabinetAccessToken,
     Payment,
@@ -154,7 +155,72 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         authenticated = await self.client.get("/admin", auth=self.admin_auth)
         self.assertEqual(200, authenticated.status_code)
         self.assertIn("Добавить пакет тарифа", authenticated.text)
+        self.assertIn("Создать промокод", authenticated.text)
         self.assertIn('name="is_active"', authenticated.text)
+
+    async def test_admin_creates_lists_and_deletes_promo_codes(self) -> None:
+        created = await self.client.post(
+            "/admin/promo-codes",
+            auth=self.admin_auth,
+            json={
+                "code": "standard_month",
+                "plan_id": 1,
+                "max_redemptions": 100,
+                "max_redemptions_per_user": 1,
+                "is_active": True,
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        promo_id = created.json()["id"]
+        self.assertEqual("STANDARD_MONTH", created.json()["code"])
+
+        duplicate = await self.client.post(
+            "/admin/promo-codes",
+            auth=self.admin_auth,
+            json={"code": "Standard_Month", "plan_id": 1},
+        )
+        self.assertEqual(409, duplicate.status_code, duplicate.text)
+        invalid_window = await self.client.post(
+            "/admin/promo-codes",
+            auth=self.admin_auth,
+            json={
+                "code": "INVALID_WINDOW",
+                "plan_id": 1,
+                "starts_at": "2026-09-12T00:00:00Z",
+                "expires_at": "2026-09-11T00:00:00Z",
+            },
+        )
+        self.assertEqual(422, invalid_window.status_code, invalid_window.text)
+
+        async with self.session_factory() as db:
+            db.add(
+                AccessGrant(
+                    user_id=self.user_id,
+                    kind="promo",
+                    code="STANDARD_MONTH",
+                    duration_days=30,
+                )
+            )
+            await db.commit()
+
+        overview = await self.client.get("/admin/overview", auth=self.admin_auth)
+        self.assertEqual(200, overview.status_code, overview.text)
+        promo = next(item for item in overview.json()["promo_codes"] if item["id"] == promo_id)
+        self.assertEqual("1 день", promo["plan"])
+        self.assertEqual("control-plane", promo["plan_code"])
+        self.assertEqual(1, promo["redemptions"])
+        self.assertEqual(100, promo["max_redemptions"])
+
+        deleted = await self.client.delete(
+            f"/admin/promo-codes/{promo_id}", auth=self.admin_auth
+        )
+        self.assertEqual(204, deleted.status_code, deleted.text)
+        async with self.session_factory() as db:
+            self.assertIsNone(await db.get(PromoCode, promo_id))
+            grants = await db.execute(
+                select(AccessGrant).where(AccessGrant.code == "STANDARD_MONTH")
+            )
+            self.assertEqual(1, len(grants.scalars().all()))
 
     async def test_admin_docs_and_infrastructure_resources_are_available(self) -> None:
         overview = await self.client.get("/admin/overview", auth=self.admin_auth)
