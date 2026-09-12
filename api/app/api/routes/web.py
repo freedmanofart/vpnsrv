@@ -326,8 +326,8 @@ body:has(.landing-v2),body:has(.login-page){{font-family:ui-rounded,"SF Pro Roun
 .login-shell .login-card{{max-width:480px;padding:24px;border:0;border-radius:var(--radius-shell);box-shadow:0 8px 24px #17345f0b}}
 .login-shell .login-card h1{{font-size:30px;line-height:1.12;font-weight:680;letter-spacing:-.04em}}
 .login-shell .login-card label{{margin-top:18px;font-size:13px;font-weight:650}}
-.login-shell .login-card input{{min-height:44px;border:2px solid var(--color-primary);border-radius:11px;font-size:14px}}
-.login-shell .login-tabs{{margin-top:16px;padding:3px;border:2px solid var(--color-primary);border-radius:11px;background:#fff}}
+.login-shell .login-card input{{min-height:44px;border:1.5px solid var(--color-primary);border-radius:11px;font-size:14px}}
+.login-shell .login-tabs{{margin-top:16px;padding:3px;border:1.5px solid var(--color-primary);border-radius:11px;background:#fff}}
 .login-shell .login-tabs button{{min-height:36px;border-radius:8px;font-size:12px;font-weight:650}}
 .login-shell .login-tabs button.active{{background:var(--color-primary);color:#fff}}
 .login-shell .button{{min-height:44px;border-radius:11px;font-size:13px;font-weight:650}}
