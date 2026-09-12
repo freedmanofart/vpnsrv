@@ -714,6 +714,51 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         finally:
             settings.cabinet_allow_temporary_registration = previous
 
+    async def test_cabinet_uses_accessible_payment_switcher_and_inline_tariffs(self) -> None:
+        from app.db.models import PaymentMethod
+
+        raw = "cabinet-redesign-token"
+        async with self.session_factory() as db:
+            db.add(
+                CabinetAccessToken(
+                    user_id=self.user_id,
+                    token_hash=token_hash(raw),
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                )
+            )
+            db.add_all(
+                [
+                    PaymentMethod(
+                        code="platega_sbp_qr",
+                        name="СБП (QR)",
+                        is_active=True,
+                        sort_order=1,
+                    ),
+                    PaymentMethod(
+                        code="platega_mir_card",
+                        name="Карта МИР",
+                        is_active=True,
+                        sort_order=2,
+                    ),
+                ]
+            )
+            await db.commit()
+
+        self.client.cookies.set("freedom_cabinet", raw)
+        response = await self.client.get("/cabinet")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(
+            2, response.text.count('type="radio" name="payment-method"')
+        )
+        self.assertIn('role="tablist"', response.text)
+        self.assertIn('id="tariffs-panel"', response.text)
+        self.assertIn('data-order-plan="1"', response.text)
+        self.assertIn("function selectedMethodCode()", response.text)
+        self.assertIn("function setRenewMode(mode)", response.text)
+        self.assertIn('onclick="openPayment()"', response.text)
+        self.assertNotIn('href="/cabinet/tariffs"', response.text)
+
     async def test_cabinet_tariffs_page_selects_plan(self) -> None:
         from app.core.tokens import token_hash
 
