@@ -149,7 +149,12 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         response = await self.client.get("/", follow_redirects=False)
         self.assertEqual(200, response.status_code)
         self.assertIn("Freedom VPN", response.text)
-        self.assertIn("Выберите свой формат", response.text)
+        self.assertNotIn("Выберите свой формат", response.text)
+        self.assertNotIn(">Возможности</a>", response.text)
+        self.assertNotIn(">Тарифы</a>", response.text)
+        self.assertNotIn("Как это работает", response.text)
+        self.assertNotIn(">Подключить</button>", response.text)
+        self.assertIn('class="f-btn f-cabinet" href="/cabinet">Кабинет</a>', response.text)
         self.assertNotIn("Тарифы из административной панели", response.text)
         self.assertNotIn("синхронизированы с VPN API", response.text)
         unauthenticated = await self.client.get("/admin")
@@ -158,6 +163,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, authenticated.status_code)
         self.assertIn("Добавить пакет тарифа", authenticated.text)
         self.assertIn("Создать промокод", authenticated.text)
+        self.assertIn("Коды подключения провайдера", authenticated.text)
         self.assertIn('name="is_active"', authenticated.text)
 
     async def test_admin_creates_lists_and_deletes_promo_codes(self) -> None:
@@ -223,6 +229,41 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
                 select(AccessGrant).where(AccessGrant.code == "STANDARD_MONTH")
             )
             self.assertEqual(1, len(grants.scalars().all()))
+
+    async def test_admin_issues_and_refreshes_masked_provider_codes(self) -> None:
+        created = await self.client.post(
+            "/admin/provider-codes",
+            auth=self.admin_auth,
+            json={"telegram_id": self.telegram_id, "ttl_minutes": 10},
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        first = created.json()
+        self.assertRegex(first["code"], r"^\d{8}$")
+        self.assertRegex(first["device_name"], r"^dev-[a-z0-9]{6}$")
+
+        overview = await self.client.get("/admin/overview", auth=self.admin_auth)
+        self.assertEqual(200, overview.status_code, overview.text)
+        listed = next(
+            item
+            for item in overview.json()["provider_codes"]
+            if item["id"] == first["id"]
+        )
+        self.assertEqual(first["code"][:2] + "••••••", listed["code"])
+        self.assertNotIn(first["code"], overview.text)
+
+        refreshed = await self.client.post(
+            f"/admin/provider-codes/{first['id']}/refresh",
+            auth=self.admin_auth,
+            json={"ttl_minutes": 15},
+        )
+        self.assertEqual(200, refreshed.status_code, refreshed.text)
+        self.assertNotEqual(first["code"], refreshed.json()["code"])
+        async with self.session_factory() as db:
+            old = await db.get(ActivationCode, first["id"])
+            self.assertLessEqual(
+                old.expires_at.replace(tzinfo=timezone.utc),
+                datetime.now(timezone.utc),
+            )
 
     async def test_admin_docs_and_infrastructure_resources_are_available(self) -> None:
         overview = await self.client.get("/admin/overview", auth=self.admin_auth)

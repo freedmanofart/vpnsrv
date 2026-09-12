@@ -20,7 +20,11 @@ def issue_code(client, telegram_id: int, ttl_minutes: int) -> dict:
     code = data.get("code", "")
     if len(code) != 8 or not code.isascii() or not code.isdigit():
         raise RuntimeError("API returned an invalid activation code")
-    return {"code": code, "expires_at": data["expires_at"]}
+    return {
+        "code": code,
+        "device_name": data["device_name"],
+        "expires_at": data["expires_at"],
+    }
 
 
 def main() -> None:

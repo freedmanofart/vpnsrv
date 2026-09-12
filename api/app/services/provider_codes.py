@@ -48,6 +48,7 @@ async def issue_provider_code(
             ActivationCode.expires_at > now,
         )
         .values(expires_at=now)
+        .execution_options(synchronize_session=False)
     )
     code = f"{secrets.randbelow(100_000_000):08d}"
     device_name = generate_device_name()

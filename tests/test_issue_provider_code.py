@@ -37,6 +37,7 @@ class IssueCodeTest(unittest.TestCase):
                 200,
                 {
                     "code": "00123456",
+                    "device_name": "dev-a1b2c3",
                     "expires_at": "2030-01-01T00:00:00Z",
                     "secret": "never-output",
                 },
@@ -44,7 +45,8 @@ class IssueCodeTest(unittest.TestCase):
         )
         result = module.issue_code(client, 123, 5)
         self.assertEqual(result["code"], "00123456")
-        self.assertEqual(set(result), {"code", "expires_at"})
+        self.assertEqual(result["device_name"], "dev-a1b2c3")
+        self.assertEqual(set(result), {"code", "device_name", "expires_at"})
         self.assertEqual(client.path, "/v1/client/activation-codes")
         self.assertEqual(client.body, {"telegram_id": 123, "ttl_minutes": 5})
 
