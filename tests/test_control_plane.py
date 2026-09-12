@@ -161,8 +161,19 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn('/static/landing-phone@2x.png 2x', response.text)
         self.assertIn('class="l-benefits"', response.text)
         self.assertIn('class="l-downloads"', response.text)
+        self.assertIn("Свободный интернет без ограничений", response.text)
+        self.assertIn(
+            "https://github.com/INCY-DEV/incy-platforms/releases/latest/download/incy-macos-arm64.dmg",
+            response.text,
+        )
+        self.assertIn(
+            "https://github.com/INCY-DEV/incy-platforms/releases/latest/download/incy-windows-setup.exe",
+            response.text,
+        )
         self.assertIn('href="/static/privacy.html"', response.text)
         self.assertIn('href="/static/terms.html"', response.text)
+        self.assertIn('href="https://t.me/Freedom_VPN_Support"', response.text)
+        self.assertNotIn('<footer class="l-footer"><strong>', response.text)
         self.assertNotIn("Сервера в 12 странах", response.text)
         self.assertNotIn("Поддержка 24/7", response.text)
         self.assertNotIn("Без логов", response.text)
