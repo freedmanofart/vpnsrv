@@ -322,8 +322,8 @@ body:has(.landing-v2){{background:var(--color-page);color:var(--color-text)}}
 body:has(.landing-v2),body:has(.login-page){{font-family:ui-rounded,"SF Pro Rounded","Avenir Next",Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-weight:450}}
 .login-shell{{width:calc(100% - 64px);max-width:1200px;min-height:calc(100dvh - 48px);margin:24px auto;background:#fff;border-radius:var(--radius-shell);box-shadow:var(--shadow-surface);overflow:hidden}}
 .login-shell .l-header{{background:#fff}}
-.login-shell .login-page{{min-height:calc(100dvh - 120px);padding:32px 18px 52px;background:linear-gradient(180deg,#fff 0%,#f5f8fd 100%)}}
-.login-shell .login-card{{max-width:480px;padding:24px;border-color:var(--color-border);border-radius:var(--radius-shell);box-shadow:var(--shadow-surface)}}
+.login-shell .login-page{{min-height:calc(100dvh - 120px);padding:32px 18px 52px;background:#edf1f7}}
+.login-shell .login-card{{max-width:480px;padding:24px;border:1px solid #d8e0ee;border-radius:var(--radius-shell);box-shadow:0 8px 24px #17345f0b}}
 .login-shell .login-card h1{{font-size:30px;line-height:1.12;font-weight:680;letter-spacing:-.04em}}
 .login-shell .login-card label{{margin-top:18px;font-size:13px;font-weight:650}}
 .login-shell .login-card input{{min-height:44px;border:2px solid var(--color-border);border-radius:11px;font-size:14px}}
