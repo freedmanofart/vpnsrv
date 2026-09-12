@@ -35,7 +35,11 @@ class Settings(BaseSettings):
     bot_username: str = "vpn142323srv_bot"
     bot_admin_chat_id: int = 0
     admin_notification_email: str = "freedmanofart5@gmail.com"
+    provider_code_notifications_enabled: bool = False
     provider_code_notification_email: str = ""
+    provider_name: str = "Freedom VPN"
+    provider_support_url: str = "https://t.me/Freedom_VPN_Support"
+    provider_cabinet_url: str = ""
     platega_enabled: bool = False
     platega_base_url: str = "https://app.platega.io"
     platega_merchant_id: str = ""

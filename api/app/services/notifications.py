@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import smtplib
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
@@ -273,35 +274,59 @@ async def _send_client_telegram_message(user: User, text: str) -> bool:
 
 
 def _is_provider_code_notification_target(user: User) -> bool:
+    if not settings.provider_code_notifications_enabled:
+        return False
     target_email = settings.provider_code_notification_email.strip().casefold()
     user_email = (user.email or "").strip().casefold()
-    return bool(target_email and user_email == target_email)
+    return not target_email or user_email == target_email
+
+
+@dataclass(frozen=True)
+class ProviderCodeDelivery:
+    telegram_sent: bool
+    email_sent: bool
 
 
 async def notify_provider_activation_code(
+    db: AsyncSession,
     user: User,
     code: str,
     *,
+    device_name: str,
     ttl_minutes: int,
-) -> bool:
-    """Deliver a provider code only to the explicitly allowlisted test user."""
+) -> ProviderCodeDelivery:
+    """Deliver a provider code without storing the plaintext in logs or audit."""
     if not _is_provider_code_notification_target(user):
-        return False
-    return await _send_client_telegram_message(
+        return ProviderCodeDelivery(telegram_sent=False, email_sent=False)
+    text = (
+        "🔐 Код подключения Freedom VPN\n\n"
+        f"Код: {code}\n"
+        f"Имя устройства: {device_name}\n\n"
+        f"Код действует {ttl_minutes} мин. и может быть использован один раз.\n"
+        "В приложении выберите «Добавить» → «Провайдер» и введите оба значения.\n\n"
+        "Никому не пересылайте этот код."
+    )
+    telegram_sent = await _send_client_telegram_message(user, text)
+    email_sent = await _send_client_email_message(
         user,
-        (
-            "🔐 Код подключения Freedom VPN\n\n"
-            f"Код: {code}\n\n"
-            "Имя устройства: Мой телефон\n\n"
-            f"Он действует {ttl_minutes} мин. и может быть использован один раз.\n"
-            "В приложении выберите «Добавить» → «Провайдер», введите код и "
-            "указанное имя устройства.\n\n"
-            "Никому не пересылайте этот код."
-        ),
+        "Freedom VPN: код подключения устройства",
+        text,
+    )
+    await write_audit(
+        db,
+        action="email.provider_code",
+        result="success" if email_sent else "skipped_or_failed",
+        resource_type="user",
+        resource_id=user.id,
+        details={"user_id": user.id, "email": user.email},
+    )
+    return ProviderCodeDelivery(
+        telegram_sent=telegram_sent,
+        email_sent=email_sent,
     )
 
 
-async def _send_client_payment_paid_email(user: User, subject: str, body: str) -> bool:
+async def _send_client_email_message(user: User, subject: str, body: str) -> bool:
     if not user.email or not settings.smtp_host or not settings.smtp_from:
         return False
     message = EmailMessage()
@@ -313,7 +338,7 @@ async def _send_client_payment_paid_email(user: User, subject: str, body: str) -
         await asyncio.to_thread(_send, message)
         return True
     except (OSError, smtplib.SMTPException) as exc:
-        logger.warning("client_email_payment_paid_failed: %s", exc)
+        logger.warning("client_email_notification_failed: %s", exc)
         return False
 
 
@@ -345,7 +370,7 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
             "VPN-ключ и статус подписки доступны в web-кабинете."
         )
         client_notified = await _send_client_telegram_message(user, client_text) or client_notified
-        client_notified = await _send_client_payment_paid_email(
+        client_notified = await _send_client_email_message(
             user,
             "Freedom VPN: оплата подтверждена",
             client_text,

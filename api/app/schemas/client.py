@@ -10,6 +10,7 @@ class ActivationCodeCreate(BaseModel):
 
 class ActivationCodeResponse(BaseModel):
     code: str
+    device_name: str
     expires_at: datetime
 
 
@@ -35,9 +36,16 @@ class ClientProfileNode(BaseModel):
     config: str
 
 
+class ClientProviderInfo(BaseModel):
+    name: str
+    support_url: str
+    cabinet_url: str
+
+
 class ClientProfileResponse(BaseModel):
     device_id: int
     user_id: int
     subscription_id: int
     expires_at: datetime
+    provider: ClientProviderInfo
     nodes: list[ClientProfileNode]

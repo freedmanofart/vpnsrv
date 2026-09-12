@@ -33,7 +33,7 @@ from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.models.payment import Payment
 from app.db.models.payment_method import PaymentMethod
-from app.db.models.audit import AccessGrant, AuditLog, ClientDevice, DebugSession
+from app.db.models.audit import AccessGrant, ActivationCode, AuditLog, ClientDevice, DebugSession
 from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.session import get_db
 from app.core.security import APIPrincipal, hash_password, require_admin, require_api_access
@@ -43,6 +43,7 @@ from app.services.node_health import node_accepts_clients
 from app.services.vless import build_vless_url
 from app.services.threexui import ThreeXUIClient, ThreeXUIError, ThreeXUIClientNotFound
 from app.services.payments import PaymentError, process_payment_event
+from app.services.provider_codes import issue_provider_code
 from app.schemas.subscription import VPNClientRotate
 from app.api.routes.subscriptions import rotate_subscription_client
 from app.core.config import settings
@@ -95,6 +96,16 @@ class AdminPromoCodeCreate(BaseModel):
     is_active: bool = True
     starts_at: datetime | None = None
     expires_at: datetime | None = None
+
+
+class AdminProviderCodeCreate(BaseModel):
+    email: str | None = Field(default=None, max_length=320)
+    telegram_id: int | None = None
+    ttl_minutes: int = Field(default=10, ge=1, le=60)
+
+
+class AdminProviderCodeRefresh(BaseModel):
+    ttl_minutes: int = Field(default=10, ge=1, le=60)
 
 
 logger = logging.getLogger(__name__)
@@ -627,6 +638,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
     payments = await rows(Payment)
     payment_methods = await rows(PaymentMethod)
     devices = await rows(ClientDevice)
+    provider_codes = await rows(ActivationCode)
     debug_sessions = await rows(DebugSession)
     login_codes = await rows(CabinetLoginCode)
     audit_result = await db.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(300))
@@ -678,6 +690,8 @@ async def overview(db: AsyncSession = Depends(get_db)):
     paid_trial_map = {}
     for grant in paid_trial_grants:
         paid_trial_map.setdefault(grant.user_id, grant)
+    user_map = {item.id: item for item in users}
+    now = datetime.now(timezone.utc)
 
     user_rows = []
     for user in users:
@@ -738,6 +752,25 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "payments": [{"id": x.id, "user_id": x.user_id, "provider": x.provider, "amount": str(x.amount), "currency": x.currency, "status": x.status, "subscription_id": x.subscription_id, "has_receipt": x.receipt_data is not None, "receipt_url": f"/admin/payments/{x.id}/receipt" if x.receipt_data is not None else None, "receipt_filename": x.receipt_filename, "receipt_mime_type": x.receipt_mime_type, "details": x.details, "created_at": x.created_at} for x in payments],
         "payment_methods": [{"id": x.id, "code": x.code, "name": x.name, "url": x.url, "sort_order": x.sort_order, "is_active": x.is_active, "has_image": x.image_data is not None} for x in sorted(payment_methods, key=lambda item: (item.sort_order, item.id))],
         "devices": [{"id": x.id, "user_id": x.user_id, "name": x.name, "platform": x.platform, "status": x.status, "last_seen_at": x.last_seen_at, "expires_at": x.expires_at} for x in devices],
+        "provider_codes": [
+            {
+                "id": x.id,
+                "user_id": x.user_id,
+                "email": user_map[x.user_id].email if x.user_id in user_map else None,
+                "telegram_id": user_map[x.user_id].telegram_id if x.user_id in user_map else None,
+                "code": f"{x.code_prefix}••••••",
+                "status": (
+                    "used"
+                    if x.used_at
+                    else ("expired" if _aware(x.expires_at) <= now else "active")
+                ),
+                "device_id": x.device_id,
+                "created_at": x.created_at,
+                "expires_at": x.expires_at,
+                "used_at": x.used_at,
+            }
+            for x in provider_codes
+        ],
         "login_codes": [{"id": x.id, "user_id": x.user_id, "code": x.plain_code or "legacy_hash_only", "status": "used" if x.used_at else ("expired" if _aware(x.expires_at) <= datetime.now(timezone.utc) else "active"), "attempts": x.attempts, "created_at": x.created_at, "expires_at": x.expires_at, "used_at": x.used_at} for x in login_codes],
         "docs": ADMIN_DOCS,
         "scripts": [
@@ -791,6 +824,83 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "debug": [{"id": x.id, "created_by": x.created_by, "reason": x.reason, "status": x.status, "expires_at": x.expires_at} for x in debug_sessions],
         "audit": [{"id": x.id, "created_at": x.created_at, "actor": f"{x.actor_type}:{x.actor_id or '-'}", "action": x.action, "resource": f"{x.resource_type or '-'}:{x.resource_id or '-'}", "result": x.result, "node_id": x.node_id, "sensitive": x.sensitive, "details": x.details} for x in audit_logs],
     }
+
+
+async def _provider_code_user(db: AsyncSession, data: AdminProviderCodeCreate) -> User:
+    email = (data.email or "").strip().casefold()
+    if bool(email) == (data.telegram_id is not None):
+        raise HTTPException(
+            status_code=422,
+            detail="Укажите либо email, либо Telegram ID",
+        )
+    if email:
+        result = await db.execute(
+            select(User).where(func.lower(User.email) == email).limit(2)
+        )
+    else:
+        result = await db.execute(
+            select(User).where(User.telegram_id == data.telegram_id).limit(2)
+        )
+    users = result.scalars().all()
+    if not users:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if len(users) > 1:
+        raise HTTPException(status_code=409, detail="Найдено несколько пользователей")
+    return users[0]
+
+
+def _issued_provider_code_response(issued, user: User) -> dict:
+    return {
+        "id": issued.activation_id,
+        "user_id": user.id,
+        "email": user.email,
+        "telegram_id": user.telegram_id,
+        "code": issued.code,
+        "device_name": issued.device_name,
+        "expires_at": issued.expires_at,
+        "telegram_sent": issued.telegram_sent,
+        "email_sent": issued.email_sent,
+    }
+
+
+@router.post("/provider-codes", dependencies=[Depends(require_admin)])
+async def create_provider_code(
+    data: AdminProviderCodeCreate,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _provider_code_user(db, data)
+    issued = await issue_provider_code(
+        db,
+        user,
+        ttl_minutes=data.ttl_minutes,
+        actor_type="admin",
+        actor_id=principal.name,
+    )
+    return _issued_provider_code_response(issued, user)
+
+
+@router.post("/provider-codes/{activation_id}/refresh", dependencies=[Depends(require_admin)])
+async def refresh_provider_code(
+    activation_id: int,
+    data: AdminProviderCodeRefresh,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    activation = await db.get(ActivationCode, activation_id)
+    if activation is None:
+        raise HTTPException(status_code=404, detail="Код подключения не найден")
+    user = await db.get(User, activation.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    issued = await issue_provider_code(
+        db,
+        user,
+        ttl_minutes=data.ttl_minutes,
+        actor_type="admin",
+        actor_id=principal.name,
+    )
+    return _issued_provider_code_response(issued, user)
 
 
 @router.post("/promo-codes", dependencies=[Depends(require_admin)])

@@ -1,6 +1,6 @@
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -20,13 +20,14 @@ from app.schemas.client import (
     ActivationCodeCreate,
     ActivationCodeResponse,
     ClientProfileNode,
+    ClientProviderInfo,
     ClientProfileResponse,
     DeviceActivate,
     DeviceTokenResponse,
 )
 from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
-from app.services.notifications import notify_provider_activation_code
+from app.services.provider_codes import issue_provider_code
 from app.services.vless import build_vless_url
 from app.core.config import settings
 
@@ -45,6 +46,23 @@ def aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
+async def active_subscription_for_user(
+    db: AsyncSession,
+    user_id: int,
+    now: datetime,
+) -> Subscription | None:
+    result = await db.execute(
+        select(Subscription)
+        .where(
+            Subscription.user_id == user_id,
+            Subscription.status == "active",
+            Subscription.expires_at > now,
+        )
+        .order_by(Subscription.expires_at.desc(), Subscription.id.desc())
+    )
+    return result.scalars().first()
+
+
 async def require_device(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(device_bearer),
@@ -61,12 +79,13 @@ async def require_device(
     )
     device = result.scalar_one_or_none()
     now = datetime.now(timezone.utc)
-    if (
-        device is None
-        or not secrets.compare_digest(device.token_hash, digest)
-        or aware(device.expires_at) <= now
-    ):
+    if device is None or not secrets.compare_digest(device.token_hash, digest):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid device token")
+    if aware(device.expires_at) <= now:
+        subscription = await active_subscription_for_user(db, device.user_id, now)
+        if subscription is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid device token")
+        device.expires_at = subscription.expires_at
     device.last_seen_at = now
     await db.commit()
     request.state.principal = type(
@@ -87,36 +106,17 @@ async def create_activation_code(data: ActivationCodeCreate, db: AsyncSession = 
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    now = datetime.now(timezone.utc)
-    code = f"{secrets.randbelow(100_000_000):08d}"
-    expires_at = now + timedelta(minutes=data.ttl_minutes)
-    db.add(
-        ActivationCode(
-            user_id=user.id,
-            code_hash=token_hash(code),
-            code_prefix=code[:2],
-            expires_at=expires_at,
-        )
-    )
-    await db.commit()
-    notification_sent = await notify_provider_activation_code(
-        user,
-        code,
-        ttl_minutes=data.ttl_minutes,
-    )
-    await write_audit(
+    issued = await issue_provider_code(
         db,
-        action="device.activation_code.create",
-        result="success",
+        user,
+        ttl_minutes=data.ttl_minutes,
         actor_type="service",
-        resource_type="user",
-        resource_id=user.id,
-        details={
-            "expires_at": expires_at.isoformat(),
-            "notification_sent": notification_sent,
-        },
     )
-    return ActivationCodeResponse(code=code, expires_at=expires_at)
+    return ActivationCodeResponse(
+        code=issued.code,
+        device_name=issued.device_name,
+        expires_at=issued.expires_at,
+    )
 
 
 @router.post("/activate", response_model=DeviceTokenResponse)
@@ -130,8 +130,11 @@ async def activate_device(data: DeviceActivate, db: AsyncSession = Depends(get_d
     activation = result.scalar_one_or_none()
     if activation is None or activation.used_at is not None or aware(activation.expires_at) <= now:
         raise HTTPException(status_code=400, detail="Activation code is invalid or expired")
+    subscription = await active_subscription_for_user(db, activation.user_id, now)
+    if subscription is None:
+        raise HTTPException(status_code=403, detail="No active subscription")
     token = generate_scoped_token("device", activation.user_id)
-    expires_at = now + timedelta(days=90)
+    expires_at = subscription.expires_at
     device = ClientDevice(
         user_id=activation.user_id,
         name=data.name,
@@ -181,16 +184,7 @@ async def client_profile(
     db: AsyncSession = Depends(get_db),
 ):
     now = datetime.now(timezone.utc)
-    subscription_result = await db.execute(
-        select(Subscription)
-        .where(
-            Subscription.user_id == principal.user_id,
-            Subscription.status == "active",
-            Subscription.expires_at > now,
-        )
-        .order_by(Subscription.id.desc())
-    )
-    subscription = subscription_result.scalars().first()
+    subscription = await active_subscription_for_user(db, principal.user_id, now)
     if subscription is None:
         raise HTTPException(status_code=403, detail="No active subscription")
     result = await db.execute(
@@ -241,6 +235,14 @@ async def client_profile(
         user_id=principal.user_id,
         subscription_id=subscription.id,
         expires_at=subscription.expires_at,
+        provider=ClientProviderInfo(
+            name=settings.provider_name,
+            support_url=settings.provider_support_url,
+            cabinet_url=(
+                settings.provider_cabinet_url.strip()
+                or f"{settings.public_base_url.rstrip('/')}/cabinet"
+            ),
+        ),
         nodes=nodes,
     )
 
@@ -254,10 +256,13 @@ async def refresh_device_token(
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
     now = datetime.now(timezone.utc)
+    subscription = await active_subscription_for_user(db, device.user_id, now)
+    if subscription is None:
+        raise HTTPException(status_code=403, detail="No active subscription")
     token = generate_scoped_token("device", device.user_id)
     device.token_hash = token_hash(token)
     device.token_prefix = token.split(".", 1)[0]
-    device.expires_at = now + timedelta(days=90)
+    device.expires_at = subscription.expires_at
     await db.commit()
     return DeviceTokenResponse(
         device_id=device.id,
