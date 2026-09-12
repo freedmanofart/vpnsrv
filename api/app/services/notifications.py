@@ -263,13 +263,42 @@ async def _send_client_telegram_message(user: User, text: str) -> bool:
     except httpx.HTTPError as exc:
         error_type, status_code, details = _telegram_error_details(exc)
         logger.warning(
-            "client_telegram_payment_paid_failed telegram_id=%s error=%s status=%s body=%s",
+            "client_telegram_notification_failed telegram_id=%s error=%s status=%s body=%s",
             user.telegram_id,
             error_type,
             status_code,
             details,
         )
         return False
+
+
+def _is_provider_code_notification_target(user: User) -> bool:
+    target_email = settings.provider_code_notification_email.strip().casefold()
+    user_email = (user.email or "").strip().casefold()
+    return bool(target_email and user_email == target_email)
+
+
+async def notify_provider_activation_code(
+    user: User,
+    code: str,
+    *,
+    ttl_minutes: int,
+) -> bool:
+    """Deliver a provider code only to the explicitly allowlisted test user."""
+    if not _is_provider_code_notification_target(user):
+        return False
+    return await _send_client_telegram_message(
+        user,
+        (
+            "🔐 Код подключения Freedom VPN\n\n"
+            f"Код: {code}\n\n"
+            "Имя устройства: Мой телефон\n\n"
+            f"Он действует {ttl_minutes} мин. и может быть использован один раз.\n"
+            "В приложении выберите «Добавить» → «Провайдер», введите код и "
+            "указанное имя устройства.\n\n"
+            "Никому не пересылайте этот код."
+        ),
+    )
 
 
 async def _send_client_payment_paid_email(user: User, subject: str, body: str) -> bool:

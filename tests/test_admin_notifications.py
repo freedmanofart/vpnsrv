@@ -2,7 +2,8 @@ import sys
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import TestCase
+from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,3 +35,58 @@ class AdminNotificationTests(TestCase):
 
     def test_support_chat_id_is_not_derived_from_public_links(self) -> None:
         self.assertEqual("@Freedom_VPN_Support", notifications._support_chat_id())
+
+
+class ProviderCodeNotificationTests(IsolatedAsyncioTestCase):
+    async def test_provider_code_is_sent_to_allowlisted_email(self) -> None:
+        user = SimpleNamespace(
+            email="FreedmanOfArt@icloud.com",
+            telegram_id=106123347,
+        )
+        with (
+            patch.object(
+                notifications.settings,
+                "provider_code_notification_email",
+                "freedmanofart@icloud.com",
+            ),
+            patch.object(
+                notifications,
+                "_send_client_telegram_message",
+                new=AsyncMock(return_value=True),
+            ) as send_message,
+        ):
+            sent = await notifications.notify_provider_activation_code(
+                user,
+                "00123456",
+                ttl_minutes=10,
+            )
+
+        self.assertTrue(sent)
+        send_message.assert_awaited_once()
+        message = send_message.await_args.args[1]
+        self.assertIn("00123456", message)
+        self.assertIn("Имя устройства: Мой телефон", message)
+        self.assertIn("10 мин.", message)
+
+    async def test_provider_code_is_not_sent_to_other_email(self) -> None:
+        user = SimpleNamespace(email="other@example.com", telegram_id=123)
+        with (
+            patch.object(
+                notifications.settings,
+                "provider_code_notification_email",
+                "freedmanofart@icloud.com",
+            ),
+            patch.object(
+                notifications,
+                "_send_client_telegram_message",
+                new=AsyncMock(return_value=True),
+            ) as send_message,
+        ):
+            sent = await notifications.notify_provider_activation_code(
+                user,
+                "00123456",
+                ttl_minutes=10,
+            )
+
+        self.assertFalse(sent)
+        send_message.assert_not_awaited()

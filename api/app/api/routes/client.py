@@ -26,6 +26,7 @@ from app.schemas.client import (
 )
 from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
+from app.services.notifications import notify_provider_activation_code
 from app.services.vless import build_vless_url
 from app.core.config import settings
 
@@ -98,6 +99,11 @@ async def create_activation_code(data: ActivationCodeCreate, db: AsyncSession = 
         )
     )
     await db.commit()
+    notification_sent = await notify_provider_activation_code(
+        user,
+        code,
+        ttl_minutes=data.ttl_minutes,
+    )
     await write_audit(
         db,
         action="device.activation_code.create",
@@ -105,7 +111,10 @@ async def create_activation_code(data: ActivationCodeCreate, db: AsyncSession = 
         actor_type="service",
         resource_type="user",
         resource_id=user.id,
-        details={"expires_at": expires_at.isoformat()},
+        details={
+            "expires_at": expires_at.isoformat(),
+            "notification_sent": notification_sent,
+        },
     )
     return ActivationCodeResponse(code=code, expires_at=expires_at)
 
