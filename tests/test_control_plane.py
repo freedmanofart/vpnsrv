@@ -156,6 +156,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertNotIn(">Подключить</button>", response.text)
         self.assertIn('class="l-cabinet" href="/cabinet">Кабинет</a>', response.text)
         self.assertIn('class="landing-v2"', response.text)
+        self.assertIn(
+            'body:has(.landing-v2),body:has(.login-page){font-family:ui-rounded,"SF Pro Rounded","Avenir Next",Inter',
+            response.text,
+        )
         self.assertIn('/static/freedom-vpn-mark@2x.webp 2x', response.text)
         self.assertIn('class="l-phone"', response.text)
         self.assertIn('/static/landing-phone@2x.png 2x', response.text)
@@ -462,6 +466,9 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(401, response.status_code, response.text)
         self.assertIn("freedom_payment_return_token", response.text)
         self.assertIn("/cabinet/payment-return", response.text)
+        self.assertIn('class="login-shell"', response.text)
+        self.assertIn('class="l-cabinet" href="/">На главную</a>', response.text)
+        self.assertIn('class="login-tabs"', response.text)
 
     async def test_web_platega_payment_returns_restore_token(self) -> None:
         from types import SimpleNamespace
