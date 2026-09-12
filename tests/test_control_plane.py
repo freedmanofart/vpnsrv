@@ -155,6 +155,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertNotIn("Как это работает", response.text)
         self.assertNotIn(">Подключить</button>", response.text)
         self.assertIn('class="f-btn f-cabinet" href="/cabinet">Кабинет</a>', response.text)
+        self.assertIn('class="f-footer"', response.text)
+        self.assertIn("border-radius:30px", response.text)
         self.assertNotIn("Тарифы из административной панели", response.text)
         self.assertNotIn("синхронизированы с VPN API", response.text)
         unauthenticated = await self.client.get("/admin")
