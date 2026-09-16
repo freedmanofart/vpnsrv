@@ -38,6 +38,7 @@ async def issue_provider_code(
     ttl_minutes: int,
     actor_type: str,
     actor_id: str | None = None,
+    notify: bool = True,
 ) -> IssuedProviderCode:
     now = datetime.now(timezone.utc)
     await db.execute(
@@ -63,12 +64,16 @@ async def issue_provider_code(
     await db.commit()
     await db.refresh(activation)
 
-    delivery = await notify_provider_activation_code(
-        db,
-        user,
-        code,
-        device_name=device_name,
-        ttl_minutes=ttl_minutes,
+    delivery = (
+        await notify_provider_activation_code(
+            db,
+            user,
+            code,
+            device_name=device_name,
+            ttl_minutes=ttl_minutes,
+        )
+        if notify
+        else None
     )
     await write_audit(
         db,
@@ -81,8 +86,8 @@ async def issue_provider_code(
         details={
             "activation_id": activation.id,
             "expires_at": expires_at.isoformat(),
-            "telegram_sent": delivery.telegram_sent,
-            "email_sent": delivery.email_sent,
+            "telegram_sent": delivery.telegram_sent if delivery else False,
+            "email_sent": delivery.email_sent if delivery else False,
         },
     )
     return IssuedProviderCode(
@@ -90,6 +95,6 @@ async def issue_provider_code(
         code=code,
         device_name=device_name,
         expires_at=expires_at,
-        telegram_sent=delivery.telegram_sent,
-        email_sent=delivery.email_sent,
+        telegram_sent=delivery.telegram_sent if delivery else False,
+        email_sent=delivery.email_sent if delivery else False,
     )

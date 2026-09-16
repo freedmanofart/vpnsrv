@@ -360,11 +360,40 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
     if user is not None:
         plan_name = plan.name if plan else "Freedom VPN"
         expires = f"\nДействует до: {subscription.expires_at} UTC" if subscription else ""
+        provider_code_text = ""
+        try:
+            # The paid notification is the primary delivery for a new app device.
+            # Suppress the provider-code service's standalone notification here;
+            # the code is included in both client messages below instead.
+            from app.services.provider_codes import issue_provider_code
+
+            issued_code = await issue_provider_code(
+                db,
+                user,
+                ttl_minutes=settings.cabinet_email_code_ttl_minutes,
+                actor_type="payment",
+                actor_id=str(payment.id),
+                notify=False,
+            )
+            provider_code_text = (
+                "\n\n📱 Подключение приложения\n"
+                f"Код: {issued_code.code}\n"
+                f"Имя устройства: {issued_code.device_name}\n"
+                f"Код действует {settings.cabinet_email_code_ttl_minutes} мин.\n"
+                "В приложении выберите «Добавить» → «Провайдер» и введите оба значения."
+            )
+        except Exception:
+            logger.exception(
+                "provider_code_for_paid_notification_failed",
+                extra={"event_type": "provider_code_for_paid_notification_failed", "payment_id": payment.id},
+            )
         client_text = (
             "✅ Оплата Freedom VPN подтверждена.\n\n"
             f"Тариф: {plan_name}\n"
             f"Сумма: {payment.amount:g} {payment.currency}"
             f"{expires}\n\n"
+            f"{provider_code_text}"
+            "\n\n"
             f"Web-кабинет: {_user_cabinet_url(user)}\n"
             f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}\n\n"
             "VPN-ключ и статус подписки доступны в web-кабинете."
