@@ -8,6 +8,7 @@ class UserCreate(BaseModel):
     username: str | None = None
     first_name: str | None = None
     last_name: str | None = None
+    referred_by_telegram_id: int | None = None
 
 
 class UserResponse(BaseModel):

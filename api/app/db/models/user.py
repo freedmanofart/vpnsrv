@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -41,6 +41,10 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
+    )
+
+    referred_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
     )
 
     status: Mapped[str] = mapped_column(

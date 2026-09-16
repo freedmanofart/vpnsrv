@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Callable
 
@@ -13,6 +13,7 @@ from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_client import VPNClient
+from app.db.models.referral_reward import ReferralReward
 from app.schemas.payment import PaymentCreate
 from app.services.provisioning import (
     ProvisioningConflict,
@@ -347,4 +348,30 @@ async def process_payment_event(
         if payment is None:
             raise
     await db.refresh(payment)
+    if target_status == "paid":
+        await apply_referral_reward(db, payment)
     return payment
+
+
+async def apply_referral_reward(db: AsyncSession, payment: Payment) -> None:
+    invitee = await db.get(User, payment.user_id)
+    if invitee is None or invitee.referred_by_user_id is None:
+        return
+    existing = await db.scalar(select(ReferralReward).where(ReferralReward.invitee_id == invitee.id))
+    if existing is not None:
+        return
+    inviter = await db.get(User, invitee.referred_by_user_id)
+    if inviter is None:
+        return
+    subscription = await db.scalar(
+        select(Subscription).where(
+            Subscription.user_id == inviter.id,
+            Subscription.status == "active",
+        ).with_for_update()
+    )
+    if subscription is None:
+        return
+    subscription.expires_at = subscription.expires_at + timedelta(days=7)
+    db.add(ReferralReward(inviter_id=inviter.id, invitee_id=invitee.id, payment_id=payment.id, rewarded_days=7))
+    await db.commit()
+    logger.info("referral_reward_applied", extra={"event_type": "referral_reward_applied", "inviter_id": inviter.id, "invitee_id": invitee.id, "payment_id": payment.id})

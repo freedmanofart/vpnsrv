@@ -1,4 +1,5 @@
 from app.db.models.user import User
+from app.db.models.referral_reward import ReferralReward
 from app.db.models.plan import Plan
 from app.db.models.plan_package import PlanPackage
 from app.db.models.promo_code import PromoCode
@@ -21,6 +22,7 @@ from app.db.models.admin_setting import AdminSetting
 
 __all__ = [
     "User",
+    "ReferralReward",
     "Plan",
     "PlanPackage",
     "PromoCode",

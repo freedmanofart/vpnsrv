@@ -162,7 +162,7 @@ def main_menu() -> InlineKeyboardMarkup:
     reviews_button = InlineKeyboardButton(text="⭐ Отзывы", callback_data="reviews")
     rows = [
         [InlineKeyboardButton(text="💳 Приобрести подписку", callback_data="buy_vpn"), InlineKeyboardButton(text="👤 Управление подпиской", callback_data="vpn_status")],
-        [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="🧪 Попробовать", callback_data="try_start")],
+        [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="👥 Пригласить друга", callback_data="referral")],
         [InlineKeyboardButton(text="ℹ️ Информация", callback_data="information"), support_button],
         [reviews_button],
         [channel_button],
@@ -181,7 +181,7 @@ def popup_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="💳 Приобрести подписку"), KeyboardButton(text="👤 Управление подпиской")],
-            [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="🧪 Попробовать")],
+            [KeyboardButton(text="🏷 Промокод"), KeyboardButton(text="👥 Пригласить друга")],
             [KeyboardButton(text="ℹ️ Информация"), KeyboardButton(text="🆘 Поддержка")],
             [KeyboardButton(text="⭐ Отзывы")],
         ],
@@ -460,7 +460,7 @@ def stars_amount_for_plan(plan: dict) -> int:
 # API
 # =========================================================
 
-async def get_or_create_user(message: Message) -> dict:
+async def get_or_create_user(message: Message, referred_by_telegram_id: int | None = None) -> dict:
     telegram_user = message.from_user
 
     if telegram_user is None:
@@ -490,6 +490,7 @@ async def get_or_create_user(message: Message) -> dict:
                 "username": telegram_user.username,
                 "first_name": telegram_user.first_name,
                 "last_name": telegram_user.last_name,
+                "referred_by_telegram_id": referred_by_telegram_id,
             },
         )
 
@@ -500,6 +501,13 @@ async def get_or_create_user(message: Message) -> dict:
 
         response.raise_for_status()
 
+        return response.json()
+
+
+async def get_referral_stats(telegram_id: int) -> dict:
+    async with api_client(base_url=API_URL, timeout=10.0) as client:
+        response = await client.get(f"/users/{telegram_id}/referral")
+        response.raise_for_status()
         return response.json()
 
 
@@ -930,7 +938,11 @@ async def create_vpn_client(
 @router.message(CommandStart())
 async def start_handler(message: Message):
     try:
-        user = await get_or_create_user(message)
+        referrer_id = None
+        match = re.search(r"(?:^|\s)/start\s+ref_(\d+)", message.text or "")
+        if match:
+            referrer_id = int(match.group(1))
+        user = await get_or_create_user(message, referrer_id)
 
         logging.info(
             "Telegram user registered: telegram_id=%s db_id=%s",
@@ -1080,6 +1092,7 @@ MENU_BUTTON_TEXTS = {
     "📖 Инструкции",
     "🏷 Промокод",
     "🧪 Попробовать",
+    "👥 Пригласить друга",
     "🆘 Поддержка",
     "⭐ Отзывы",
     "⬅️ Главное меню",
@@ -1099,6 +1112,27 @@ async def handle_menu_button(message: Message, state: FSMContext) -> None:
         await popup_promo_handler(message, state)
     elif text == "🧪 Попробовать":
         await show_try_payment(message)
+    elif text == "👥 Пригласить друга":
+        try:
+            stats = await get_referral_stats(message.from_user.id)
+            share_url = "https://t.me/share/url?url=" + stats["link"] + "&text=Попробуй Freedom VPN"
+            await message.answer(
+                "📊 <b>Твоя реферальная статистика</b>\n\n"
+                f"👥 Всего приглашений: {stats['invited']}\n"
+                f"✅ Оплатили: {stats['paid']}\n"
+                f"⏳ Ожидают: {stats['pending']}\n"
+                f"🎁 Начислено дней: {stats['reward_days']}\n\n"
+                f"🔗 <b>Твоя ссылка:</b>\n<code>{html.escape(stats['link'])}</code>\n\n"
+                "За каждого приглашённого друга с оплаченной подпиской ты получишь <b>7 дней</b> к текущему VPN-плану.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📤 Отправить ссылку", url=share_url)],
+                    [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+                ]),
+                parse_mode="HTML",
+            )
+        except Exception:
+            logging.exception("Failed to show referral stats from menu")
+            await message.answer("❌ Не удалось загрузить реферальную статистику.")
     elif text == "🆘 Поддержка":
         await popup_support_handler(message)
     elif text == "⭐ Отзывы":
@@ -1151,6 +1185,30 @@ async def popup_promo_handler(message: Message, state: FSMContext):
 @router.message(F.text == "🧪 Попробовать")
 async def popup_try_handler(message: Message):
     await show_try_payment(message)
+
+
+@router.message(F.text == "👥 Пригласить друга")
+async def popup_referral_handler(message: Message):
+    try:
+        stats = await get_referral_stats(message.from_user.id)
+        share_url = "https://t.me/share/url?url=" + stats["link"] + "&text=Попробуй Freedom VPN"
+        await message.answer(
+            "📊 <b>Твоя реферальная статистика</b>\n\n"
+            f"👥 Всего приглашений: {stats['invited']}\n"
+            f"✅ Оплатили: {stats['paid']}\n"
+            f"⏳ Ожидают: {stats['pending']}\n"
+            f"🎁 Начислено дней: {stats['reward_days']}\n\n"
+            f"🔗 <b>Твоя ссылка:</b>\n<code>{html.escape(stats['link'])}</code>\n\n"
+            "За каждого приглашённого друга с оплаченной подпиской ты получишь <b>7 дней</b> к текущему VPN-плану.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📤 Отправить ссылку", url=share_url)],
+                [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+            ]),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logging.exception("Failed to show referral stats from popup")
+        await message.answer("❌ Не удалось загрузить реферальную статистику.")
 
 
 @router.message(F.text == "🆘 Поддержка")
@@ -1374,6 +1432,31 @@ async def device_handler(callback: CallbackQuery):
 @router.callback_query(F.data == "try_start")
 async def try_start_handler(callback: CallbackQuery):
     await show_try_payment(callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "referral")
+async def referral_handler(callback: CallbackQuery):
+    try:
+        stats = await get_referral_stats(callback.from_user.id)
+        text = (
+            "📊 <b>Твоя реферальная статистика</b>\n\n"
+            f"👥 Всего приглашений: {stats['invited']}\n"
+            f"✅ Оплатили: {stats['paid']}\n"
+            f"⏳ Ожидают: {stats['pending']}\n"
+            f"🎁 Начислено дней: {stats['reward_days']}\n\n"
+            f"🔗 <b>Твоя ссылка:</b>\n<code>{html.escape(stats['link'])}</code>\n\n"
+            "За каждого приглашённого друга, который оплатит подписку, ты получишь <b>7 дней</b> к текущему VPN-плану."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Отправить ссылку", switch_inline_query=stats["link"])],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
+        ])
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception:
+        logging.exception("Failed to show referral stats")
+        await callback.answer("Не удалось загрузить реферальную статистику", show_alert=True)
+        return
     await callback.answer()
 
 
