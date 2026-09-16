@@ -43,6 +43,7 @@ from app.services.node_health import node_accepts_clients
 from app.services.vless import build_vless_url
 from app.services.threexui import ThreeXUIClient, ThreeXUIError, ThreeXUIClientNotFound
 from app.services.payments import PaymentError, process_payment_event
+from app.services.notifications import notify_payment_paid
 from app.services.provider_codes import issue_provider_code
 from app.schemas.subscription import VPNClientRotate
 from app.api.routes.subscriptions import rotate_subscription_client
@@ -1587,6 +1588,8 @@ async def update_payment_status(
         )
     except PaymentError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if payment.status == "paid":
+        await notify_payment_paid(db, payment)
     await write_audit(
         db,
         action="payment.status.update",

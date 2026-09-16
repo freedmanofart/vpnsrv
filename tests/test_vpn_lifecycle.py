@@ -134,6 +134,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 duration_days=30,
                 price=Decimal("10.00"),
                 currency="USD",
+                traffic_limit_gb=250,
                 is_active=True,
             )
             node = VPNNode(
@@ -272,6 +273,14 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 panel_factory=FakePanel,
             )
             initial = await db.get(Subscription, first_paid.subscription_id)
+            initial_client = (
+                await db.execute(
+                    select(VPNClient).where(
+                        VPNClient.subscription_id == initial.id,
+                        VPNClient.status == "active",
+                    )
+                )
+            ).scalar_one()
             old_expiry = initial.expires_at
             second_payment = await create_payment(
                 db, self.payment_data("web:renew-active"), provider="manual_bank"
@@ -299,6 +308,8 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 )
             ).scalars().all()
             self.assertEqual(["revoked", "active"], [item.status for item in clients])
+            self.assertEqual(500, clients[-1].traffic_limit_gb)
+            self.assertEqual(250, initial_client.traffic_limit_gb)
             self.assertIn(f"vpn-{clients[1].id}", FakePanel.users["https://master.example/base"])
             payments = (
                 await db.execute(

@@ -83,6 +83,7 @@ async def start_payment(
                 target_status="paid",
                 payload={"details": {"mode": "mock-auto-confirm"}},
             )
+            await notify_payment_paid(db, payment)
         await notify_payment_created(db, payment)
         return payment
     except PaymentError as exc:
@@ -190,6 +191,8 @@ async def confirm_telegram_stars_payment(
         raise _payment_error(exc) from exc
     if payment.user_id != data.user_id:
         raise HTTPException(status_code=409, detail="Payment user mismatch")
+    if payment.status == "paid":
+        await notify_payment_paid(db, payment)
     return payment
 
 
@@ -214,7 +217,7 @@ async def update_payment_status_from_service(
     if not payment.provider_payment_id:
         raise HTTPException(status_code=409, detail="Payment has no provider ID")
     try:
-        return await process_payment_event(
+        payment = await process_payment_event(
             db,
             provider=payment.provider,
             event_id=f"service-{payment.id}-{data.status}-{uuid4()}",
@@ -222,6 +225,9 @@ async def update_payment_status_from_service(
             target_status=data.status,
             payload={"details": {"source": "telegram-admin-button"}},
         )
+        if payment.status == "paid":
+            await notify_payment_paid(db, payment)
+        return payment
     except PaymentError as exc:
         raise _payment_error(exc) from exc
 
@@ -402,7 +408,7 @@ async def payment_webhook(
     except (json.JSONDecodeError, ValidationError) as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook payload") from exc
     try:
-        return await process_payment_event(
+        payment = await process_payment_event(
             db,
             provider=provider,
             event_id=event_id,
@@ -411,5 +417,8 @@ async def payment_webhook(
             payload=data.model_dump(mode="json"),
             occurred_at=data.occurred_at,
         )
+        if payment.status == "paid":
+            await notify_payment_paid(db, payment)
+        return payment
     except PaymentError as exc:
         raise _payment_error(exc) from exc

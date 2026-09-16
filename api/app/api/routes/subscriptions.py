@@ -659,6 +659,9 @@ async def renew_subscription(
         base_date
         + timedelta(days=plan.duration_days)
     )
+    renewed_traffic_limit_gb = plan.traffic_limit_gb + (
+        previous_client.traffic_limit_gb if previous_client else 0
+    )
 
     # =====================================================
     # Create new VPN client
@@ -675,7 +678,7 @@ async def renew_subscription(
         flow=(previous_client.flow if previous_client else ""),
         fingerprint=(previous_client.fingerprint if previous_client else "firefox"),
         max_connections=plan.max_connections,
-        traffic_limit_gb=plan.traffic_limit_gb,
+        traffic_limit_gb=renewed_traffic_limit_gb,
         client_uuid=new_uuid,
         status="provisioning",
         expires_at=new_expires_at,

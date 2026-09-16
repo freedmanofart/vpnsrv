@@ -290,6 +290,7 @@ async def renew_paid_subscription(
     if current_expiry.tzinfo is None:
         current_expiry = current_expiry.replace(tzinfo=timezone.utc)
     expires_at = max(current_expiry, now) + timedelta(days=plan.duration_days)
+    traffic_limit_gb = plan.traffic_limit_gb + (previous.traffic_limit_gb if previous is not None else 0)
     client = VPNClient(
         user_id=user.id,
         subscription_id=subscription.id,
@@ -299,7 +300,7 @@ async def renew_paid_subscription(
         flow=flow,
         fingerprint=fingerprint,
         max_connections=plan.max_connections,
-        traffic_limit_gb=plan.traffic_limit_gb,
+        traffic_limit_gb=traffic_limit_gb,
         client_uuid=str(uuid4()),
         status="provisioning",
         expires_at=expires_at,
