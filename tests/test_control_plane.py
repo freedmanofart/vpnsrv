@@ -1072,7 +1072,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             f"/payment-methods/{method_id}/image",
             auth=self.admin_auth,
             json={
-                "filename": "qr.png",
+                "filename": "QR Сбер.png",
                 "mime_type": "image/png",
                 "data_base64": base64.b64encode(b"fake-png").decode(),
             },
@@ -1084,6 +1084,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(b"fake-png", downloaded.content)
         self.assertEqual("image/png", downloaded.headers["content-type"])
+        self.assertIn("filename*=UTF-8''QR%20", downloaded.headers["content-disposition"])
         visible = await self.client.get("/payment-methods", headers=self.service_headers)
         self.assertEqual(["sbp"], [item["code"] for item in visible.json()])
         disabled = await self.client.patch(

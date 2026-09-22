@@ -1,5 +1,6 @@
 import base64
 import binascii
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import Response as FastAPIResponse
@@ -13,6 +14,18 @@ from app.db.session import get_db
 
 
 router = APIRouter(prefix="/payment-methods", tags=["Payment methods"])
+
+
+def _inline_content_disposition(filename: str | None) -> str:
+    original = (filename or "qr.png").replace("\r", "").replace("\n", "") or "qr.png"
+    ascii_name = original.encode("ascii", "ignore").decode("ascii")
+    ascii_name = "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in ascii_name
+    )
+    if not ascii_name.lstrip("."):
+        ascii_name = "qr.png"
+    return f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(original, safe="")}'
 
 
 class PaymentMethodData(BaseModel):
@@ -113,7 +126,7 @@ async def get_payment_method_image(method_id: int, db: AsyncSession = Depends(ge
     return FastAPIResponse(
         content=item.image_data,
         media_type=item.image_mime_type or "image/png",
-        headers={"Content-Disposition": f'inline; filename="{item.image_filename or "qr.png"}"'},
+        headers={"Content-Disposition": _inline_content_disposition(item.image_filename)},
     )
 
 

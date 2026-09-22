@@ -634,12 +634,16 @@ async def get_payment_methods() -> list[dict]:
 
 
 async def get_payment_method_image(method_id: int) -> bytes | None:
-    async with api_client(base_url=API_URL, timeout=10.0) as client:
-        response = await client.get(f"/payment-methods/{method_id}/image")
-        if response.status_code == 404:
-            return None
-        response.raise_for_status()
-        return response.content
+    try:
+        async with api_client(base_url=API_URL, timeout=10.0) as client:
+            response = await client.get(f"/payment-methods/{method_id}/image")
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.content
+    except httpx.HTTPError:
+        logging.exception("Failed to load payment method image method_id=%s", method_id)
+        return None
 
 
 async def sber_payment_method() -> dict | None:
