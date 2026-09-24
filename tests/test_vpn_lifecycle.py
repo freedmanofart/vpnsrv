@@ -320,6 +320,45 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             ).scalars().all()
             self.assertEqual(2, len(payments))
 
+    async def test_paid_order_renews_subscription_awaiting_expiration_job(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            expired_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+            initial.subscription.expires_at = expired_at
+            initial.client.expires_at = expired_at
+            await db.commit()
+
+            payment = await create_payment(
+                db,
+                self.payment_data("web:renew-before-expiration-job"),
+                provider="manual_bank",
+            )
+            paid = await process_payment_event(
+                db,
+                provider="manual_bank",
+                event_id="web-renew-before-expiration-job-paid",
+                provider_payment_id=payment.provider_payment_id,
+                target_status="paid",
+                payload={"details": {"source": "web_cabinet"}},
+                panel_factory=FakePanel,
+            )
+
+            self.assertEqual(initial.subscription.id, paid.subscription_id)
+            renewed = await db.get(Subscription, initial.subscription.id)
+            self.assertEqual("active", renewed.status)
+            self.assertGreater(
+                renewed.expires_at.replace(tzinfo=timezone.utc),
+                datetime.now(timezone.utc) + timedelta(days=29),
+            )
+            clients = (
+                await db.execute(
+                    select(VPNClient)
+                    .where(VPNClient.subscription_id == renewed.id)
+                    .order_by(VPNClient.id)
+                )
+            ).scalars().all()
+            self.assertEqual(["revoked", "active"], [item.status for item in clients])
+
     async def test_renew_commit_failure_restores_previous_panel_client(self) -> None:
         async with self.session_factory() as db:
             initial = await self.provision(db)

@@ -243,7 +243,6 @@ async def process_payment_event(
                     .where(
                         Subscription.user_id == payment.user_id,
                         Subscription.status == "active",
-                        Subscription.expires_at > datetime.now(timezone.utc),
                     )
                     .with_for_update()
                 )
