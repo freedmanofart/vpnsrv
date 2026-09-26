@@ -1452,6 +1452,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(10240, payload["usage"]["total_bytes"])
         self.assertEqual(5120, payload["usage"]["remaining_bytes"])
         self.assertIn("account", {link["id"] for link in payload["links"]})
+        self.assertNotIn("renew", {link["id"] for link in payload["links"]})
         self.assertEqual(2, len({node["profile_id"] for node in payload["nodes"]}))
 
         async with self.session_factory() as db:

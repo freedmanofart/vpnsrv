@@ -222,7 +222,6 @@ def provider_links() -> list[ClientProfileLink]:
         ("support", "Поддержка", settings.client_support_url or incy_support_url(), "support"),
         ("website", "Сайт", settings.client_website_url or f"{settings.public_base_url.rstrip('/')}/", "website"),
         ("account", "Личный кабинет", account_url, "account"),
-        ("renew", "Обновить подписку", settings.client_renewal_url or account_url, "renew"),
     )
     return [
         ClientProfileLink(id=link_id, title=title, url=url.strip(), icon=icon)

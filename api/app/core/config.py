@@ -51,7 +51,6 @@ class Settings(BaseSettings):
     client_support_url: str = ""
     client_website_url: str = ""
     client_account_url: str = ""
-    client_renewal_url: str = ""
     platega_enabled: bool = False
     platega_base_url: str = "https://app.platega.io"
     platega_merchant_id: str = ""

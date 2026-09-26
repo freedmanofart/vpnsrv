@@ -75,7 +75,6 @@ VARIABLES: dict[str, Variable] = {
     "CLIENT_SUPPORT_URL": Variable(),
     "CLIENT_WEBSITE_URL": Variable(),
     "CLIENT_ACCOUNT_URL": Variable(),
-    "CLIENT_RENEWAL_URL": Variable(),
 }
 
 
