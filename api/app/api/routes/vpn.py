@@ -33,6 +33,8 @@ from app.services.reconciliation import reconcile_node
 from app.services.node_health import effective_node_health, node_accepts_clients
 from app.services.country import country_from_ip
 from app.services.vless import build_vless_url
+from app.services.incy import build_incy_import_link
+from app.core.cabinet_links import incy_subscription_token
 
 router = APIRouter(
     prefix="/vpn",
@@ -770,9 +772,17 @@ async def get_vpn_client_config(
         )
     )
 
+    subscription_token = incy_subscription_token(client.id, client.expires_at)
+    subscription_url = (
+        f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
+        f"{subscription_token}"
+    )
+
     return VPNClientConfigResponse(
         client_id=client.id,
         protocol=client.protocol,
         config=vless_url,
         expires_at=client.expires_at,
+        incy_subscription_url=subscription_url,
+        incy_import_url=build_incy_import_link(subscription_url),
     )

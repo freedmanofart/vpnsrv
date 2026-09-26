@@ -92,6 +92,8 @@ class VPNClientConfigResponse(BaseModel):
     protocol: str
     config: str
     expires_at: datetime
+    incy_subscription_url: str | None = None
+    incy_import_url: str | None = None
 
 
 class VPNNodeHealthResponse(BaseModel):

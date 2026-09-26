@@ -32,50 +32,50 @@
       "id": "ios",
       "label": "IOS (iPhone)",
       "client": "Incy",
-      "url": "https://apps.apple.com/ca/app/incy/id6756943388",
+      "url": "https://apps.apple.com/ru/app/incy/id6756943388",
       "description": "Установите Incy для iPhone из App Store."
     },
     {
       "id": "macos",
       "label": "MacOS",
-      "client": "AmneziaVPN",
-      "url": "https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_macos.zip",
-      "description": "macOS 14 и новее. Скачайте архив AmneziaVPN 4.8.10.0."
+      "client": "Incy",
+      "url": "https://github.com/INCY-DEV/incy-platforms/releases/latest/download/incy-macos-arm64.dmg",
+      "description": "Скачайте официальную сборку Incy для macOS Apple Silicon."
     },
     {
       "id": "windows",
       "label": "Windows",
-      "client": "AmneziaVPN",
-      "url": "https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.10.0/AmneziaVPN_4.8.10.0_windows_x64.exe",
-      "description": "Windows 10/11 x64. Скачайте установщик AmneziaVPN 4.8.10.0."
+      "client": "Incy",
+      "url": "https://github.com/INCY-DEV/incy-platforms/releases/latest/download/incy-windows-setup.exe",
+      "description": "Windows x64/ARM64. Скачайте установщик Incy."
     },
     {
       "id": "linux",
       "label": "Linux",
-      "client": "AmneziaVPN",
-      "url": "https://amnezia.org/downloads",
-      "description": "Выберите сборку для вашего дистрибутива на официальной странице."
+      "client": "Incy",
+      "url": "https://github.com/INCY-DEV/incy-platforms/releases/latest",
+      "description": "Выберите пакет Incy для вашего дистрибутива Linux."
     },
     {
       "id": "android_tv",
       "label": "Android TV",
-      "client": "AmneziaVPN",
-      "url": "https://docs.amnezia.org/ru/documentation/instructions/android_tv_connect/",
-      "description": "Установите AmneziaVPN из Google Play на телевизоре и перенесите ключ по официальной инструкции."
+      "client": "Incy",
+      "url": "https://play.google.com/store/apps/details?id=llc.itdev.incy",
+      "description": "Установите Incy из Google Play на Android TV."
     },
     {
       "id": "apple_tv",
       "label": "Apple TV",
-      "client": "AmneziaVPN",
-      "url": "https://amnezia.org/downloads",
-      "description": "Установите совместимый клиент из App Store и импортируйте выданную VLESS-ссылку."
+      "client": "Incy",
+      "url": "https://apps.apple.com/ru/app/incy/id6756943388",
+      "description": "Установите Incy из App Store на Apple TV."
     },
     {
       "id": "routers",
       "label": "Роутеры",
-      "client": "VLESS-совместимый клиент",
-      "url": "https://docs.amnezia.org/ru/documentation/",
-      "description": "Поддержка зависит от прошивки роутера. Используйте клиент с VLESS Reality xHTTP."
+      "client": "Incy",
+      "url": "https://docs.incy.cc/",
+      "description": "У Incy нет отдельной сборки для роутеров; проверьте совместимость прошивки с VLESS."
     }
   ],
   "main_url_buttons": []

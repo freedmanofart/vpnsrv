@@ -104,8 +104,8 @@ VLESS URI и закрытый base path панели.
 `id` должен быть коротким и стабильным: он входит в callback data
 `device:<id>` и `purchase_device:<id>`.
 
-Текущие прямые ссылки: AmneziaVPN 4.8.10.0 для Windows и macOS, Incy из
-Google Play для Android и Incy из App Store для iOS. При обновлении версии
+Текущие прямые ссылки ведут на Incy для Windows, macOS, Android, iOS и TV.
+Для Linux используется страница релизов Incy. При обновлении версии
 меняйте `platforms[].url`, `platforms[].client` и описание одновременно.
 
 Сценарий покупки использует `PurchaseFlow`: устройства показываются reply-

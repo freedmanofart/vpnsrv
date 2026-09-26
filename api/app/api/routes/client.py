@@ -2,7 +2,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,7 @@ from app.services.node_health import node_accepts_clients
 from app.services.provider_codes import issue_provider_code
 from app.services.vless import build_vless_url
 from app.core.config import settings
+from app.core.cabinet_links import verify_incy_subscription_token
 
 
 router = APIRouter(prefix="/v1/client", tags=["Client devices"])
@@ -244,6 +245,74 @@ async def client_profile(
             ),
         ),
         nodes=nodes,
+    )
+
+
+@router.get("/subscription/{token}")
+async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
+    """Return an INCY-compatible subscription for a signed client link."""
+
+    client_id = verify_incy_subscription_token(token)
+    if client_id is None:
+        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
+
+    client = await db.get(VPNClient, client_id)
+    now = datetime.now(timezone.utc)
+    if (
+        client is None
+        or client.status != "active"
+        or aware(client.expires_at) <= now
+    ):
+        raise HTTPException(status_code=404, detail="Subscription is inactive or expired")
+
+    node = await db.get(VPNNode, client.node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="VPN node not found")
+    node_config = await db.scalar(
+        select(VPNNodeConfig).where(
+            VPNNodeConfig.node_id == client.node_id,
+            VPNNodeConfig.protocol == client.protocol,
+        )
+    )
+    if node_config is None:
+        raise HTTPException(status_code=404, detail="VPN node configuration not found")
+
+    uri = build_client_uri(client, node, node_config.config)
+    region = (node.region or "Швеция").split("|", 1)[-1]
+    warning = "Из-за блокировок РКН наш сервис может работать нестабильно."
+    profile_title = f"{settings.provider_name} · {region}"
+    cabinet_url = (
+        settings.provider_cabinet_url.strip()
+        or f"{settings.public_base_url.rstrip('/')}/cabinet"
+    )
+    expires_at = int(aware(client.expires_at).timestamp())
+    body = "\n".join(
+        [
+            f"#profile-title: {profile_title}",
+            f"#profile-description: {warning}",
+            f"#support-url: {settings.provider_support_url}",
+            f"#profile-web-page-url: {cabinet_url}",
+            f"#announce: {warning}",
+            f"#announce-url: {settings.provider_support_url}",
+            f"#profile-update-interval: 21600",
+            uri,
+            "",
+        ]
+    )
+    return Response(
+        content=body,
+        media_type="text/plain",
+        headers={
+            "profile-title": profile_title,
+            "profile-description": warning,
+            "support-url": settings.provider_support_url,
+            "profile-web-page-url": cabinet_url,
+            "announce": warning,
+            "announce-url": settings.provider_support_url,
+            "subscription-userinfo": f"upload=0; download=0; total=0; expire={expires_at}",
+            "content-disposition": 'inline; filename="freedom-vpn-incy.txt"',
+            "cache-control": "no-store",
+        },
     )
 
 
