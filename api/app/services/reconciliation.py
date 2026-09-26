@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.vpn_client import VPNClient
 from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
+from app.db.models.plan import Plan
+from app.db.models.subscription import Subscription
 from app.services.threexui import (
     ThreeXUIClient,
     ThreeXUIError,
@@ -53,14 +55,21 @@ async def reconcile_node(
         raise ValueError("VPN node has no Xray management address")
 
     client_result = await db.execute(
-        select(VPNClient).where(
+        select(VPNClient, Plan.code).join(
+            Subscription, Subscription.id == VPNClient.subscription_id
+        ).join(
+            Plan, Plan.id == Subscription.plan_id
+        ).where(
             VPNClient.node_id == node_id,
             VPNClient.protocol == "vless",
             VPNClient.status == "active",
         )
     )
-    clients = client_result.scalars().all()
-    expected = {f"vpn-{client.id}": client for client in clients}
+    clients = client_result.all()
+    expected = {
+        f"vpn-{client.id}": (client, plan_code)
+        for client, plan_code in clients
+    }
     report = ReconciliationReport(node_id=node_id, expected=len(expected))
 
     inbound_tag = config.config.get("inbound_tag", "vless-reality")
@@ -69,8 +78,27 @@ async def reconcile_node(
     actual = {user.email for user in users if user.email}
     report.present = len(set(expected) & actual)
 
-    for email, client in expected.items():
+    for email, (client, plan_code) in expected.items():
         if email in actual:
+            if not plan_code.startswith("mobile-trial-"):
+                continue
+            try:
+                await xray.update_vless_user(
+                    inbound_tag=inbound_tag,
+                    client_uuid=client.client_uuid,
+                    email=email,
+                    flow=client.flow,
+                    expiry_time=int(client.expires_at.timestamp() * 1000),
+                    limit_ip=client.max_connections,
+                    total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
+                )
+            except ThreeXUIClientNotFound:
+                # The panel changed between the list and update calls. The
+                # next reconciliation pass will restore the missing client.
+                report.present -= 1
+                continue
+            except ThreeXUIError:
+                report.errors += 1
             continue
         try:
             await xray.add_vless_user(

@@ -66,6 +66,24 @@ class ThreeXUIClientTests(IsolatedAsyncioTestCase):
         self.assertEqual("Bearer node-token", add[2]["headers"]["Authorization"])
         self.assertIn("clients/del/vpn-42?keepTraffic=1", FakeAsyncClient.requests[1][1])
 
+    async def test_update_client_replaces_full_payload(self):
+        FakeAsyncClient.responses = [{"success": True, "msg": "Client updated"}]
+        with (
+            patch("app.services.threexui.settings.threexui_api_token", "node-token"),
+            patch("app.services.threexui.httpx.AsyncClient", FakeAsyncClient),
+        ):
+            await ThreeXUIClient("https://master.example/base").update_vless_user(
+                "17", "uuid-1", "vpn-42", flow="xtls-rprx-vision",
+                expiry_time=1893456000000, limit_ip=1,
+                total_gb=3 * 1024 * 1024 * 1024,
+            )
+
+        request = FakeAsyncClient.requests[0]
+        self.assertTrue(request[1].endswith("/panel/api/clients/update/vpn-42"))
+        self.assertEqual("uuid-1", request[2]["json"]["id"])
+        self.assertEqual(1893456000000, request[2]["json"]["expiryTime"])
+        self.assertEqual(3 * 1024 * 1024 * 1024, request[2]["json"]["totalGB"])
+
     async def test_get_users_selects_configured_inbound(self):
         FakeAsyncClient.responses = [{
             "success": True,

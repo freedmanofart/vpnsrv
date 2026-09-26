@@ -107,6 +107,31 @@ class FakePanel:
             raise ThreeXUIClientNotFound(email)
         del users[email]
 
+    async def update_vless_user(
+        self,
+        inbound_tag: str,
+        client_uuid: str,
+        email: str,
+        level: int = 0,
+        flow: str = "",
+        expiry_time: int = 0,
+        telegram_id: int = 0,
+        limit_ip: int = 0,
+        limit_hwid: int = 0,
+        total_gb: int = 0,
+    ) -> None:
+        del inbound_tag, level
+        users = self.users[self.address]
+        if email not in users:
+            raise ThreeXUIClientNotFound(email)
+        users[email].client_uuid = client_uuid
+        users[email].flow = flow
+        users[email].expiry_time = expiry_time
+        users[email].telegram_id = telegram_id
+        users[email].limit_ip = limit_ip
+        users[email].limit_hwid = limit_hwid
+        users[email].total_gb = total_gb
+
     async def get_users(self, inbound_tag: str) -> list[SimpleNamespace]:
         return list(self.users[self.address].values())
 

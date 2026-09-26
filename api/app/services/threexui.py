@@ -110,6 +110,42 @@ class ThreeXUIClient:
                 raise ThreeXUIClientNotFound(f"3x-ui client {email} is already absent") from exc
             raise
 
+    async def update_vless_user(
+        self,
+        inbound_tag: str,
+        client_uuid: str,
+        email: str,
+        level: int = 0,
+        flow: str = "",
+        expiry_time: int = 0,
+        telegram_id: int = 0,
+        limit_ip: int = 0,
+        limit_hwid: int = 0,
+        total_gb: int = 0,
+    ) -> None:
+        """Replace a managed VLESS client while preserving its UUID/email."""
+        del inbound_tag, level
+        try:
+            await self._request(
+                "POST",
+                f"clients/update/{quote(email, safe='')}",
+                json={
+                    "id": client_uuid,
+                    "email": email,
+                    "flow": flow,
+                    "enable": True,
+                    "totalGB": total_gb,
+                    "expiryTime": expiry_time,
+                    "tgId": telegram_id,
+                    "limitIp": limit_ip,
+                    "limitHwid": limit_hwid,
+                },
+            )
+        except ThreeXUIError as exc:
+            if "not found" in str(exc).lower() or "does not exist" in str(exc).lower():
+                raise ThreeXUIClientNotFound(f"3x-ui client {email} is absent") from exc
+            raise
+
     async def get_users(self, inbound_tag: str):
         inbound_id = self._inbound_id(inbound_tag)
         rows = await self._request("GET", "inbounds/list")
