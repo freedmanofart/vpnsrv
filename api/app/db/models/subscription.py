@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, func, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -62,4 +62,8 @@ class Subscription(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+    traffic_limit_bytes: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
     )

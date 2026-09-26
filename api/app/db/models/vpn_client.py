@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -10,8 +10,10 @@ class VPNClient(Base):
     __tablename__ = "vpn_clients"
     __table_args__ = (
         Index(
-            "uq_vpn_clients_one_active_per_subscription",
+            "uq_vpn_clients_active_node_protocol",
             "subscription_id",
+            "node_id",
+            "protocol",
             unique=True,
             postgresql_where=text("status = 'active'"),
             sqlite_where=text("status = 'active'"),
@@ -106,3 +108,11 @@ class VPNClient(Base):
     )
 
     last_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    upload_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+
+    download_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )

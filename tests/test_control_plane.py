@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from unittest.mock import AsyncMock, patch
@@ -31,6 +32,7 @@ from app.db.models import (
     ActivationCode,
     AuditLog,
     CabinetAccessToken,
+    ClientDevice,
     Payment,
     Plan,
     PlanPackage,
@@ -1392,6 +1394,95 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {new_token}"},
         )
         self.assertEqual(200, accepted.status_code, accepted.text)
+
+    async def test_mobile_trial_returns_all_profiles_and_live_usage(self) -> None:
+        async with self.session_factory() as db:
+            node = VPNNode(
+                name="static-trojan-node",
+                provider="test",
+                region="nl",
+                hostname="nl.example.test",
+                ip_address="203.0.113.21",
+                status="active",
+                capacity=100,
+            )
+            db.add(node)
+            await db.flush()
+            db.add(
+                VPNNodeConfig(
+                    node_id=node.id,
+                    protocol="trojan",
+                    config={
+                        "client_uri": "trojan://secret@nl.example.test:443?sni=nl.example.test#NL",
+                    },
+                )
+            )
+            await db.commit()
+
+        install_id = str(uuid4())
+        traffic = {"up": 1024, "down": 4096}
+        with (
+            patch.object(settings, "client_trial_traffic_limit_bytes", 10240),
+            patch.object(settings, "client_announcement", "Service message"),
+            patch.object(settings, "client_account_url", "https://account.example.test"),
+            patch.object(settings, "client_support_url", "https://support.example.test"),
+            patch("app.api.routes.client.ThreeXUIClient") as panel,
+        ):
+            panel.return_value.add_vless_user = AsyncMock()
+            panel.return_value.remove_vless_user = AsyncMock()
+            panel.return_value.get_client_traffic = AsyncMock(return_value=traffic)
+            activation = await self.client.post(
+                "/v1/client/trial",
+                json={"install_id": install_id, "name": "Trial phone", "platform": "android"},
+            )
+            self.assertEqual(200, activation.status_code, activation.text)
+            old_token = activation.json()["access_token"]
+            profile = await self.client.get(
+                "/v1/client/profile",
+                headers={"Authorization": f"Bearer {old_token}"},
+            )
+
+        self.assertEqual(200, profile.status_code, profile.text)
+        payload = profile.json()
+        self.assertEqual("Freedom VPN", payload["provider_name"])
+        self.assertEqual("Service message", payload["announcement"])
+        self.assertEqual(2, len(payload["nodes"]))
+        self.assertEqual({"de", "nl"}, {node["region"] for node in payload["nodes"]})
+        self.assertEqual(5120, payload["usage"]["upload_bytes"] + payload["usage"]["download_bytes"])
+        self.assertEqual(10240, payload["usage"]["total_bytes"])
+        self.assertEqual(5120, payload["usage"]["remaining_bytes"])
+        self.assertIn("account", {link["id"] for link in payload["links"]})
+        self.assertEqual(2, len({node["profile_id"] for node in payload["nodes"]}))
+
+        async with self.session_factory() as db:
+            trial_device = await db.scalar(
+                select(ClientDevice).where(ClientDevice.install_id_hash == token_hash(install_id))
+            )
+            self.assertIsNotNone(trial_device)
+            clients = list(
+                (
+                    await db.execute(
+                        select(VPNClient).where(VPNClient.user_id == trial_device.user_id)
+                    )
+                ).scalars()
+            )
+            self.assertEqual(2, len(clients))
+            self.assertEqual(1024, clients[0].upload_bytes)
+            self.assertEqual(4096, clients[0].download_bytes)
+
+        with patch("app.api.routes.client.ThreeXUIClient") as panel:
+            panel.return_value.add_vless_user = AsyncMock()
+            repeated = await self.client.post(
+                "/v1/client/trial",
+                json={"install_id": install_id, "name": "Trial phone", "platform": "android"},
+            )
+        self.assertEqual(200, repeated.status_code, repeated.text)
+        self.assertNotEqual(old_token, repeated.json()["access_token"])
+        rejected = await self.client.get(
+            "/v1/client/profile",
+            headers={"Authorization": f"Bearer {old_token}"},
+        )
+        self.assertEqual(401, rejected.status_code)
 
     async def test_incy_telegram_import_bridge_shows_android_launcher(self) -> None:
         async with self.session_factory() as db:

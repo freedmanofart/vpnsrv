@@ -55,6 +55,9 @@ class ClientDevice(Base):
     platform: Mapped[str] = mapped_column(String(64), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     token_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
+    install_id_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

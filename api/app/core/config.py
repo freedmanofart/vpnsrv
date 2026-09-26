@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     # Пустое значение означает deep link бота в сценарий техподдержки.
     provider_support_url: str = ""
     provider_cabinet_url: str = ""
+    client_trial_enabled: bool = True
+    client_trial_days: int = Field(default=30, ge=1, le=365)
+    client_trial_traffic_limit_bytes: int = Field(default=0, ge=0)
+    client_provider_name: str = ""
+    client_announcement: str = ""
+    client_announcement_url: str = ""
+    client_channel_url: str = ""
+    client_support_url: str = ""
+    client_website_url: str = ""
+    client_account_url: str = ""
+    client_renewal_url: str = ""
     platega_enabled: bool = False
     platega_base_url: str = "https://app.platega.io"
     platega_merchant_id: str = ""

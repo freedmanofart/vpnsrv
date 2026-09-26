@@ -2,8 +2,10 @@ import secrets
 import html
 from base64 import b64encode
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from urllib.parse import quote
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
@@ -14,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import require_api_access
 from app.core.tokens import generate_scoped_token, token_hash
 from app.db.models.audit import ActivationCode, ClientDevice
+from app.db.models.plan import Plan
 from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.vpn_client import VPNClient
@@ -24,10 +27,13 @@ from app.schemas.client import (
     ActivationCodeCreate,
     ActivationCodeResponse,
     ClientProfileNode,
+    ClientProfileLink,
     ClientProviderInfo,
+    ClientProfileUsage,
     ClientProfileResponse,
     DeviceActivate,
     DeviceTokenResponse,
+    TrialActivate,
 )
 from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
@@ -187,6 +193,10 @@ async def activate_device(data: DeviceActivate, db: AsyncSession = Depends(get_d
 
 
 def build_client_uri(client: VPNClient, node: VPNNode, config: dict) -> str:
+    if client.config_override:
+        return client.config_override.strip()
+    if client.protocol != "vless":
+        return str(config.get("client_uri") or "").strip()
     host = config.get("host") or node.hostname or node.ip_address
     link_config = dict(config)
     link_config["fp"] = config.get("fp") or client.fingerprint or "firefox"
@@ -198,6 +208,228 @@ def build_client_uri(client: VPNClient, node: VPNNode, config: dict) -> str:
         port=config.get("port", 443),
         config=link_config,
         remark=f"vpn-{client.id}",
+    )
+
+
+def provider_links() -> list[ClientProfileLink]:
+    account_url = (
+        settings.client_account_url.strip()
+        or settings.provider_cabinet_url.strip()
+        or f"{settings.public_base_url.rstrip('/')}/cabinet"
+    )
+    links = (
+        ("channel", "Канал / Бот", settings.client_channel_url, "channel"),
+        ("support", "Поддержка", settings.client_support_url or incy_support_url(), "support"),
+        ("website", "Сайт", settings.client_website_url or f"{settings.public_base_url.rstrip('/')}/", "website"),
+        ("account", "Личный кабинет", account_url, "account"),
+        ("renew", "Обновить подписку", settings.client_renewal_url or account_url, "renew"),
+    )
+    return [
+        ClientProfileLink(id=link_id, title=title, url=url.strip(), icon=icon)
+        for link_id, title, url, icon in links
+        if url and url.strip().startswith(("https://", "tg://"))
+    ]
+
+
+async def trial_plan(db: AsyncSession) -> Plan:
+    code = f"mobile-trial-{settings.client_trial_days}d"
+    result = await db.execute(select(Plan).where(Plan.code == code))
+    plan = result.scalar_one_or_none()
+    if plan is not None:
+        return plan
+    traffic_limit_gb = 0
+    if settings.client_trial_traffic_limit_bytes:
+        traffic_limit_gb = (
+            settings.client_trial_traffic_limit_bytes + 1024**3 - 1
+        ) // 1024**3
+    plan = Plan(
+        code=code,
+        name=f"Тестовый доступ на {settings.client_trial_days} дн.",
+        duration_days=settings.client_trial_days,
+        max_connections=1,
+        traffic_limit_gb=traffic_limit_gb,
+        price=Decimal("0"),
+        currency="RUB",
+        is_active=True,
+        is_public=False,
+    )
+    db.add(plan)
+    await db.flush()
+    return plan
+
+
+@router.post("/trial", response_model=DeviceTokenResponse)
+async def activate_trial(data: TrialActivate, db: AsyncSession = Depends(get_db)):
+    if not settings.client_trial_enabled:
+        raise HTTPException(status_code=404, detail="Trial access is disabled")
+    if data.platform not in {"android", "ios"}:
+        raise HTTPException(status_code=400, detail="Unsupported platform")
+    try:
+        install_id = str(UUID(data.install_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid install identifier") from exc
+
+    install_digest = token_hash(install_id)
+    now = datetime.now(timezone.utc)
+    existing = await db.scalar(
+        select(ClientDevice)
+        .where(ClientDevice.install_id_hash == install_digest)
+        .with_for_update()
+    )
+    if existing is not None:
+        subscription = await active_subscription_for_user(db, existing.user_id, now)
+        if subscription is None:
+            raise HTTPException(status_code=403, detail="Trial period has expired")
+        token = generate_scoped_token("device", existing.user_id)
+        existing.token_hash = token_hash(token)
+        existing.token_prefix = token.split(".", 1)[0]
+        existing.status = "active"
+        existing.expires_at = subscription.expires_at
+        existing.last_seen_at = now
+        await db.commit()
+        return DeviceTokenResponse(
+            device_id=existing.id,
+            access_token=token,
+            expires_at=existing.expires_at,
+        )
+
+    result = await db.execute(
+        select(VPNNode, VPNNodeConfig)
+        .join(VPNNodeConfig, VPNNodeConfig.node_id == VPNNode.id)
+        .where(VPNNode.status == "active")
+        .order_by(VPNNode.id, VPNNodeConfig.id)
+    )
+    eligible: list[tuple[VPNNode, VPNNodeConfig]] = []
+    seen_profiles: set[tuple[int, str]] = set()
+    for node, node_config in result.all():
+        protocol = (node_config.protocol or "").strip().lower()
+        profile_key = (node.id, protocol)
+        if not protocol or profile_key in seen_profiles:
+            continue
+        if not node_accepts_clients(node, management_mode="threexui"):
+            continue
+        if protocol == "vless":
+            if not node_config.config.get("api_address"):
+                continue
+        elif not str(node_config.config.get("client_uri") or "").strip():
+            continue
+        eligible.append((node, node_config))
+        seen_profiles.add(profile_key)
+    if not eligible:
+        raise HTTPException(status_code=503, detail="No trial servers are available")
+
+    synthetic_telegram_id = -(int(install_digest[:15], 16) + 1)
+    user = await db.scalar(select(User).where(User.telegram_id == synthetic_telegram_id))
+    if user is None:
+        user = User(
+            telegram_id=synthetic_telegram_id,
+            username=f"mobile-trial-{install_digest[:12]}",
+            first_name="Mobile trial",
+        )
+        db.add(user)
+        await db.flush()
+
+    provisioned: list[tuple[ThreeXUIClient, str, str]] = []
+    try:
+        plan = await trial_plan(db)
+        expires_at = now + timedelta(days=settings.client_trial_days)
+        subscription = Subscription(
+            user_id=user.id,
+            plan_id=plan.id,
+            status="active",
+            starts_at=now,
+            expires_at=expires_at,
+            traffic_limit_bytes=(
+                settings.client_trial_traffic_limit_bytes
+                if settings.client_trial_traffic_limit_bytes > 0
+                else None
+            ),
+        )
+        db.add(subscription)
+        await db.flush()
+
+        for node, node_config in eligible:
+            protocol = node_config.protocol.strip().lower()
+            client = VPNClient(
+                user_id=user.id,
+                subscription_id=subscription.id,
+                node_id=node.id,
+                protocol=protocol,
+                client_type="universal",
+                flow=str(node_config.config.get("flow") or ""),
+                fingerprint=str(node_config.config.get("fp") or "chrome"),
+                client_uuid=str(uuid4()),
+                config_override=(
+                    str(node_config.config.get("client_uri"))
+                    if protocol != "vless"
+                    else None
+                ),
+                traffic_limit_gb=plan.traffic_limit_gb,
+                status="active",
+                expires_at=expires_at,
+            )
+            db.add(client)
+            await db.flush()
+            if protocol == "vless":
+                panel = ThreeXUIClient(address=node_config.config["api_address"])
+                inbound_tag = str(node_config.config.get("inbound_tag", ""))
+                email = f"vpn-{client.id}"
+                await panel.add_vless_user(
+                    inbound_tag=inbound_tag,
+                    client_uuid=client.client_uuid,
+                    email=email,
+                    flow=client.flow,
+                    expiry_time=int(expires_at.timestamp() * 1000),
+                    telegram_id=user.telegram_id,
+                    limit_ip=plan.max_connections,
+                    total_gb=plan.traffic_limit_gb * 1024**3,
+                )
+                provisioned.append((panel, inbound_tag, email))
+
+        token = generate_scoped_token("device", user.id)
+        device = ClientDevice(
+            user_id=user.id,
+            name=data.name.strip(),
+            platform=data.platform,
+            token_hash=token_hash(token),
+            token_prefix=token.split(".", 1)[0],
+            install_id_hash=install_digest,
+            status="active",
+            expires_at=expires_at,
+            last_seen_at=now,
+        )
+        db.add(device)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        for panel, inbound_tag, email in reversed(provisioned):
+            try:
+                await panel.remove_vless_user(inbound_tag=inbound_tag, email=email)
+            except ThreeXUIError:
+                pass
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=502, detail="Unable to provision trial access") from exc
+
+    await db.refresh(device)
+    await write_audit(
+        db,
+        action="device.trial.activate",
+        result="success",
+        actor_type="device",
+        actor_id=f"device-{device.id}",
+        resource_type="subscription",
+        resource_id=subscription.id,
+        details={
+            "platform": data.platform,
+            "days": settings.client_trial_days,
+            "profiles": len(eligible),
+        },
+    )
+    return DeviceTokenResponse(
+        device_id=device.id,
+        access_token=token,
+        expires_at=device.expires_at,
     )
 
 
@@ -224,12 +456,36 @@ async def client_profile(
             VPNClient.expires_at > now,
         )
     )
+    plan = await db.get(Plan, subscription.plan_id)
+    total_bytes = subscription.traffic_limit_bytes
+    if total_bytes is None and plan is not None and plan.traffic_limit_gb:
+        total_bytes = plan.traffic_limit_gb * 1024**3
     nodes = []
     sensitive_configs = []
+    upload_bytes = 0
+    download_bytes = 0
     for client, node, node_config in result.all():
         uri = build_client_uri(client, node, node_config.config)
+        if not uri:
+            continue
+        client_upload = max(int(client.upload_bytes or 0), 0)
+        client_download = max(int(client.download_bytes or 0), 0)
+        if node_config.config.get("api_address") and client.protocol == "vless":
+            try:
+                traffic = await ThreeXUIClient(
+                    node_config.config["api_address"]
+                ).get_client_traffic(f"vpn-{client.id}")
+                client_upload = max(int(traffic.get("up", 0) or 0), 0)
+                client_download = max(int(traffic.get("down", 0) or 0), 0)
+                client.upload_bytes = client_upload
+                client.download_bytes = client_download
+            except (ThreeXUIError, TypeError, ValueError):
+                pass
+        upload_bytes += client_upload
+        download_bytes += client_download
         nodes.append(
             ClientProfileNode(
+                profile_id=f"{node.id}:{client.protocol}",
                 node_id=node.id,
                 name=node.name,
                 region=node.region,
@@ -239,9 +495,12 @@ async def client_profile(
                 latency_ms=node.latency_ms,
                 protocol=client.protocol,
                 config=uri,
+                upload_bytes=client_upload,
+                download_bytes=client_download,
             )
         )
         sensitive_configs.append({"node_id": node.id, "vpn_uri": uri})
+    await db.commit()
     await write_audit(
         db,
         action="device.profile.read",
@@ -259,13 +518,29 @@ async def client_profile(
         subscription_id=subscription.id,
         expires_at=subscription.expires_at,
         provider=ClientProviderInfo(
-            name=settings.provider_name,
+            name=settings.client_provider_name.strip() or settings.provider_name,
             support_url=incy_support_url(),
             cabinet_url=(
                 settings.provider_cabinet_url.strip()
                 or f"{settings.public_base_url.rstrip('/')}/cabinet"
             ),
         ),
+        provider_name=settings.client_provider_name.strip() or settings.provider_name,
+        plan_name=plan.name if plan is not None else "",
+        announcement=settings.client_announcement,
+        announcement_url=settings.client_announcement_url.strip() or None,
+        usage=ClientProfileUsage(
+            upload_bytes=upload_bytes,
+            download_bytes=download_bytes,
+            total_bytes=total_bytes,
+            remaining_bytes=(
+                max(total_bytes - upload_bytes - download_bytes, 0)
+                if total_bytes is not None
+                else None
+            ),
+        ),
+        links=provider_links(),
+        updated_at=now,
         nodes=nodes,
     )
 

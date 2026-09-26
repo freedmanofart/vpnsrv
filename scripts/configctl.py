@@ -65,6 +65,17 @@ VARIABLES: dict[str, Variable] = {
     # неизвестно и лишь оборвёт синхронизацию, поэтому оно не ротируется здесь.
     "THREEXUI_API_TOKEN": Variable(secret=True, required=True),
     "THREEXUI_VERIFY_TLS": Variable(required=True),
+    "CLIENT_TRIAL_ENABLED": Variable(),
+    "CLIENT_TRIAL_DAYS": Variable(),
+    "CLIENT_TRIAL_TRAFFIC_LIMIT_BYTES": Variable(),
+    "CLIENT_PROVIDER_NAME": Variable(),
+    "CLIENT_ANNOUNCEMENT": Variable(),
+    "CLIENT_ANNOUNCEMENT_URL": Variable(),
+    "CLIENT_CHANNEL_URL": Variable(),
+    "CLIENT_SUPPORT_URL": Variable(),
+    "CLIENT_WEBSITE_URL": Variable(),
+    "CLIENT_ACCOUNT_URL": Variable(),
+    "CLIENT_RENEWAL_URL": Variable(),
 }
 
 
