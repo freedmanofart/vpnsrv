@@ -904,6 +904,11 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             'data-native-store href="https://play.google.com/store/apps/details?id=llc.itdev.incy"',
             response.text,
         )
+        self.assertIn('class="pay-button incy-import-button"', response.text)
+        self.assertIn("Импортировать в INCY", response.text)
+        self.assertNotIn("📲 Импортировать в INCY", response.text)
+        self.assertNotIn("Из-за блокировок РКН", response.text)
+        self.assertNotIn('class="support-link"', response.text)
 
     async def test_cabinet_marks_subscription_inactive_when_traffic_is_exhausted(self) -> None:
         from app.core.tokens import token_hash
