@@ -1422,7 +1422,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         install_id = str(uuid4())
         traffic = {"up": 1024, "down": 4096}
         with (
-            patch.object(settings, "client_trial_traffic_limit_bytes", 10240),
+            patch.object(settings, "client_trial_days", 1),
+            patch.object(settings, "client_trial_traffic_limit_bytes", 3 * 1024**3),
             patch.object(settings, "client_announcement", "Service message"),
             patch.object(settings, "client_account_url", "https://account.example.test"),
             patch.object(settings, "client_support_url", "https://support.example.test"),
@@ -1449,8 +1450,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(2, len(payload["nodes"]))
         self.assertEqual({"de", "nl"}, {node["region"] for node in payload["nodes"]})
         self.assertEqual(5120, payload["usage"]["upload_bytes"] + payload["usage"]["download_bytes"])
-        self.assertEqual(10240, payload["usage"]["total_bytes"])
-        self.assertEqual(5120, payload["usage"]["remaining_bytes"])
+        self.assertEqual(3 * 1024**3, payload["usage"]["total_bytes"])
+        self.assertEqual(3 * 1024**3 - 5120, payload["usage"]["remaining_bytes"])
         self.assertIn("account", {link["id"] for link in payload["links"]})
         self.assertNotIn("renew", {link["id"] for link in payload["links"]})
         self.assertEqual(2, len({node["profile_id"] for node in payload["nodes"]}))

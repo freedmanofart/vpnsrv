@@ -234,13 +234,19 @@ async def trial_plan(db: AsyncSession) -> Plan:
     code = f"mobile-trial-{settings.client_trial_days}d"
     result = await db.execute(select(Plan).where(Plan.code == code))
     plan = result.scalar_one_or_none()
-    if plan is not None:
-        return plan
     traffic_limit_gb = 0
     if settings.client_trial_traffic_limit_bytes:
         traffic_limit_gb = (
             settings.client_trial_traffic_limit_bytes + 1024**3 - 1
         ) // 1024**3
+    if plan is not None:
+        # Keep an existing trial plan aligned with deployment settings. This
+        # matters when the quota is changed without changing the duration.
+        if plan.duration_days != settings.client_trial_days:
+            plan.duration_days = settings.client_trial_days
+        if plan.traffic_limit_gb != traffic_limit_gb:
+            plan.traffic_limit_gb = traffic_limit_gb
+        return plan
     plan = Plan(
         code=code,
         name=f"Тестовый доступ на {settings.client_trial_days} дн.",

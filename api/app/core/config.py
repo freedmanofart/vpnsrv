@@ -42,8 +42,8 @@ class Settings(BaseSettings):
     provider_support_url: str = ""
     provider_cabinet_url: str = ""
     client_trial_enabled: bool = True
-    client_trial_days: int = Field(default=30, ge=1, le=365)
-    client_trial_traffic_limit_bytes: int = Field(default=0, ge=0)
+    client_trial_days: int = Field(default=1, ge=1, le=365)
+    client_trial_traffic_limit_bytes: int = Field(default=3 * 1024**3, ge=0)
     client_provider_name: str = ""
     client_announcement: str = ""
     client_announcement_url: str = ""

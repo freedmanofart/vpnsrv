@@ -118,7 +118,7 @@ Frontend-структура лендинга, web-кабинета и админ
 | `POST` | `/payments/manual` | Создание ручного платежа |
 | `GET` | `/payment-methods` | Доступные способы оплаты |
 | `POST` | `/v1/client/activation-codes` | Код активации клиентского устройства |
-| `POST` | `/v1/client/trial` | Тестовый профиль Android/iOS на 30 дней |
+| `POST` | `/v1/client/trial` | Тестовый профиль Android/iOS на 1 день и 3 ГБ |
 | `GET` | `/v1/client/profile` | Профили, метаданные провайдера и актуальный трафик |
 | `POST` | `/v1/client/activate` | Обмен кода провайдера на device token |
 | `GET` | `/` | Публичный лендинг |

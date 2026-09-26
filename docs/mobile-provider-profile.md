@@ -25,9 +25,9 @@ limit на reverse proxy; UUID установки не является аппа
 Настройки:
 
 - `CLIENT_TRIAL_ENABLED=true` — включить выдачу;
-- `CLIENT_TRIAL_DAYS=30` — срок теста;
-- `CLIENT_TRIAL_TRAFFIC_LIMIT_BYTES=0` — без отдельной квоты, положительное
-  значение задаёт общий лимит upload+download;
+- `CLIENT_TRIAL_DAYS=1` — срок теста;
+- `CLIENT_TRIAL_TRAFFIC_LIMIT_BYTES=3221225472` — общий лимит upload+download
+  3 GiB (3 ГБ в интерфейсе приложения);
 - `CLIENT_PROVIDER_NAME`, `CLIENT_ANNOUNCEMENT` и `CLIENT_ANNOUNCEMENT_URL` —
   данные карточки провайдера;
 - `CLIENT_CHANNEL_URL`, `CLIENT_SUPPORT_URL`, `CLIENT_WEBSITE_URL` и
