@@ -59,6 +59,16 @@ def incy_metadata_header(value: str) -> str:
     return f"base64:{b64encode(value.encode('utf-8')).decode('ascii')}"
 
 
+def incy_support_url() -> str:
+    """Open the same support flow that is available from the Telegram menu."""
+
+    configured = settings.provider_support_url.strip()
+    if configured:
+        return configured
+    username = settings.bot_username.strip().lstrip("@")
+    return f"https://t.me/{username}?start=support" if username else ""
+
+
 async def active_subscription_for_user(
     db: AsyncSession,
     user_id: int,
@@ -250,7 +260,7 @@ async def client_profile(
         expires_at=subscription.expires_at,
         provider=ClientProviderInfo(
             name=settings.provider_name,
-            support_url=settings.provider_support_url,
+            support_url=incy_support_url(),
             cabinet_url=(
                 settings.provider_cabinet_url.strip()
                 or f"{settings.public_base_url.rstrip('/')}/cabinet"
@@ -303,6 +313,7 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
         if settings.bot_username.strip()
         else ""
     )
+    support_url = incy_support_url()
     expires_at = int(aware(client.expires_at).timestamp())
     traffic_upload_bytes = 0
     traffic_download_bytes = 0
@@ -322,7 +333,7 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
         [
             f"#profile-title: {profile_title}",
             f"#profile-description: {warning}",
-            f"#support-url: {settings.provider_support_url}",
+            f"#support-url: {support_url}",
             f"#profile-web-page-url: {site_url}",
             f"#announce: {warning}",
             f"#announce-url: {bot_url}",
@@ -338,7 +349,7 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             "profile-title": incy_metadata_header(profile_title),
             "profile-description": incy_metadata_header(warning),
             "profile-update-interval": "6",
-            "support-url": settings.provider_support_url,
+            "support-url": support_url,
             "profile-web-page-url": site_url,
             "announce": incy_metadata_header(warning),
             "announce-url": bot_url,

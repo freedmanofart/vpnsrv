@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     provider_code_notifications_enabled: bool = False
     provider_code_notification_email: str = ""
     provider_name: str = "Freedom VPN"
-    provider_support_url: str = "https://t.me/Freedom_VPN_Support"
+    # Пустое значение означает deep link бота в сценарий техподдержки.
+    provider_support_url: str = ""
     provider_cabinet_url: str = ""
     platega_enabled: bool = False
     platega_base_url: str = "https://app.platega.io"

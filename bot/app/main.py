@@ -957,6 +957,9 @@ async def start_handler(message: Message):
         match = re.search(r"(?:^|\s)/start\s+ref_(\d+)", message.text or "")
         if match:
             referrer_id = int(match.group(1))
+        support_requested = bool(
+            re.search(r"(?:^|\s)/start\s+support(?:\s|$)", message.text or "", re.IGNORECASE)
+        )
         user = await get_or_create_user(message, referrer_id)
 
         logging.info(
@@ -964,6 +967,18 @@ async def start_handler(message: Message):
             message.from_user.id,
             user["id"],
         )
+
+        if support_requested:
+            await message.answer(
+                content_text("support"),
+                parse_mode="HTML",
+                reply_markup=support_keyboard(),
+            )
+            await message.answer(
+                "Меню доступно по кнопке справа от поля ввода.",
+                reply_markup=popup_menu(),
+            )
+            return
 
         await message.answer_photo(
             photo=FSInputFile(WELCOME_LOGO),

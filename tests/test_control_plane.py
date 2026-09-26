@@ -1351,6 +1351,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         device_headers = {"Authorization": f"Bearer {old_token}"}
         profile = await self.client.get("/v1/client/profile", headers=device_headers)
         self.assertEqual(200, profile.status_code, profile.text)
+        self.assertEqual(
+            "https://t.me/vpn142323srv_bot?start=support",
+            profile.json()["provider"]["support_url"],
+        )
         self.assertIn("flow=xtls-rprx-vision", profile.json()["nodes"][0]["config"])
 
         debug = await self.client.post(
@@ -1416,6 +1420,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertTrue(response.headers["profile-description"].startswith("base64:"))
         self.assertEqual("6", response.headers["profile-update-interval"])
         self.assertEqual(f"{settings.public_base_url.rstrip('/')}/", response.headers["profile-web-page-url"])
+        self.assertEqual(
+            "https://t.me/vpn142323srv_bot?start=support",
+            response.headers["support-url"],
+        )
         self.assertEqual(
             f"{settings.public_base_url.rstrip('/')}/cabinet",
             response.headers["premium-url"],
