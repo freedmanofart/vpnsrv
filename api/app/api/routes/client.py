@@ -1,10 +1,12 @@
 import secrets
+import html
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -328,7 +330,13 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/import/{token}", include_in_schema=False)
 async def incy_import_redirect(token: str):
-    """Bridge Telegram's HTTPS-only button validation to the INCY deep link."""
+    """Bridge Telegram's HTTPS-only button validation to the INCY deep link.
+
+    Telegram's Android WebView renders a 302 to ``incy://`` as
+    ``ERR_UNKNOWN_URL_SCHEME`` instead of handing it to Android. Return a
+    normal HTTPS page with an Android ``intent://`` action so the WebView can
+    launch the installed app from an explicit user tap.
+    """
 
     if verify_incy_subscription_token(token) is None:
         raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
@@ -337,9 +345,40 @@ async def incy_import_redirect(token: str):
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
         f"{token}"
     )
-    return RedirectResponse(
-        url=build_incy_import_link(subscription_url),
-        status_code=status.HTTP_302_FOUND,
+    deep_link = build_incy_import_link(subscription_url)
+    encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
+    android_intent = (
+        f"intent://import/{encoded_subscription_url}"
+        "#Intent;scheme=incy;package=llc.itdev.incy;end"
+    )
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Импорт в INCY</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #162331; color: #f4f7fb; font: 16px system-ui, sans-serif; }}
+    main {{ width: min(420px, calc(100% - 40px)); text-align: center; }}
+    h1 {{ margin: 0 0 12px; font-size: 28px; }}
+    p {{ color: #b9c5d2; line-height: 1.5; }}
+    a {{ display: block; margin-top: 20px; padding: 15px 20px; border-radius: 12px; background: #2596e8; color: white; font-weight: 700; text-decoration: none; }}
+    .fallback {{ margin-top: 14px; padding: 0; background: transparent; color: #8fcaff; font-weight: 500; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Импорт конфигурации</h1>
+    <p>Нажмите кнопку, чтобы открыть конфигурацию в установленном приложении INCY.</p>
+    <a href="{html.escape(android_intent, quote=True)}">Открыть в INCY</a>
+    <a class="fallback" href="{html.escape(deep_link, quote=True)}">Открыть обычной ссылкой</a>
+  </main>
+</body>
+</html>""",
+        status_code=status.HTTP_200_OK,
+        headers={"cache-control": "no-store"},
     )
 
 

@@ -1389,19 +1389,18 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(200, accepted.status_code, accepted.text)
 
-    async def test_incy_telegram_import_bridge_redirects_to_deep_link(self) -> None:
+    async def test_incy_telegram_import_bridge_shows_android_launcher(self) -> None:
         async with self.session_factory() as db:
             client = await db.get(VPNClient, self.client_id)
             token = incy_subscription_token(client.id, client.expires_at)
 
-        response = await self.client.get(
-            f"/v1/client/import/{token}",
-            follow_redirects=False,
-        )
+        response = await self.client.get(f"/v1/client/import/{token}")
 
-        self.assertEqual(302, response.status_code)
-        self.assertTrue(response.headers["location"].startswith("incy://import/"))
-        self.assertIn("/v1/client/subscription/", response.headers["location"])
+        self.assertEqual(200, response.status_code)
+        self.assertIn("intent://import/", response.text)
+        self.assertIn("scheme=incy;package=llc.itdev.incy", response.text)
+        self.assertIn("/v1/client/subscription/", response.text)
+        self.assertIn("Открыть в INCY", response.text)
 
     async def test_incy_subscription_returns_utf8_metadata_and_vless(self) -> None:
         async with self.session_factory() as db:
