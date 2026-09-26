@@ -1,4 +1,5 @@
 import secrets
+from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -47,6 +48,12 @@ class DevicePrincipal:
 
 def aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def incy_metadata_header(value: str) -> str:
+    """Encode non-ASCII INCY metadata for HTTP headers."""
+
+    return f"base64:{b64encode(value.encode('utf-8')).decode('ascii')}"
 
 
 async def active_subscription_for_user(
@@ -296,7 +303,7 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             f"#profile-web-page-url: {cabinet_url}",
             f"#announce: {warning}",
             f"#announce-url: {settings.provider_support_url}",
-            f"#profile-update-interval: 21600",
+            f"#profile-update-interval: 6",
             uri,
             "",
         ]
@@ -305,11 +312,12 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
         content=body,
         media_type="text/plain",
         headers={
-            "profile-title": profile_title,
-            "profile-description": warning,
+            "profile-title": incy_metadata_header(profile_title),
+            "profile-description": incy_metadata_header(warning),
+            "profile-update-interval": "6",
             "support-url": settings.provider_support_url,
             "profile-web-page-url": cabinet_url,
-            "announce": warning,
+            "announce": incy_metadata_header(warning),
             "announce-url": settings.provider_support_url,
             "subscription-userinfo": f"upload=0; download=0; total=0; expire={expires_at}",
             "content-disposition": 'inline; filename="freedom-vpn-incy.txt"',

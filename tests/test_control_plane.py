@@ -1401,6 +1401,20 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertTrue(response.headers["location"].startswith("incy://import/"))
         self.assertIn("/v1/client/subscription/", response.headers["location"])
 
+    async def test_incy_subscription_returns_utf8_metadata_and_vless(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            token = incy_subscription_token(client.id, client.expires_at)
+
+        response = await self.client.get(f"/v1/client/subscription/{token}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("#profile-title: Freedom VPN · de", response.text)
+        self.assertIn("vless://", response.text)
+        self.assertTrue(response.headers["profile-title"].startswith("base64:"))
+        self.assertTrue(response.headers["profile-description"].startswith("base64:"))
+        self.assertEqual("6", response.headers["profile-update-interval"])
+
     async def test_provider_activation_code_rejects_unknown_expired_and_invalid_codes(self) -> None:
         unknown_user = await self.client.post(
             "/v1/client/activation-codes",
