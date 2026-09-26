@@ -1416,6 +1416,28 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertTrue(response.headers["profile-description"].startswith("base64:"))
         self.assertEqual("6", response.headers["profile-update-interval"])
 
+    async def test_incy_subscription_reports_traffic_usage(self) -> None:
+        traffic_limit = 250 * 1024**3
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            client.traffic_limit_gb = 250
+            token = incy_subscription_token(client.id, client.expires_at)
+            await db.commit()
+
+        with patch("app.api.routes.client.ThreeXUIClient") as panel:
+            panel.return_value.get_client_traffic = AsyncMock(
+                return_value={"up": 1 * 1024**3, "down": 2 * 1024**3}
+            )
+            response = await self.client.get(f"/v1/client/subscription/{token}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertTrue(
+            response.headers["subscription-userinfo"].startswith(
+                f"upload={1 * 1024**3}; download={2 * 1024**3}; "
+                f"total={traffic_limit}; expire="
+            )
+        )
+
     async def test_provider_activation_code_rejects_unknown_expired_and_invalid_codes(self) -> None:
         unknown_user = await self.client.post(
             "/v1/client/activation-codes",

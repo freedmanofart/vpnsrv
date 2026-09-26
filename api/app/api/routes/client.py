@@ -32,6 +32,7 @@ from app.schemas.client import (
 from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
 from app.services.provider_codes import issue_provider_code
+from app.services.threexui import ThreeXUIClient, ThreeXUIError
 from app.services.vless import build_vless_url
 from app.services.incy import build_incy_import_link
 from app.core.config import settings
@@ -297,6 +298,20 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
         or f"{settings.public_base_url.rstrip('/')}/cabinet"
     )
     expires_at = int(aware(client.expires_at).timestamp())
+    traffic_upload_bytes = 0
+    traffic_download_bytes = 0
+    traffic_total_bytes = max(int(client.traffic_limit_gb or 0), 0) * 1024**3
+    if traffic_total_bytes:
+        try:
+            traffic = await ThreeXUIClient(
+                node_config.config.get("api_address")
+            ).get_client_traffic(f"vpn-{client.id}")
+            traffic_upload_bytes = max(int(traffic.get("up", 0) or 0), 0)
+            traffic_download_bytes = max(int(traffic.get("down", 0) or 0), 0)
+        except (ThreeXUIError, TypeError, ValueError):
+            # Keep the quota visible when 3x-ui is temporarily unavailable;
+            # never report a fabricated amount of consumed traffic.
+            pass
     body = "\n".join(
         [
             f"#profile-title: {profile_title}",
@@ -321,7 +336,11 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             "profile-web-page-url": cabinet_url,
             "announce": incy_metadata_header(warning),
             "announce-url": settings.provider_support_url,
-            "subscription-userinfo": f"upload=0; download=0; total=0; expire={expires_at}",
+            "subscription-userinfo": (
+                f"upload={traffic_upload_bytes}; "
+                f"download={traffic_download_bytes}; "
+                f"total={traffic_total_bytes}; expire={expires_at}"
+            ),
             "content-disposition": 'inline; filename="freedom-vpn-incy.txt"',
             "cache-control": "no-store",
         },
