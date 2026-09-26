@@ -1415,6 +1415,12 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertTrue(response.headers["profile-title"].startswith("base64:"))
         self.assertTrue(response.headers["profile-description"].startswith("base64:"))
         self.assertEqual("6", response.headers["profile-update-interval"])
+        self.assertEqual(f"{settings.public_base_url.rstrip('/')}/", response.headers["profile-web-page-url"])
+        self.assertEqual(
+            f"{settings.public_base_url.rstrip('/')}/cabinet",
+            response.headers["premium-url"],
+        )
+        self.assertEqual("https://t.me/vpn142323srv_bot", response.headers["announce-url"])
 
     async def test_incy_subscription_reports_traffic_usage(self) -> None:
         traffic_limit = 250 * 1024**3

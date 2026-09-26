@@ -293,9 +293,15 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
     region = (node.region or "Швеция").split("|", 1)[-1]
     warning = "Из-за блокировок РКН наш сервис может работать нестабильно."
     profile_title = f"{settings.provider_name} · {region}"
+    site_url = f"{settings.public_base_url.rstrip('/')}/"
     cabinet_url = (
         settings.provider_cabinet_url.strip()
         or f"{settings.public_base_url.rstrip('/')}/cabinet"
+    )
+    bot_url = (
+        f"https://t.me/{settings.bot_username.lstrip('@').strip()}"
+        if settings.bot_username.strip()
+        else ""
     )
     expires_at = int(aware(client.expires_at).timestamp())
     traffic_upload_bytes = 0
@@ -317,9 +323,9 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             f"#profile-title: {profile_title}",
             f"#profile-description: {warning}",
             f"#support-url: {settings.provider_support_url}",
-            f"#profile-web-page-url: {cabinet_url}",
+            f"#profile-web-page-url: {site_url}",
             f"#announce: {warning}",
-            f"#announce-url: {settings.provider_support_url}",
+            f"#announce-url: {bot_url}",
             f"#profile-update-interval: 6",
             uri,
             "",
@@ -333,9 +339,10 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             "profile-description": incy_metadata_header(warning),
             "profile-update-interval": "6",
             "support-url": settings.provider_support_url,
-            "profile-web-page-url": cabinet_url,
+            "profile-web-page-url": site_url,
             "announce": incy_metadata_header(warning),
-            "announce-url": settings.provider_support_url,
+            "announce-url": bot_url,
+            "premium-url": cabinet_url,
             "subscription-userinfo": (
                 f"upload={traffic_upload_bytes}; "
                 f"download={traffic_download_bytes}; "
