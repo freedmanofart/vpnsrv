@@ -368,10 +368,6 @@ def vpn_key_copy_keyboard(client_id: int, incy_import_url: str = "") -> InlineKe
                 url=incy_import_url,
             )
         ])
-    if SUPPORT_URL:
-        rows.append([
-            InlineKeyboardButton(text="❔ Поддержка", url=SUPPORT_URL),
-        ])
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(
         inline_keyboard=rows,
@@ -883,9 +879,7 @@ async def send_key_message(message: Message, client_id: int) -> None:
         photo=qr_file(value),
         caption=(
             "🔑 <b>Ваш VPN-ключ</b>\n\n"
-            "Отсканируйте QR-код, нажмите «Импортировать в INCY» "
-            "или скопируйте ключ.\n\n"
-            "⚠️ Из-за блокировок РКН наш сервис может работать нестабильно."
+            "Отсканируйте QR-код или нажмите «Скопировать ключ»."
         ),
         parse_mode="HTML",
         reply_markup=vpn_key_copy_keyboard(
@@ -920,7 +914,7 @@ async def show_paid_subscription(
         f"💰 Стоимость: <b>{html.escape(price_label)}</b>\n"
         f"📅 Действует до: <b>{expires_at} UTC</b>\n\n"
         "🔐 <b>VLESS Reality xHTTP</b>\n\n"
-        "Нажмите «Импортировать в INCY» ниже или скопируйте ссылку:"
+        "Скопируйте ссылку ниже и импортируйте в VLESS-приложение:"
         f"\n\n<code>{html.escape(vless_url)}</code>"
     )
     await message.answer(text, reply_markup=vpn_ready_keyboard(), parse_mode="HTML")
@@ -2639,7 +2633,7 @@ async def pay_qr_handler(
             f"📅 Действует до: "
             f"<b>{expires_at} UTC</b>\n\n"
             "🔐 <b>VLESS Reality xHTTP</b>\n\n"
-            "Нажмите «Импортировать в INCY» ниже или скопируйте ссылку:"
+            "Скопируйте ссылку ниже и импортируйте в VLESS-приложение:"
         )
 
         text += (
