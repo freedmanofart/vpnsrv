@@ -888,7 +888,10 @@ async def send_key_message(message: Message, client_id: int) -> None:
             "⚠️ Из-за блокировок РКН наш сервис может работать нестабильно."
         ),
         parse_mode="HTML",
-        reply_markup=vpn_key_copy_keyboard(client_id, data.get("incy_import_url", "")),
+        reply_markup=vpn_key_copy_keyboard(
+            client_id,
+            data.get("incy_telegram_import_url") or data.get("incy_import_url", ""),
+        ),
     )
 
 

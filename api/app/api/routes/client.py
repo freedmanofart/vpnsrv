@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,7 @@ from app.services.audit import write_audit
 from app.services.node_health import node_accepts_clients
 from app.services.provider_codes import issue_provider_code
 from app.services.vless import build_vless_url
+from app.services.incy import build_incy_import_link
 from app.core.config import settings
 from app.core.cabinet_links import verify_incy_subscription_token
 
@@ -313,6 +315,23 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             "content-disposition": 'inline; filename="freedom-vpn-incy.txt"',
             "cache-control": "no-store",
         },
+    )
+
+
+@router.get("/import/{token}", include_in_schema=False)
+async def incy_import_redirect(token: str):
+    """Bridge Telegram's HTTPS-only button validation to the INCY deep link."""
+
+    if verify_incy_subscription_token(token) is None:
+        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
+
+    subscription_url = (
+        f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
+        f"{token}"
+    )
+    return RedirectResponse(
+        url=build_incy_import_link(subscription_url),
+        status_code=status.HTTP_302_FOUND,
     )
 
 

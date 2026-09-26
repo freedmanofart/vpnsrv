@@ -785,4 +785,8 @@ async def get_vpn_client_config(
         expires_at=client.expires_at,
         incy_subscription_url=subscription_url,
         incy_import_url=build_incy_import_link(subscription_url),
+        incy_telegram_import_url=(
+            f"{settings.public_base_url.rstrip('/')}/v1/client/import/"
+            f"{subscription_token}"
+        ),
     )

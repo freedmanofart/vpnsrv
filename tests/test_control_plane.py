@@ -23,6 +23,7 @@ os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 import app.main as main_module
 from app.api.routes import admin as admin_routes
 from app.core.config import settings
+from app.core.cabinet_links import incy_subscription_token
 from app.core.tokens import token_hash
 from app.db.base import Base
 from app.db.models import (
@@ -124,6 +125,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             self.telegram_id = user.telegram_id
             self.node_id = node.id
             self.package_id = package.id
+            self.client_id = client.id
 
         async def override_db():
             async with self.session_factory() as db:
@@ -1379,6 +1381,20 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {new_token}"},
         )
         self.assertEqual(200, accepted.status_code, accepted.text)
+
+    async def test_incy_telegram_import_bridge_redirects_to_deep_link(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            token = incy_subscription_token(client.id, client.expires_at)
+
+        response = await self.client.get(
+            f"/v1/client/import/{token}",
+            follow_redirects=False,
+        )
+
+        self.assertEqual(302, response.status_code)
+        self.assertTrue(response.headers["location"].startswith("incy://import/"))
+        self.assertIn("/v1/client/subscription/", response.headers["location"])
 
     async def test_provider_activation_code_rejects_unknown_expired_and_invalid_codes(self) -> None:
         unknown_user = await self.client.post(

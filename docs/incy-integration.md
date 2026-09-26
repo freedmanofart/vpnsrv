@@ -22,8 +22,11 @@ API `/vpn/clients/{client_id}/config` дополнительно возвращ�
 
 - `incy_subscription_url` — URL подписки;
 - `incy_import_url` — готовый deep link `incy://import/...`.
+- `incy_telegram_import_url` — HTTPS-переходник для кнопки в Telegram. Telegram
+  не принимает произвольные custom-scheme URL в `InlineKeyboardButton`, поэтому
+  переходник отвечает редиректом на `incy://import/...`.
 
-Эта ссылка используется и в web-кабинете, и в Telegram-боте. Для приложения
+Deep link используется в web-кабинете, а HTTPS-переходник — в Telegram-боте. Для приложения
 добавлены официальные ссылки INCY для iOS, Android, Windows, macOS, Linux,
 Android TV и Apple TV.
 
