@@ -47,7 +47,6 @@ from app.schemas.payment import PaymentCreate
 from app.core.security import hash_password, require_api_access, verify_password
 from app.services.audit import write_audit
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
-from app.services.incy import build_incy_import_link
 
 
 router = APIRouter(tags=["Web cabinet"])
@@ -896,8 +895,10 @@ async def cabinet(
         if node and config:
             vpn_uri = client.config_override or build_client_uri(client, node, config.config)
             subscription_token = incy_subscription_token(client.id, client.expires_at)
-            subscription_url = f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/{subscription_token}"
-            incy_import_url = build_incy_import_link(subscription_url)
+            # Use the HTTPS bridge here, just as in Telegram. Android browsers
+            # can hand off the redirect to INCY reliably; a direct `incy://`
+            # link can be parsed as a malformed certificate/URL by the app.
+            incy_import_url = f"{settings.public_base_url.rstrip('/')}/v1/client/import/{subscription_token}"
     traffic_remaining_bytes = None
     traffic_limit_bytes = None
     traffic_used_bytes = None

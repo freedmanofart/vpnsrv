@@ -11,7 +11,7 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.cabinet_links import telegram_cabinet_link_token
+from app.core.cabinet_links import incy_subscription_token, telegram_cabinet_link_token
 from app.db.models.audit import AuditLog
 from app.db.models.payment import Payment
 from app.db.models.payment_method import PaymentMethod
@@ -19,6 +19,7 @@ from app.db.models.plan import Plan
 from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.vpn_node import VPNNode
+from app.db.models.vpn_client import VPNClient
 from app.services.admin_settings import get_admin_contacts
 from app.services.audit import write_audit
 from app.services.email import (
@@ -53,6 +54,13 @@ def _user_cabinet_url(user: User | None, path: str = "") -> str:
     route, marker, fragment = path.partition("#")
     separator = "&" if "?" in path else "?"
     return f"{base}{route}{separator}tg={telegram_cabinet_link_token(user.id)}{marker}{fragment}"
+
+
+def _incy_import_url(client: VPNClient | None) -> str | None:
+    if client is None or client.status != "active":
+        return None
+    token = incy_subscription_token(client.id, client.expires_at)
+    return f"{settings.public_base_url.rstrip('/')}/v1/client/import/{token}"
 
 
 async def _telegram_destinations(db: AsyncSession) -> list[int | str]:
@@ -352,6 +360,15 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
     user = await db.get(User, payment.user_id)
     plan = await db.get(Plan, payment.plan_id)
     subscription = await db.get(Subscription, payment.subscription_id) if payment.subscription_id else None
+    client = None
+    if payment.subscription_id:
+        client = await db.scalar(
+            select(VPNClient).where(
+                VPNClient.subscription_id == payment.subscription_id,
+                VPNClient.status == "active",
+            )
+        )
+    incy_import_url = _incy_import_url(client)
     card = await _payment_card(db, payment, title="✅ Оплата Freedom VPN подтверждена")
     await _send_telegram_message(db, card)
     await _send_email(db, f"Оплата Freedom VPN подтверждена #{payment.id}", card)
@@ -360,6 +377,14 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
     if user is not None:
         plan_name = plan.name if plan else "Freedom VPN"
         expires = f"\nДействует до: {subscription.expires_at} UTC" if subscription else ""
+        incy_text = ""
+        if incy_import_url:
+            incy_text = (
+                "\n\n📲 Импортировать конфигурацию в INCY:\n"
+                f"{incy_import_url}\n"
+                "Откройте ссылку на устройстве с установленным INCY.\n"
+                "⚠️ Из-за блокировок РКН наш сервис может работать нестабильно."
+            )
         provider_code_text = ""
         try:
             # The paid notification is the primary delivery for a new app device.
@@ -393,6 +418,7 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
             f"Сумма: {payment.amount:g} {payment.currency}"
             f"{expires}\n\n"
             f"{provider_code_text}"
+            f"{incy_text}"
             "\n\n"
             f"Web-кабинет: {_user_cabinet_url(user)}\n"
             f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}\n\n"

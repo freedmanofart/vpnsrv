@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, patch
+from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,3 +121,57 @@ class ProviderCodeNotificationTests(IsolatedAsyncioTestCase):
         self.assertFalse(sent.email_sent)
         send_message.assert_not_awaited()
         send_email.assert_not_awaited()
+
+
+class PaidNotificationTests(IsolatedAsyncioTestCase):
+    async def test_paid_client_notifications_include_incy_import_link_and_comment(self) -> None:
+        user = SimpleNamespace(
+            id=7,
+            email="user@example.com",
+            telegram_id=123,
+        )
+        plan = SimpleNamespace(name="Лайт 1 день")
+        expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+        subscription = SimpleNamespace(expires_at=expires_at)
+        client = SimpleNamespace(id=42, status="active", expires_at=expires_at)
+        payment = SimpleNamespace(
+            id=9,
+            user_id=user.id,
+            plan_id=3,
+            subscription_id=11,
+            amount=10,
+            currency="RUB",
+        )
+
+        class FakeDB:
+            async def get(self, model, key):
+                if model is notifications.User:
+                    return user
+                if model is notifications.Plan:
+                    return plan
+                if model is notifications.Subscription:
+                    return subscription
+                return None
+
+            async def scalar(self, query):
+                return client
+
+        with (
+            patch.object(notifications, "_payment_paid_notification_was_sent", new=AsyncMock(return_value=False)),
+            patch.object(notifications, "_payment_card", new=AsyncMock(return_value="admin-card")),
+            patch.object(notifications, "_send_telegram_message", new=AsyncMock()),
+            patch.object(notifications, "_send_email", new=AsyncMock()),
+            patch.object(notifications, "_send_client_telegram_message", new=AsyncMock(return_value=True)) as send_message,
+            patch.object(notifications, "_send_client_email_message", new=AsyncMock(return_value=True)) as send_email,
+            patch("app.services.provider_codes.issue_provider_code", new=AsyncMock(side_effect=RuntimeError("skip"))),
+            patch.object(notifications, "write_audit", new=AsyncMock()),
+        ):
+            await notifications.notify_payment_paid(FakeDB(), payment)
+
+        telegram_text = send_message.await_args.args[1]
+        email_text = send_email.await_args.args[2]
+        for text in (telegram_text, email_text):
+            self.assertIn("/v1/client/import/", text)
+            self.assertIn("Импортировать конфигурацию в INCY", text)
+            self.assertIn("Откройте ссылку на устройстве с установленным INCY", text)
+            self.assertIn("Из-за блокировок РКН", text)
