@@ -63,6 +63,14 @@ Telegram открывает HTTPS-переходник `/v1/client/freevpn-impor
 кнопку Telegram помещать не следует: WebView может вернуть
 `ERR_UNKNOWN_URL_SCHEME`.
 
+Для Android-кнопки переходник использует `intent://` с package приложения:
+
+```text
+intent://import/<subscription-url>#Intent;scheme=freevpn;package=org.amnezia.vpn;end
+```
+
+Указание package помогает Telegram WebView однозначно передать ссылку Freedom VPN.
+
 ## Web-сайт и личный кабинет
 
 На странице, открытой на устройстве с приложением, можно использовать
