@@ -365,18 +365,18 @@ def vpn_key_copy_keyboard(
             )
         ],
     ]
+    if incy_import_url:
+        rows.append([
+            InlineKeyboardButton(
+                text="📲 Импортировать в INCY",
+                url=incy_import_url,
+            )
+        ])
     if freevpn_import_url:
         rows.append([
             InlineKeyboardButton(
                 text="📲 Импортировать в Freedom VPN",
                 url=freevpn_import_url,
-            )
-        ])
-    elif incy_import_url:
-        rows.append([
-            InlineKeyboardButton(
-                text="📲 Импортировать в INCY",
-                url=incy_import_url,
             )
         ])
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
@@ -1056,12 +1056,7 @@ async def vpn_command_handler(message: Message):
 
 @router.message(Command("buy"))
 async def buy_command_handler(message: Message, state: FSMContext):
-    await state.set_state(PurchaseFlow.waiting_device)
-    await message.answer(
-        "📱 <b>Выберите ваше устройство:</b>",
-        reply_markup=purchase_devices_keyboard(),
-        parse_mode="HTML",
-    )
+    await show_reply_plans(message, state)
 
 
 @router.message(Command("help"))
@@ -1333,6 +1328,34 @@ async def show_reply_tiers(message: Message, state: FSMContext, node: dict) -> N
     )
 
 
+async def show_reply_plans(message: Message, state: FSMContext) -> None:
+    """Open the tariff list without asking for an operating system first."""
+
+    nodes = await available_nodes()
+    plans = await get_plans()
+    if not nodes:
+        await state.clear()
+        await message.answer("Сейчас нет доступных серверов.", reply_markup=popup_menu())
+        return
+    if not plans:
+        await state.clear()
+        await message.answer("Сейчас нет доступных тарифов.", reply_markup=popup_menu())
+        return
+
+    node = nodes[0]
+    await state.update_data(
+        node_id=node["id"],
+        plans={plan_button_label(plan): plan for plan in plans},
+    )
+    await state.set_state(PurchaseFlow.waiting_plan)
+    await message.answer(
+        "💳 <b>Выберите тариф</b>\n\n"
+        f"Страна подключения: <b>{country_label(node.get('region')) or html.escape(node['name'])}</b>",
+        parse_mode="HTML",
+        reply_markup=purchase_plans_keyboard(plans),
+    )
+
+
 @router.message(PurchaseFlow.waiting_device)
 async def reply_device_handler(message: Message, state: FSMContext):
     item = next(
@@ -1425,7 +1448,6 @@ async def reply_plan_handler(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "Выбери способ оплаты:\n\n"
-        f"Устройство: <b>{html.escape(str(data.get('platform_id', '—')))}</b>\n"
         f"Страна: <b>{country_label(node.get('region')) or html.escape(node['name'])}</b>\n"
         f"Тариф: <b>{html.escape(plan['name'])}</b>\n"
         f"Стоимость: <b>{plan['price']} {plan['currency']}</b>",
@@ -2104,10 +2126,32 @@ async def rotate_country_handler(callback: CallbackQuery):
 
 @router.callback_query(F.data == "buy_vpn")
 async def buy_vpn_handler(callback: CallbackQuery):
+    nodes = await available_nodes()
+    plans = await get_plans()
+    if not nodes:
+        await callback.answer("Сейчас нет доступных серверов", show_alert=True)
+        return
+    if not plans:
+        await callback.answer("Сейчас нет доступных тарифов", show_alert=True)
+        return
+    node = nodes[0]
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{plan['name']} | {plan['price']} {plan['currency']}",
+                    callback_data=f"purchase_plan:{plan['id']}:{node['id']}",
+                )
+            ]
+            for plan in plans
+        ]
+        + [[InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")]],
+    )
     await show_screen(
         callback,
-        content_text("platforms_intro"),
-        platforms_keyboard(purchase=True),
+        "💳 <b>Выберите тариф</b>\n\n"
+        f"Страна подключения: <b>{country_label(node.get('region')) or html.escape(node['name'])}</b>",
+        keyboard,
     )
     await callback.answer()
 
