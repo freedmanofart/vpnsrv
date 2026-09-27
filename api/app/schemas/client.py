@@ -26,6 +26,10 @@ class TrialActivate(BaseModel):
     platform: str = Field(min_length=1, max_length=64)
 
 
+class SubscriptionImport(BaseModel):
+    token: str = Field(min_length=32, max_length=4096)
+
+
 class DeviceTokenResponse(BaseModel):
     device_id: int
     access_token: str

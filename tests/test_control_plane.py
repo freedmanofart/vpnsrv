@@ -1459,6 +1459,23 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(2, len({node["profile_id"] for node in payload["nodes"]}))
 
         async with self.session_factory() as db:
+            first_client = (
+                await db.execute(
+                    select(VPNClient)
+                    .where(VPNClient.user_id == payload["user_id"])
+                    .order_by(VPNClient.id.asc())
+                )
+            ).scalars().first()
+            import_token = incy_subscription_token(first_client.id, first_client.expires_at)
+        imported = await self.client.post(
+            "/v1/client/import",
+            json={"token": import_token},
+            headers={"Authorization": f"Bearer {old_token}"},
+        )
+        self.assertEqual(200, imported.status_code, imported.text)
+        self.assertEqual(payload["subscription_id"], imported.json()["subscription_id"])
+
+        async with self.session_factory() as db:
             trial_device = await db.scalar(
                 select(ClientDevice).where(ClientDevice.install_id_hash == token_hash(install_id))
             )

@@ -33,6 +33,7 @@ from app.schemas.client import (
     ClientProfileResponse,
     DeviceActivate,
     DeviceTokenResponse,
+    SubscriptionImport,
     TrialActivate,
 )
 from app.services.audit import write_audit
@@ -290,6 +291,7 @@ async def activate_trial(data: TrialActivate, db: AsyncSession = Depends(get_db)
         subscription = await active_subscription_for_user(db, existing.user_id, now)
         if subscription is None:
             raise HTTPException(status_code=403, detail="Trial period has expired")
+        plan = await db.get(Plan, subscription.plan_id)
         token = generate_scoped_token("device", existing.user_id)
         existing.token_hash = token_hash(token)
         existing.token_prefix = token.split(".", 1)[0]
@@ -299,7 +301,11 @@ async def activate_trial(data: TrialActivate, db: AsyncSession = Depends(get_db)
         await db.commit()
         return DeviceTokenResponse(
             device_id=existing.id,
-            trial_id=mobile_trial_id(existing.id),
+            trial_id=(
+                mobile_trial_id(existing.id)
+                if plan is not None and plan.code.startswith("mobile-trial-")
+                else None
+            ),
             access_token=token,
             expires_at=existing.expires_at,
         )
@@ -443,6 +449,67 @@ async def activate_trial(data: TrialActivate, db: AsyncSession = Depends(get_db)
         access_token=token,
         expires_at=device.expires_at,
     )
+
+
+@router.post("/import")
+async def import_subscription_for_device(
+    data: SubscriptionImport,
+    principal: DevicePrincipal = Depends(require_device),
+    db: AsyncSession = Depends(get_db),
+):
+    """Attach a signed provider subscription link to the current device.
+
+    A mobile trial uses a synthetic user until the owner opens a signed
+    subscription link. The link proves access to the target VPN client; the
+    existing device bearer proves which installed app is being upgraded.
+    Keeping the device row and token lets the client refresh its profile
+    without exposing a service credential.
+    """
+
+    client_id = verify_incy_subscription_token(data.token)
+    if client_id is None:
+        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
+    result = await db.execute(
+        select(VPNClient, Subscription)
+        .join(Subscription, Subscription.id == VPNClient.subscription_id)
+        .where(VPNClient.id == client_id)
+    )
+    row = result.first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Subscription client not found")
+    client, subscription = row
+    now = datetime.now(timezone.utc)
+    if (
+        subscription.status != "active"
+        or aware(subscription.expires_at) <= now
+        or client.status != "active"
+        or aware(client.expires_at) <= now
+    ):
+        raise HTTPException(status_code=410, detail="Subscription is no longer active")
+    device = await db.get(ClientDevice, principal.device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    device.user_id = client.user_id
+    device.status = "active"
+    device.revoked_at = None
+    device.expires_at = min(aware(subscription.expires_at), aware(client.expires_at))
+    device.last_seen_at = now
+    await db.commit()
+    await write_audit(
+        db,
+        action="device.subscription.import",
+        result="success",
+        actor_type="device",
+        actor_id=f"device-{device.id}",
+        resource_type="subscription",
+        resource_id=subscription.id,
+        details={"client_id": client.id, "subscription_id": subscription.id},
+    )
+    return {
+        "device_id": device.id,
+        "subscription_id": subscription.id,
+        "expires_at": device.expires_at,
+    }
 
 
 @router.get("/profile", response_model=ClientProfileResponse)
