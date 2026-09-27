@@ -352,7 +352,11 @@ def active_vpn_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def vpn_key_copy_keyboard(client_id: int, incy_import_url: str = "") -> InlineKeyboardMarkup:
+def vpn_key_copy_keyboard(
+    client_id: int,
+    freevpn_import_url: str = "",
+    incy_import_url: str = "",
+) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -361,7 +365,14 @@ def vpn_key_copy_keyboard(client_id: int, incy_import_url: str = "") -> InlineKe
             )
         ],
     ]
-    if incy_import_url:
+    if freevpn_import_url:
+        rows.append([
+            InlineKeyboardButton(
+                text="📲 Импортировать в Freedom VPN",
+                url=freevpn_import_url,
+            )
+        ])
+    elif incy_import_url:
         rows.append([
             InlineKeyboardButton(
                 text="📲 Импортировать в INCY",
@@ -884,6 +895,8 @@ async def send_key_message(message: Message, client_id: int) -> None:
         parse_mode="HTML",
         reply_markup=vpn_key_copy_keyboard(
             client_id,
+            data.get("freevpn_telegram_import_url")
+            or data.get("freevpn_import_url", ""),
             data.get("incy_telegram_import_url") or data.get("incy_import_url", ""),
         ),
     )

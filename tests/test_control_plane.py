@@ -1499,6 +1499,24 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn("/v1/client/subscription/", response.text)
         self.assertIn("Открыть в INCY", response.text)
 
+    async def test_freevpn_import_bridge_exposes_custom_scheme(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            token = incy_subscription_token(client.id, client.expires_at)
+
+        response = await self.client.get(f"/v1/client/freevpn-import/{token}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("intent://import/", response.text)
+        self.assertIn("freevpn://import/", response.text)
+        self.assertIn("/v1/client/subscription/", response.text)
+        self.assertIn("Открыть в Freedom VPN", response.text)
+
+    async def test_freevpn_import_bridge_rejects_invalid_token(self) -> None:
+        response = await self.client.get("/v1/client/freevpn-import/not-a-token")
+
+        self.assertEqual(404, response.status_code)
+
     async def test_incy_subscription_returns_utf8_metadata_and_vless(self) -> None:
         async with self.session_factory() as db:
             client = await db.get(VPNClient, self.client_id)

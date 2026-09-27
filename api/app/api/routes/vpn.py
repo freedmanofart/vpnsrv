@@ -34,6 +34,7 @@ from app.services.node_health import effective_node_health, node_accepts_clients
 from app.services.country import country_from_ip
 from app.services.vless import build_vless_url
 from app.services.incy import build_incy_import_link
+from app.services.freevpn import build_freevpn_import_link
 from app.core.cabinet_links import incy_subscription_token
 
 router = APIRouter(
@@ -787,6 +788,15 @@ async def get_vpn_client_config(
         incy_import_url=build_incy_import_link(subscription_url),
         incy_telegram_import_url=(
             f"{settings.public_base_url.rstrip('/')}/v1/client/import/"
+            f"{subscription_token}"
+        ),
+        # The signed subscription URL is app-agnostic.  INCY and Freedom VPN
+        # receive different import schemes while sharing the same revocation
+        # and expiry checks in /v1/client/subscription/{token}.
+        freevpn_subscription_url=subscription_url,
+        freevpn_import_url=build_freevpn_import_link(subscription_url),
+        freevpn_telegram_import_url=(
+            f"{settings.public_base_url.rstrip('/')}/v1/client/freevpn-import/"
             f"{subscription_token}"
         ),
     )

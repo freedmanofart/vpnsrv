@@ -41,6 +41,7 @@ from app.services.provider_codes import issue_provider_code
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
 from app.services.vless import build_vless_url
 from app.services.incy import build_incy_import_link
+from app.services.freevpn import build_freevpn_import_link
 from app.core.config import settings
 from app.core.cabinet_links import verify_incy_subscription_token
 
@@ -691,6 +692,55 @@ async def incy_import_redirect(token: str):
     <p>Нажмите кнопку, чтобы открыть конфигурацию в установленном приложении INCY.</p>
     <a href="{html.escape(android_intent, quote=True)}">Открыть в INCY</a>
     <a class="fallback" href="{html.escape(deep_link, quote=True)}">Открыть обычной ссылкой</a>
+  </main>
+</body>
+</html>""",
+        status_code=status.HTTP_200_OK,
+        headers={"cache-control": "no-store"},
+    )
+
+
+@router.get("/freevpn-import/{token}", include_in_schema=False)
+async def freevpn_import_redirect(token: str):
+    """Bridge an HTTPS Telegram/site click to the Freedom VPN deep link."""
+
+    if verify_incy_subscription_token(token) is None:
+        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
+
+    subscription_url = (
+        f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
+        f"{token}"
+    )
+    deep_link = build_freevpn_import_link(subscription_url)
+    encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
+    android_intent = (
+        f"intent://import/{encoded_subscription_url}"
+        "#Intent;scheme=freevpn;end"
+    )
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Импорт в Freedom VPN</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #061936; color: #f4f7fb; font: 16px system-ui, sans-serif; }}
+    main {{ width: min(420px, calc(100% - 40px)); text-align: center; }}
+    h1 {{ margin: 0 0 12px; font-size: 28px; }}
+    p {{ color: #b9c5d2; line-height: 1.5; }}
+    a {{ display: block; margin-top: 20px; padding: 15px 20px; border-radius: 12px; background: #28dfb0; color: #05203a; font-weight: 700; text-decoration: none; }}
+    .fallback {{ margin-top: 14px; padding: 0; background: transparent; color: #8fcaff; font-weight: 500; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Импорт конфигурации</h1>
+    <p>Нажмите кнопку, чтобы открыть подписку в установленном приложении Freedom VPN.</p>
+    <a href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
+    <a class="fallback" href="{html.escape(deep_link, quote=True)}">Открыть обычной ссылкой</a>
+    <a class="fallback" href="{html.escape(subscription_url, quote=True)}">Открыть ссылку подписки</a>
   </main>
 </body>
 </html>""",

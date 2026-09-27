@@ -95,6 +95,9 @@ class VPNClientConfigResponse(BaseModel):
     incy_subscription_url: str | None = None
     incy_import_url: str | None = None
     incy_telegram_import_url: str | None = None
+    freevpn_subscription_url: str | None = None
+    freevpn_import_url: str | None = None
+    freevpn_telegram_import_url: str | None = None
 
 
 class VPNNodeHealthResponse(BaseModel):

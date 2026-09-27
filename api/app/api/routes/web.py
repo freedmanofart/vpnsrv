@@ -886,6 +886,7 @@ async def cabinet(
     client = None
     vpn_uri = ""
     incy_import_url = ""
+    freevpn_import_url = ""
     node = None
     if subscription:
         client = (await db.execute(select(VPNClient).where(VPNClient.subscription_id == subscription.id, VPNClient.status == "active").order_by(VPNClient.id.desc()))).scalars().first()
@@ -899,6 +900,10 @@ async def cabinet(
             # can hand off the redirect to INCY reliably; a direct `incy://`
             # link can be parsed as a malformed certificate/URL by the app.
             incy_import_url = f"{settings.public_base_url.rstrip('/')}/v1/client/import/{subscription_token}"
+            freevpn_import_url = (
+                f"{settings.public_base_url.rstrip('/')}/v1/client/freevpn-import/"
+                f"{subscription_token}"
+            )
     traffic_remaining_bytes = None
     traffic_limit_bytes = None
     traffic_used_bytes = None
@@ -987,6 +992,7 @@ async def cabinet(
             '<button class="button copy-button" type="button" onclick="copyKey(this)" aria-label="Скопировать VPN-ключ"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>Копировать ключ</button>'
             '</div>'
             f'<a class="pay-button incy-import-button" href="{html.escape(incy_import_url, quote=True)}">Импортировать в INCY</a>'
+            f'<a class="pay-button freevpn-import-button" href="{html.escape(freevpn_import_url, quote=True)}">Импортировать в Freedom VPN</a>'
         )
     body = f"""
 <div class="cabinet-page">
