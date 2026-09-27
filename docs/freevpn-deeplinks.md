@@ -58,12 +58,10 @@ InlineKeyboardButton(
 ```
 
 Telegram открывает HTTPS-переходник `/v1/client/freevpn-import/{token}`. Страница
-показывает явную кнопку `Открыть в Freedom VPN` с адресом `intent://...` и
-резервную ссылку `freevpn://...`; рядом остаётся обычная ссылка подписки.
-Автоматическая навигация на `intent://` не используется: некоторые WebView
-трактуют её как файл и показывают `Файл не найден`. Прямой custom-scheme URL в
-кнопку Telegram помещать не следует: WebView может вернуть
-`ERR_UNKNOWN_URL_SCHEME`.
+автоматически нажимает кнопку `Открыть в Freedom VPN` с адресом `intent://...`.
+Эта же кнопка остаётся на странице как ручной fallback, если WebView блокирует
+автоматический запуск. Прямой custom-scheme URL в кнопку Telegram помещать не
+следует: WebView может вернуть `ERR_UNKNOWN_URL_SCHEME`.
 
 Для Android-кнопки переходник использует `intent://` с package приложения:
 
@@ -142,9 +140,9 @@ curl -i "$PUBLIC_BASE_URL/v1/client/subscription/$SIGNED_TOKEN"
 
 Проверьте, что:
 
-- bridge отвечает `200` и содержит `freevpn://import/`;
+- bridge отвечает `200`, содержит `intent://import/` и автоматически запускает
+  кнопку `Открыть в Freedom VPN`;
 - endpoint подписки отвечает `200` только для активного клиента;
 - после отзыва клиента оба endpoint отвечают `404`;
-- Telegram использует HTTPS bridge, а сайт может использовать bridge или прямой
-  `freevpn://` URL;
+- Telegram и сайт используют HTTPS bridge;
 - в логах нет полного токена и содержимого VPN-конфигурации.

@@ -1584,10 +1584,13 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             "category=android.intent.category.BROWSABLE",
             response.text,
         )
-        self.assertIn("freevpn://import/", response.text)
         self.assertIn("/v1/client/subscription/", response.text)
         self.assertNotIn("window.location.href", response.text)
         self.assertIn("Открыть в Freedom VPN", response.text)
+        self.assertIn('id="open-freedom-vpn"', response.text)
+        self.assertIn('document.getElementById("open-freedom-vpn").click()', response.text)
+        self.assertNotIn("Открыть обычной ссылкой", response.text)
+        self.assertNotIn("Открыть ссылку подписки", response.text)
 
     async def test_freevpn_import_bridge_rejects_invalid_token(self) -> None:
         response = await self.client.get("/v1/client/freevpn-import/not-a-token")

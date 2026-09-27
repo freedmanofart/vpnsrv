@@ -42,7 +42,6 @@ from app.services.provider_codes import issue_provider_code
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
 from app.services.vless import build_vless_url
 from app.services.incy import build_incy_import_link
-from app.services.freevpn import build_freevpn_import_link
 from app.core.config import settings
 from app.core.cabinet_links import verify_incy_subscription_token
 
@@ -789,7 +788,6 @@ async def freevpn_import_redirect(token: str):
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
         f"{token}"
     )
-    deep_link = build_freevpn_import_link(subscription_url)
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
@@ -810,17 +808,21 @@ async def freevpn_import_redirect(token: str):
     h1 {{ margin: 0 0 12px; font-size: 28px; }}
     p {{ color: #b9c5d2; line-height: 1.5; }}
     a {{ display: block; margin-top: 20px; padding: 15px 20px; border-radius: 12px; background: #28dfb0; color: #05203a; font-weight: 700; text-decoration: none; }}
-    .fallback {{ margin-top: 14px; padding: 0; background: transparent; color: #8fcaff; font-weight: 500; }}
   </style>
 </head>
 <body>
   <main>
     <h1>Импорт конфигурации</h1>
     <p>Нажмите кнопку, чтобы открыть подписку в установленном приложении Freedom VPN.</p>
-    <a href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
-    <a class="fallback" href="{html.escape(deep_link, quote=True)}">Открыть обычной ссылкой</a>
-    <a class="fallback" href="{html.escape(subscription_url, quote=True)}">Открыть ссылку подписки</a>
+    <a id="open-freedom-vpn" href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
   </main>
+  <script>
+    window.addEventListener("load", function () {{
+      window.setTimeout(function () {{
+        document.getElementById("open-freedom-vpn").click();
+      }}, 100);
+    }});
+  </script>
 </body>
 </html>""",
         status_code=status.HTTP_200_OK,
