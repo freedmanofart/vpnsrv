@@ -39,6 +39,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     BufferedInputFile,
     BotCommand,
     LabeledPrice,
@@ -1438,6 +1439,10 @@ async def reply_plan_handler(message: Message, state: FSMContext):
         f"Тариф: <b>{html.escape(plan['name'])}</b>\n"
         f"Стоимость: <b>{plan['price']} {plan['currency']}</b>",
         parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await message.answer(
+        "Выберите способ оплаты:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
