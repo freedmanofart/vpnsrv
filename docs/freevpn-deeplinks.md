@@ -66,7 +66,7 @@ Telegram открывает HTTPS-переходник `/v1/client/freevpn-impor
 Для Android-кнопки переходник использует `intent://` с package приложения:
 
 ```text
-intent://import/<subscription-url>#Intent;scheme=freevpn;package=org.amnezia.vpn;end
+intent://import/<subscription-url>#Intent;scheme=freevpn;package=org.freedomvpn.app;end
 ```
 
 Указание package помогает Telegram WebView однозначно передать ссылку Freedom VPN.
