@@ -1541,6 +1541,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn("intent://import/", response.text)
+        self.assertIn("scheme=freevpn;package=org.freedomvpn.app", response.text)
         self.assertIn("freevpn://import/", response.text)
         self.assertIn("/v1/client/subscription/", response.text)
         self.assertIn("Открыть в Freedom VPN", response.text)

@@ -726,7 +726,7 @@ async def freevpn_import_redirect(token: str):
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
-        "#Intent;scheme=freevpn;end"
+        "#Intent;scheme=freevpn;package=org.freedomvpn.app;end"
     )
     return HTMLResponse(
         content=f"""<!doctype html>
