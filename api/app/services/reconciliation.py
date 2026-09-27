@@ -112,7 +112,23 @@ async def reconcile_node(
             )
             report.restored += 1
         except ThreeXUIClientAlreadyExists:
-            report.present += 1
+            # The panel may not have returned this user in the list because of
+            # a stale cache, while add still sees the existing UUID/email.
+            # Update it immediately so a trial quota/expiry cannot remain
+            # stale until the next reconciliation cycle.
+            try:
+                await xray.update_vless_user(
+                    inbound_tag=inbound_tag,
+                    client_uuid=client.client_uuid,
+                    email=email,
+                    flow=client.flow,
+                    expiry_time=int(client.expires_at.timestamp() * 1000),
+                    limit_ip=client.max_connections,
+                    total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
+                )
+                report.present += 1
+            except ThreeXUIError:
+                report.errors += 1
         except ThreeXUIError:
             report.errors += 1
 

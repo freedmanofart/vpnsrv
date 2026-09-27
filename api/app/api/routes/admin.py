@@ -1572,7 +1572,7 @@ async def capture_debug_snapshot(
 async def _mobile_trial_context(
     db: AsyncSession,
     device_id: int,
-) -> tuple[ClientDevice, User, Subscription, Plan, VPNClient]:
+) -> tuple[ClientDevice, User, Subscription, Plan, list[VPNClient]]:
     device = await db.get(ClientDevice, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -1593,15 +1593,18 @@ async def _mobile_trial_context(
     if row is None:
         raise HTTPException(status_code=404, detail="Mobile trial not found")
     subscription, plan = row
-    client = await db.scalar(
-        select(VPNClient)
-        .where(VPNClient.subscription_id == subscription.id)
-        .order_by(VPNClient.id.desc())
-        .limit(1)
+    clients = list(
+        (
+            await db.execute(
+                select(VPNClient)
+                .where(VPNClient.subscription_id == subscription.id)
+                .order_by(VPNClient.id.asc())
+            )
+        ).scalars()
     )
-    if client is None:
+    if not clients:
         raise HTTPException(status_code=404, detail="Mobile trial VPN client not found")
-    return device, user, subscription, plan, client
+    return device, user, subscription, plan, clients
 
 
 async def _sync_mobile_trial_client(
@@ -1642,7 +1645,12 @@ async def _sync_mobile_trial_client(
             await panel.add_vless_user(**payload)
             return "restored"
         except ThreeXUIClientAlreadyExists:
-            return "present"
+            # A panel can report a stale index: update says that the client is
+            # missing while add says that the UUID/email already exists. Retry
+            # the update so an existing panel record cannot keep an old quota
+            # or expiry after a mobile trial refresh.
+            await panel.update_vless_user(**payload)
+            return "updated-after-race"
         except ThreeXUIError:
             raise
 
@@ -1653,7 +1661,7 @@ async def refresh_mobile_trial(
     principal: APIPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    device, user, subscription, plan, client = await _mobile_trial_context(db, device_id)
+    device, user, subscription, plan, clients = await _mobile_trial_context(db, device_id)
     other_active = await db.scalar(
         select(Subscription.id).where(
             Subscription.user_id == user.id,
@@ -1680,15 +1688,23 @@ async def refresh_mobile_trial(
     subscription.starts_at = now
     subscription.expires_at = expires_at
     subscription.traffic_limit_bytes = traffic_bytes if traffic_bytes > 0 else None
-    client.status = "active"
-    client.revoked_at = None
-    client.expires_at = expires_at
-    client.traffic_limit_gb = traffic_gb
+    for client in clients:
+        client.status = "active"
+        client.revoked_at = None
+        client.expires_at = expires_at
+        client.traffic_limit_gb = traffic_gb
     device.status = "active"
     device.revoked_at = None
     device.expires_at = expires_at
+    panel_results = []
     try:
-        panel_result = await _sync_mobile_trial_client(db, user, client, expires_at)
+        for client in clients:
+            panel_results.append(
+                {
+                    "client_id": client.id,
+                    "result": await _sync_mobile_trial_client(db, user, client, expires_at),
+                }
+            )
     except (HTTPException, ThreeXUIError) as exc:
         await db.rollback()
         if isinstance(exc, HTTPException):
@@ -1703,12 +1719,11 @@ async def refresh_mobile_trial(
         actor_id=principal.name,
         resource_type="client_device",
         resource_id=device.id,
-        node_id=client.node_id,
         details={
             "trial_id": f"trial-{device.id}",
             "subscription_id": subscription.id,
-            "client_id": client.id,
-            "panel": panel_result,
+            "client_ids": [client.id for client in clients],
+            "panel": panel_results,
             "expires_at": expires_at.isoformat(),
         },
     )
@@ -1716,9 +1731,10 @@ async def refresh_mobile_trial(
         "device_id": device.id,
         "trial_id": f"trial-{device.id}",
         "subscription_id": subscription.id,
-        "client_id": client.id,
+        "client_id": clients[0].id,
+        "client_ids": [client.id for client in clients],
         "expires_at": expires_at,
-        "panel": panel_result,
+        "panel": panel_results,
     }
 
 
@@ -1728,7 +1744,7 @@ async def revoke_mobile_trial(
     principal: APIPrincipal = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    device, user, subscription, _plan, _client = await _mobile_trial_context(db, device_id)
+    device, user, subscription, _plan, _clients = await _mobile_trial_context(db, device_id)
     now = datetime.now(timezone.utc)
     clients = list(
         (

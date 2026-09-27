@@ -58,15 +58,16 @@ InlineKeyboardButton(
 ```
 
 Telegram открывает HTTPS-переходник `/v1/client/freevpn-import/{token}`. Страница
-показывает явную кнопку `Открыть в Freedom VPN` с адресом `freevpn://...` и
-обычную ссылку подписки для резервного сценария. Прямой custom-scheme URL в
+пытается автоматически открыть приложение и также показывает явную кнопку
+`Открыть в Freedom VPN` с адресом `freevpn://...`; рядом остаётся обычная ссылка
+подписки для резервного сценария. Прямой custom-scheme URL в
 кнопку Telegram помещать не следует: WebView может вернуть
 `ERR_UNKNOWN_URL_SCHEME`.
 
 Для Android-кнопки переходник использует `intent://` с package приложения:
 
 ```text
-intent://import/<subscription-url>#Intent;scheme=freevpn;package=org.freedomvpn.app;end
+intent://import/<subscription-url>#Intent;scheme=freevpn;package=org.freedomvpn.app;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end
 ```
 
 Указание package помогает Telegram WebView однозначно передать ссылку Freedom VPN.

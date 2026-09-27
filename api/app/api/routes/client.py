@@ -1,5 +1,6 @@
 import secrets
 import html
+import json
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -726,8 +727,10 @@ async def freevpn_import_redirect(token: str):
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
-        "#Intent;scheme=freevpn;package=org.freedomvpn.app;end"
+        "#Intent;scheme=freevpn;package=org.freedomvpn.app;"
+        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end"
     )
+    android_intent_js = json.dumps(android_intent)
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru">
@@ -753,6 +756,9 @@ async def freevpn_import_redirect(token: str):
     <a class="fallback" href="{html.escape(deep_link, quote=True)}">Открыть обычной ссылкой</a>
     <a class="fallback" href="{html.escape(subscription_url, quote=True)}">Открыть ссылку подписки</a>
   </main>
+  <script>
+    window.setTimeout(function () {{ window.location.href = {android_intent_js}; }}, 150);
+  </script>
 </body>
 </html>""",
         status_code=status.HTTP_200_OK,

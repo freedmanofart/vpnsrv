@@ -1505,6 +1505,27 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             )
         self.assertEqual(200, refreshed.status_code, refreshed.text)
         self.assertEqual(f"trial-{trial_device_id}", refreshed.json()["trial_id"])
+        self.assertEqual(2, len(refreshed.json()["client_ids"]))
+        async with self.session_factory() as db:
+            refreshed_clients = list(
+                (
+                    await db.execute(
+                        select(VPNClient)
+                        .where(VPNClient.subscription_id == refreshed.json()["subscription_id"])
+                        .order_by(VPNClient.id.asc())
+                    )
+                ).scalars()
+            )
+            self.assertEqual(2, len(refreshed_clients))
+            self.assertTrue(all(client.status == "active" for client in refreshed_clients))
+            self.assertTrue(all(client.traffic_limit_gb == 3 for client in refreshed_clients))
+            refreshed_expiry = datetime.fromisoformat(
+                refreshed.json()["expires_at"].replace("Z", "+00:00")
+            )
+            self.assertEqual(
+                refreshed_expiry.replace(tzinfo=None),
+                refreshed_clients[0].expires_at.replace(tzinfo=None),
+            )
 
         with patch("app.api.routes.admin.ThreeXUIClient") as admin_panel:
             admin_panel.return_value.remove_vless_user = AsyncMock()
@@ -1541,9 +1562,14 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn("intent://import/", response.text)
-        self.assertIn("scheme=freevpn;package=org.freedomvpn.app", response.text)
+        self.assertIn(
+            "scheme=freevpn;package=org.freedomvpn.app;action=android.intent.action.VIEW;"
+            "category=android.intent.category.BROWSABLE",
+            response.text,
+        )
         self.assertIn("freevpn://import/", response.text)
         self.assertIn("/v1/client/subscription/", response.text)
+        self.assertIn("window.location.href", response.text)
         self.assertIn("Открыть в Freedom VPN", response.text)
 
     async def test_freevpn_import_bridge_rejects_invalid_token(self) -> None:
