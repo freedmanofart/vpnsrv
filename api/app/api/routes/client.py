@@ -60,6 +60,10 @@ def aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
+def mobile_trial_id(device_id: int) -> str:
+    return f"trial-{device_id}"
+
+
 def incy_metadata_header(value: str) -> str:
     """Encode non-ASCII INCY metadata for HTTP headers."""
 
@@ -295,6 +299,7 @@ async def activate_trial(data: TrialActivate, db: AsyncSession = Depends(get_db)
         await db.commit()
         return DeviceTokenResponse(
             device_id=existing.id,
+            trial_id=mobile_trial_id(existing.id),
             access_token=token,
             expires_at=existing.expires_at,
         )
@@ -434,6 +439,7 @@ async def activate_trial(data: TrialActivate, db: AsyncSession = Depends(get_db)
     )
     return DeviceTokenResponse(
         device_id=device.id,
+        trial_id=mobile_trial_id(device.id),
         access_token=token,
         expires_at=device.expires_at,
     )
@@ -520,6 +526,11 @@ async def client_profile(
     )
     return ClientProfileResponse(
         device_id=principal.device_id,
+        trial_id=(
+            mobile_trial_id(principal.device_id)
+            if plan is not None and plan.code.startswith("mobile-trial-")
+            else None
+        ),
         user_id=principal.user_id,
         subscription_id=subscription.id,
         expires_at=subscription.expires_at,
@@ -761,6 +772,7 @@ async def refresh_device_token(
     subscription = await active_subscription_for_user(db, device.user_id, now)
     if subscription is None:
         raise HTTPException(status_code=403, detail="No active subscription")
+    plan = await db.get(Plan, subscription.plan_id)
     token = generate_scoped_token("device", device.user_id)
     device.token_hash = token_hash(token)
     device.token_prefix = token.split(".", 1)[0]
@@ -770,4 +782,9 @@ async def refresh_device_token(
         device_id=device.id,
         access_token=token,
         expires_at=device.expires_at,
+        trial_id=(
+            mobile_trial_id(device.id)
+            if plan is not None and plan.code.startswith("mobile-trial-")
+            else None
+        ),
     )

@@ -30,6 +30,7 @@ class DeviceTokenResponse(BaseModel):
     device_id: int
     access_token: str
     expires_at: datetime
+    trial_id: str | None = None
 
 
 class ClientProfileNode(BaseModel):
@@ -70,6 +71,7 @@ class ClientProfileResponse(BaseModel):
     user_id: int
     subscription_id: int
     expires_at: datetime
+    trial_id: str | None = None
     provider: ClientProviderInfo
     provider_name: str
     plan_name: str

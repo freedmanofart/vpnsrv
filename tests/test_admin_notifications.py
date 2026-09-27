@@ -174,4 +174,7 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
             self.assertIn("/v1/client/import/", text)
             self.assertIn("Импортировать конфигурацию в INCY", text)
             self.assertIn("Откройте ссылку на устройстве с установленным INCY", text)
+            self.assertIn("/v1/client/freevpn-import/", text)
+            self.assertIn("Импортировать конфигурацию в Freedom VPN", text)
+            self.assertIn("Откройте ссылку на устройстве с установленным Freedom VPN", text)
             self.assertIn("Из-за блокировок РКН", text)

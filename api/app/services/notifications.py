@@ -63,6 +63,13 @@ def _incy_import_url(client: VPNClient | None) -> str | None:
     return f"{settings.public_base_url.rstrip('/')}/v1/client/import/{token}"
 
 
+def _freevpn_import_url(client: VPNClient | None) -> str | None:
+    if client is None or client.status != "active":
+        return None
+    token = incy_subscription_token(client.id, client.expires_at)
+    return f"{settings.public_base_url.rstrip('/')}/v1/client/freevpn-import/{token}"
+
+
 async def _telegram_destinations(db: AsyncSession) -> list[int | str]:
     contacts = await get_admin_contacts(db)
     destinations: list[int | str] = []
@@ -369,6 +376,7 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
             )
         )
     incy_import_url = _incy_import_url(client)
+    freevpn_import_url = _freevpn_import_url(client)
     card = await _payment_card(db, payment, title="✅ Оплата Freedom VPN подтверждена")
     await _send_telegram_message(db, card)
     await _send_email(db, f"Оплата Freedom VPN подтверждена #{payment.id}", card)
@@ -383,6 +391,14 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
                 "\n\n📲 Импортировать конфигурацию в INCY:\n"
                 f"{incy_import_url}\n"
                 "Откройте ссылку на устройстве с установленным INCY.\n"
+                "⚠️ Из-за блокировок РКН наш сервис может работать нестабильно."
+            )
+        freevpn_text = ""
+        if freevpn_import_url:
+            freevpn_text = (
+                "\n\n📲 Импортировать конфигурацию в Freedom VPN:\n"
+                f"{freevpn_import_url}\n"
+                "Откройте ссылку на устройстве с установленным Freedom VPN.\n"
                 "⚠️ Из-за блокировок РКН наш сервис может работать нестабильно."
             )
         provider_code_text = ""
@@ -419,6 +435,7 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
             f"{expires}\n\n"
             f"{provider_code_text}"
             f"{incy_text}"
+            f"{freevpn_text}"
             "\n\n"
             f"Web-кабинет: {_user_cabinet_url(user)}\n"
             f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}\n\n"

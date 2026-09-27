@@ -41,7 +41,12 @@ from app.services.audit import write_audit
 from app.services.admin_settings import get_admin_contacts, set_admin_contacts
 from app.services.node_health import node_accepts_clients
 from app.services.vless import build_vless_url
-from app.services.threexui import ThreeXUIClient, ThreeXUIError, ThreeXUIClientNotFound
+from app.services.threexui import (
+    ThreeXUIClient,
+    ThreeXUIError,
+    ThreeXUIClientAlreadyExists,
+    ThreeXUIClientNotFound,
+)
 from app.services.payments import PaymentError, process_payment_event
 from app.services.notifications import notify_payment_paid
 from app.services.provider_codes import issue_provider_code
@@ -686,9 +691,20 @@ async def overview(db: AsyncSession = Depends(get_db)):
         if item.status in {"active", "disabled"}:
             subscription_map.setdefault(item.user_id, item)
     client_map = {}
+    all_client_map = {}
     for item in clients:
+        all_client_map.setdefault(item.subscription_id, item)
         if item.status in {"active", "disabled"}:
             client_map.setdefault(item.subscription_id, item)
+    trial_subscription_map = {}
+    for item in subscriptions:
+        plan = plan_map.get(item.plan_id)
+        if plan and plan.code.startswith("mobile-trial-"):
+            trial_subscription_map.setdefault(item.user_id, item)
+    trial_client_map = {
+        subscription_id: all_client_map.get(subscription_id)
+        for subscription_id in {item.id for item in trial_subscription_map.values()}
+    }
     paid_trial_map = {}
     for grant in paid_trial_grants:
         paid_trial_map.setdefault(grant.user_id, grant)
@@ -739,6 +755,30 @@ async def overview(db: AsyncSession = Depends(get_db)):
                 "last_ip": client.last_ip if client else None,
             }
         )
+
+    def device_row(device: ClientDevice) -> dict:
+        subscription = trial_subscription_map.get(device.user_id)
+        plan = plan_map.get(subscription.plan_id) if subscription else None
+        client = trial_client_map.get(subscription.id) if subscription else None
+        is_trial = bool(subscription and plan and plan.code.startswith("mobile-trial-"))
+        return {
+            "id": device.id,
+            "user_id": device.user_id,
+            "name": device.name,
+            "platform": device.platform,
+            "status": device.status,
+            "last_seen_at": device.last_seen_at,
+            "expires_at": device.expires_at,
+            "trial": is_trial,
+            "trial_id": f"trial-{device.id}" if is_trial else None,
+            "trial_subscription_id": subscription.id if is_trial else None,
+            "trial_subscription_status": subscription.status if is_trial else None,
+            "trial_plan": plan.code if is_trial else None,
+            "trial_client_id": client.id if is_trial and client else None,
+            "trial_client_status": client.status if is_trial and client else None,
+            "trial_node_id": client.node_id if is_trial and client else None,
+        }
+
     return {
         "admin_contacts": {
             "admin_notification_email": admin_contacts.admin_notification_email,
@@ -753,7 +793,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "clients": [{"id": x.id, "user_id": x.user_id, "subscription_id": x.subscription_id, "node_id": x.node_id, "client_type": x.client_type, "flow": x.flow, "max_connections": x.max_connections, "status": x.status, "expires_at": x.expires_at, "last_connected_at": x.last_connected_at, "last_ip": x.last_ip, "link_overridden": bool(x.config_override)} for x in clients],
         "payments": [{"id": x.id, "user_id": x.user_id, "provider": x.provider, "amount": str(x.amount), "currency": x.currency, "status": x.status, "subscription_id": x.subscription_id, "has_receipt": x.receipt_data is not None, "receipt_url": f"/admin/payments/{x.id}/receipt" if x.receipt_data is not None else None, "receipt_filename": x.receipt_filename, "receipt_mime_type": x.receipt_mime_type, "details": x.details, "created_at": x.created_at} for x in payments],
         "payment_methods": [{"id": x.id, "code": x.code, "name": x.name, "url": x.url, "sort_order": x.sort_order, "is_active": x.is_active, "has_image": x.image_data is not None} for x in sorted(payment_methods, key=lambda item: (item.sort_order, item.id))],
-        "devices": [{"id": x.id, "user_id": x.user_id, "name": x.name, "platform": x.platform, "status": x.status, "last_seen_at": x.last_seen_at, "expires_at": x.expires_at} for x in devices],
+        "devices": [device_row(x) for x in devices],
         "provider_codes": [
             {
                 "id": x.id,
@@ -1529,6 +1569,231 @@ async def capture_debug_snapshot(
     return {"audit_log_id": entry.id, "sensitive": entry.sensitive}
 
 
+async def _mobile_trial_context(
+    db: AsyncSession,
+    device_id: int,
+) -> tuple[ClientDevice, User, Subscription, Plan, VPNClient]:
+    device = await db.get(ClientDevice, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    user = await db.get(User, device.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Device owner not found")
+    result = await db.execute(
+        select(Subscription, Plan)
+        .join(Plan, Plan.id == Subscription.plan_id)
+        .where(
+            Subscription.user_id == device.user_id,
+            Plan.code.like("mobile-trial-%"),
+        )
+        .order_by(Subscription.id.desc())
+        .limit(1)
+    )
+    row = result.first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Mobile trial not found")
+    subscription, plan = row
+    client = await db.scalar(
+        select(VPNClient)
+        .where(VPNClient.subscription_id == subscription.id)
+        .order_by(VPNClient.id.desc())
+        .limit(1)
+    )
+    if client is None:
+        raise HTTPException(status_code=404, detail="Mobile trial VPN client not found")
+    return device, user, subscription, plan, client
+
+
+async def _sync_mobile_trial_client(
+    db: AsyncSession,
+    user: User,
+    client: VPNClient,
+    expires_at: datetime,
+) -> str:
+    if client.protocol != "vless":
+        return "database-only"
+    config_result = await db.execute(
+        select(VPNNodeConfig).where(
+            VPNNodeConfig.node_id == client.node_id,
+            VPNNodeConfig.protocol == client.protocol,
+        )
+    )
+    node_config = config_result.scalar_one_or_none()
+    if node_config is None or not node_config.config.get("api_address"):
+        raise HTTPException(status_code=503, detail="Mobile trial node has no 3x-ui configuration")
+    panel = ThreeXUIClient(address=node_config.config["api_address"])
+    inbound_tag = str(node_config.config.get("inbound_tag", ""))
+    email = f"vpn-{client.id}"
+    payload = {
+        "inbound_tag": inbound_tag,
+        "client_uuid": client.client_uuid,
+        "email": email,
+        "flow": client.flow,
+        "expiry_time": int(expires_at.timestamp() * 1000),
+        "telegram_id": user.telegram_id,
+        "limit_ip": client.max_connections,
+        "total_gb": client.traffic_limit_gb * 1024**3,
+    }
+    try:
+        await panel.update_vless_user(**payload)
+        return "updated"
+    except ThreeXUIClientNotFound:
+        try:
+            await panel.add_vless_user(**payload)
+            return "restored"
+        except ThreeXUIClientAlreadyExists:
+            return "present"
+        except ThreeXUIError:
+            raise
+
+
+@router.post("/devices/{device_id}/trial/refresh", dependencies=[Depends(require_admin)])
+async def refresh_mobile_trial(
+    device_id: int,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    device, user, subscription, plan, client = await _mobile_trial_context(db, device_id)
+    other_active = await db.scalar(
+        select(Subscription.id).where(
+            Subscription.user_id == user.id,
+            Subscription.status == "active",
+            Subscription.id != subscription.id,
+        ).limit(1)
+    )
+    if other_active is not None:
+        raise HTTPException(status_code=409, detail="У пользователя уже есть другая активная подписка")
+
+    now = datetime.now(timezone.utc)
+    trial_days = settings.client_trial_days
+    traffic_bytes = settings.client_trial_traffic_limit_bytes
+    traffic_gb = (
+        (traffic_bytes + 1024**3 - 1) // 1024**3
+        if traffic_bytes > 0
+        else 0
+    )
+    expires_at = now + timedelta(days=trial_days)
+    plan.duration_days = trial_days
+    plan.traffic_limit_gb = traffic_gb
+    plan.name = f"Тестовый доступ на {trial_days} дн."
+    subscription.status = "active"
+    subscription.starts_at = now
+    subscription.expires_at = expires_at
+    subscription.traffic_limit_bytes = traffic_bytes if traffic_bytes > 0 else None
+    client.status = "active"
+    client.revoked_at = None
+    client.expires_at = expires_at
+    client.traffic_limit_gb = traffic_gb
+    device.status = "active"
+    device.revoked_at = None
+    device.expires_at = expires_at
+    try:
+        panel_result = await _sync_mobile_trial_client(db, user, client, expires_at)
+    except (HTTPException, ThreeXUIError) as exc:
+        await db.rollback()
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=502, detail="Не удалось обновить trial-клиента в 3x-ui") from exc
+    await db.commit()
+    await write_audit(
+        db,
+        action="device.trial.refresh",
+        result="success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="client_device",
+        resource_id=device.id,
+        node_id=client.node_id,
+        details={
+            "trial_id": f"trial-{device.id}",
+            "subscription_id": subscription.id,
+            "client_id": client.id,
+            "panel": panel_result,
+            "expires_at": expires_at.isoformat(),
+        },
+    )
+    return {
+        "device_id": device.id,
+        "trial_id": f"trial-{device.id}",
+        "subscription_id": subscription.id,
+        "client_id": client.id,
+        "expires_at": expires_at,
+        "panel": panel_result,
+    }
+
+
+@router.delete("/devices/{device_id}/trial", dependencies=[Depends(require_admin)])
+async def revoke_mobile_trial(
+    device_id: int,
+    principal: APIPrincipal = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    device, user, subscription, _plan, _client = await _mobile_trial_context(db, device_id)
+    now = datetime.now(timezone.utc)
+    clients = list(
+        (
+            await db.execute(
+                select(VPNClient).where(VPNClient.subscription_id == subscription.id)
+            )
+        ).scalars()
+    )
+    panel_errors: list[str] = []
+    removed_from_panel = 0
+    for client in clients:
+        if client.status in {"active", "disabled"} and client.protocol == "vless":
+            config_result = await db.execute(
+                select(VPNNodeConfig).where(
+                    VPNNodeConfig.node_id == client.node_id,
+                    VPNNodeConfig.protocol == client.protocol,
+                )
+            )
+            node_config = config_result.scalar_one_or_none()
+            if node_config and node_config.config.get("api_address"):
+                try:
+                    await ThreeXUIClient(address=node_config.config["api_address"]).remove_vless_user(
+                        inbound_tag=str(node_config.config.get("inbound_tag", "")),
+                        email=f"vpn-{client.id}",
+                    )
+                    removed_from_panel += 1
+                except ThreeXUIClientNotFound:
+                    pass
+                except ThreeXUIError as exc:
+                    panel_errors.append(f"vpn-{client.id}: {exc}")
+        client.status = "revoked"
+        client.revoked_at = now
+        client.expires_at = min(_aware(client.expires_at), now)
+        client.config_override = None
+    subscription.status = "expired"
+    subscription.expires_at = min(_aware(subscription.expires_at), now)
+    device.status = "revoked"
+    device.revoked_at = now
+    device.expires_at = min(_aware(device.expires_at), now)
+    await db.commit()
+    await write_audit(
+        db,
+        action="device.trial.revoke",
+        result="partial" if panel_errors else "success",
+        actor_type="admin",
+        actor_id=principal.name,
+        resource_type="client_device",
+        resource_id=device.id,
+        details={
+            "trial_id": f"trial-{device.id}",
+            "subscription_id": subscription.id,
+            "clients": len(clients),
+            "removed_from_panel": removed_from_panel,
+            "panel_errors": panel_errors,
+        },
+    )
+    return {
+        "device_id": device.id,
+        "trial_id": f"trial-{device.id}",
+        "status": device.status,
+        "removed_from_panel": removed_from_panel,
+        "panel_errors": panel_errors,
+    }
+
+
 @router.delete("/devices/{device_id}", dependencies=[Depends(require_admin)])
 async def revoke_device(
     device_id: int,
@@ -1630,7 +1895,7 @@ ADMIN_HTML = r"""<!doctype html>
 <section id="clients" class="hidden"><h2>VPN-клиенты</h2><div class="table"></div></section>
 <section id="payments" class="hidden"><h2>Платежи</h2><div class="table"></div></section>
 <section id="payment_methods" class="hidden"><h2>Способы оплаты</h2><form onsubmit="createPaymentMethod(event)"><input name="code" placeholder="Код: sber_qr" required><input name="name" placeholder="Название кнопки" required><input name="url" placeholder="Ссылка на QR или реквизиты/телефон"><input name="sort_order" type="number" value="100" required><button>Добавить способ</button></form><p>Для Сбербанка, Т-Банка и перевода по телефону поле URL используется как ссылка на QR или текст реквизитов. Порядок и активность управляют кнопками Telegram.</p><div class="table"></div></section>
-<section id="devices" class="hidden"><h2>Устройства</h2><div class="table"></div></section>
+<section id="devices" class="hidden"><h2>Устройства</h2><p class="muted">Мобильные trial-устройства помечены в таблице. Для них доступны обновление доступа и отзыв с удалением клиентов из 3x-ui.</p><div class="table"></div></section>
 <section id="login_codes" class="hidden"><h2>Коды входа в web-кабинет</h2><p class="bad">Коды дают доступ к аккаунту до истечения срока. Не пересылайте их пользователям в открытых чатах без проверки владельца.</p><div class="table"></div></section>
 <section id="email_logs" class="hidden"><h2>Email-логи</h2><p class="muted">Последние почтовые уведомления: коды входа, рассылки по подпискам, ошибки SMTP и пропуски без email.</p><div class="table"></div></section>
 <section id="settings" class="hidden"><h2>Настройки</h2><p class="muted">Админские контакты для уведомлений о покупках, чеках и важных событиях.</p><form id="adminContactsForm" onsubmit="saveAdminContacts(event)"><label>Email администратора<input name="admin_notification_email" type="email" placeholder="admin@example.com"></label><label>Telegram chat ID администратора<input name="bot_admin_chat_id" type="number" step="1" placeholder="0"></label><button>Сохранить контакты</button></form><p id="settings-result"></p></section>
@@ -1645,7 +1910,7 @@ ADMIN_HTML = r"""<!doctype html>
 <dialog id="accessDialog"><h2>Управление доступом</h2><form id="accessForm" onsubmit="saveAccess(event)"><input name="user_id" type="hidden"><label>Тариф<select name="plan_id" required></select></label><label>VPN-нода<select name="node_id" required></select></label><label>Статус<select name="active"><option value="true">Активен</option><option value="false">Не активен</option></select></label><label>Действует до<input name="expires_at" type="datetime-local" required></label><label class="wide">Выданная VPN-ссылка<textarea name="vpn_link" rows="6" placeholder="Пусто — генерировать автоматически"></textarea></label><div class="wide" id="activityInfo"></div><div class="dialog-actions"><button type="button" class="danger" onclick="resetAccess()">Сбросить план и ссылку</button><button type="button" onclick="document.getElementById('accessDialog').close()">Отмена</button><button>Сохранить</button></div></form></dialog><script>
 let state={};const sections=['health','plan_packages','plans','promo_codes','provider_codes','nodes','users','subscriptions','clients','payments','payment_methods','devices','login_codes','email_logs','settings','docs','scripts','resources','debug','audit'];
 const labels={health:'Health',plan_packages:'Пакеты тарифов',plans:'Тарифы',promo_codes:'Промокоды',provider_codes:'Коды провайдера',nodes:'VPN-ноды',users:'Пользователи',subscriptions:'Подписки',clients:'VPN-клиенты',payments:'Платежи',payment_methods:'Способы оплаты',devices:'Устройства',login_codes:'Коды входа',email_logs:'Email-логи',settings:'Настройки',docs:'Документация',scripts:'Скрипты',resources:'Инфраструктура',debug:'Debug',audit:'Audit log'};
-const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',paid_trial:'Пробный доступ',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',plan_code:'Код тарифа',redemptions:'Использований',max_redemptions:'Общий лимит',max_redemptions_per_user:'Лимит на пользователя',starts_at:'Начало действия',expires_at:'Действует до',client_id:'Клиент ID',device_id:'Устройство ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',description:'Описание',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',package_id:'Пакет ID',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
+const columnLabels={id:'ID',telegram_id:'Telegram ID',username:'Username',email:'Email',account_status:'Аккаунт',password:'Пароль',paid_trial:'Пробный доступ',access_active:'Доступ',subscription_id:'Подписка ID',plan_id:'Тариф ID',plan:'Тариф',plan_code:'Код тарифа',redemptions:'Использований',max_redemptions:'Общий лимит',max_redemptions_per_user:'Лимит на пользователя',starts_at:'Начало действия',expires_at:'Действует до',client_id:'Клиент ID',device_id:'Устройство ID',node_id:'Нода ID',client_type:'Тип клиента',flow:'Flow',vpn_link:'VPN-ключ',link_overridden:'Ручная ссылка',last_connected_at:'Последнее подключение',last_ip:'Последний IP',code:'Код',name:'Название',description:'Описание',duration_days:'Дней',max_connections:'Подключений',traffic_limit_gb:'Трафик ГБ',package_id:'Пакет ID',price:'Цена',currency:'Валюта',active:'Активен',public:'Публичный',provider:'Провайдер',region:'Регион',ip:'IP',status:'Статус',health:'Health',latency_ms:'Задержка мс',last_seen_at:'Последний сигнал',capacity:'Ёмкость',connections:'Подключения',user_id:'Пользователь ID',amount:'Сумма',subscription_id:'Подписка ID',has_receipt:'Чек',receipt_url:'Ссылка на чек',receipt_filename:'Файл чека',receipt_mime_type:'Тип чека',details:'Детали',created_at:'Создано',url:'URL/реквизиты',sort_order:'Порядок',is_active:'Активен',has_image:'QR',platform:'Платформа',trial:'Мобильный trial',trial_id:'Trial ID',trial_subscription_id:'Trial подписка',trial_subscription_status:'Trial статус',trial_plan:'Trial тариф',trial_client_id:'Trial клиент',trial_client_status:'Trial клиент статус',trial_node_id:'Trial нода',attempts:'Попытки',used_at:'Использован',actor:'Кто',action:'Действие',resource:'Ресурс',result:'Результат',sensitive:'Sensitive'};
 function esc(v){if(v!==null&&typeof v==='object')v=JSON.stringify(v);return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function show(id){sections.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.section===id));if(id==='provider_codes')renderProviderCodes()}
 function prettyDate(v){if(!v)return '';let d=new Date(v);return Number.isNaN(d.getTime())?String(v):d.toLocaleString('ru-RU',{year:'2-digit',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}
@@ -1656,7 +1921,7 @@ function table(id,rows,actions){let keys=rows.length?Object.keys(rows[0]):[],box
 function clearTableFilters(btn){let tableEl=btn.closest('table');tableEl.querySelectorAll('[data-filter-key]').forEach(i=>i.value='');applyTableFilters(tableEl)}
 async function request(url,opt={}){let r=await fetch(url,opt);if(!r.ok)throw new Error((await r.text())||r.status);return r.status===204?null:r.json()}
 function paymentActions(p){let receipt=p.receipt_url?`<a class="action" href="${esc(p.receipt_url)}" target="_blank" rel="noopener">Открыть чек</a> `:'';if(p.provider==='platega'&&['pending','processing'].includes(p.status))return receipt+'<span class="muted">Ожидает callback Platega</span>';if(['pending','processing'].includes(p.status))return receipt+`<button onclick="setPaymentStatus(${p.id},'paid')">Подтвердить</button> <button class="danger" onclick="setPaymentStatus(${p.id},'failed')">Ошибка</button> <button class="danger" onclick="setPaymentStatus(${p.id},'cancelled')">Отменить</button>`;if(p.status==='paid')return receipt+`<button class="danger" onclick="setPaymentStatus(${p.id},'refunded')">Возврат</button>`;return receipt}
-async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';renderPackageSelects();renderPromoPlanSelects();table('plan_packages',state.plan_packages,r=>`<button onclick="editPlanPackage(${r.id})">Изменить</button>`);table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('promo_codes',state.promo_codes,r=>`<button class="danger" onclick="deletePromoCode(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''} ${r.paid_trial&&r.paid_trial!=='не использован'?`<button class="danger" onclick="resetPaidTrial(${r.id})">Сбросить пробник</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,r=>r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:'');table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderAdminContacts();renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function load(){try{state=await request('/admin/overview');document.getElementById('notice').innerHTML='<span class="ok">API работает</span>';renderPackageSelects();renderPromoPlanSelects();table('plan_packages',state.plan_packages,r=>`<button onclick="editPlanPackage(${r.id})">Изменить</button>`);table('plans',state.plans,r=>`<button onclick="editPlan(${r.id})">Изменить</button> <button class="danger" onclick="deletePlan(${r.id})">Удалить</button>`);table('promo_codes',state.promo_codes,r=>`<button class="danger" onclick="deletePromoCode(${r.id})">Удалить</button>`);table('nodes',state.nodes,r=>`<button onclick="health(${r.id})">Health</button> <button onclick="reconcile(${r.id})">Reconcile</button> <button onclick="editNode(${r.id})">Изменить</button>`);table('users',state.users.map(r=>({...r,vpn_link:r.vpn_link?'выдана':'—'})),r=>`<button onclick="openAccess(${r.id})">Доступ</button> <button onclick="setUserPassword(${r.id})">Пароль</button> ${r.access_active?`<button onclick="rotateUser(${r.id})">Перевыпустить</button>`:''} ${r.paid_trial&&r.paid_trial!=='не использован'?`<button class="danger" onclick="resetPaidTrial(${r.id})">Сбросить пробник</button>`:''}`);table('subscriptions',state.subscriptions,r=>`<button onclick="renew(${r.id})">Продлить</button>`);table('clients',state.clients,r=>r.status==='active'?`<button class="danger" onclick="revoke(${r.id})">Отозвать</button>`:'');table('payments',state.payments,p=>paymentActions(p));table('payment_methods',state.payment_methods,r=>`<button onclick="editPaymentMethod(${r.id})">Изменить</button> <button onclick="choosePaymentImage(${r.id})">${r.has_image?'Заменить QR':'Загрузить QR'}</button> ${r.has_image?`<button class="danger" onclick="deletePaymentImage(${r.id})">Удалить QR</button>`:''} <button class="danger" onclick="deletePaymentMethod(${r.id})">Удалить</button>`);table('devices',state.devices,deviceActions);table('login_codes',state.login_codes);table('email_logs',state.email_logs);renderAdminContacts();renderDocs();renderScripts();renderResources();table('debug',state.debug,r=>r.status==='active'?`<button class="danger" onclick="closeDebug(${r.id})">Закрыть</button>`:'');table('audit',state.audit);}catch(e){document.getElementById('notice').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 document.getElementById('nav').innerHTML=sections.map(x=>`<button data-section="${x}" onclick="show('${x}')">${labels[x]}</button>`).join('');
 function renderAdminContacts(){let f=document.getElementById('adminContactsForm'),c=state.admin_contacts||{};if(!f)return;f.admin_notification_email.value=c.admin_notification_email||'';f.bot_admin_chat_id.value=c.bot_admin_chat_id||0}
 async function saveAdminContacts(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let out=document.getElementById('settings-result');out.className='';out.textContent='Сохраняю…';try{state.admin_contacts=await request('/admin/settings/admin-contacts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_notification_email:f.admin_notification_email||'',bot_admin_chat_id:Number(f.bot_admin_chat_id||0)})});renderAdminContacts();out.className='ok';out.textContent='Контакты сохранены'}catch(err){out.className='bad';out.textContent=err.message}}
@@ -1694,6 +1959,9 @@ async function deletePaymentImage(id){if(!confirm('Удалить QR-карти�
 async function editNode(id){let n=state.nodes.find(x=>x.id===id);let status=prompt('Статус: active, maintenance, draining, disabled',n.status);if(status===null)return;let capacity=prompt('Ёмкость',n.capacity);if(capacity===null)return;await request('/vpn/nodes/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status,capacity:Number(capacity)})});await load()}
 async function health(id){try{let h=await request('/vpn/nodes/'+id+'/health');alert(h.status==='online'?'Xray online, пользователей: '+h.xray_users:'Xray offline: '+h.error)}catch(e){alert(e.message)}}
 async function reconcile(id){try{let r=await request('/vpn/nodes/'+id+'/reconcile',{method:'POST'});alert(`restored=${r.restored}, removed=${r.removed}, errors=${r.errors}`);await load()}catch(e){alert(e.message)}}
+function deviceActions(r){if(r.trial){let out=`<button onclick="refreshTrialDevice(${r.id})">Обновить</button>`;if(r.status==='active')out+=` <button class="danger" onclick="revokeTrialDevice(${r.id})">Отозвать</button>`;return out}return r.status==='active'?`<button class="danger" onclick="revokeDevice(${r.id})">Отозвать</button>`:''}
+async function refreshTrialDevice(id){if(!confirm('Обновить trial-доступ устройства #'+id+'?'))return;try{let r=await request('/admin/devices/'+id+'/trial/refresh',{method:'POST'});await load();alert('Trial обновлён до '+prettyDate(r.expires_at))}catch(e){alert(e.message)}}
+async function revokeTrialDevice(id){if(!confirm('Отозвать trial-доступ устройства #'+id+'?\n\nКлиент будет удалён из 3x-ui.'))return;try{let r=await request('/admin/devices/'+id+'/trial',{method:'DELETE'});await load();alert(r.panel_errors&&r.panel_errors.length?'Trial отозван частично: '+r.panel_errors.join('; '):'Trial отозван')}catch(e){alert(e.message)}}
 async function revokeDevice(id){if(confirm('Отозвать устройство #'+id+'?')){await request('/admin/devices/'+id,{method:'DELETE'});await load()}}
 function inputDate(value,days=30){let d=value?new Date(value):new Date(Date.now()+days*86400000);let local=new Date(d.getTime()-d.getTimezoneOffset()*60000);return local.toISOString().slice(0,16)}
 function openAccess(id){let u=state.users.find(x=>x.id===id),f=document.getElementById('accessForm');f.user_id.value=id;f.plan_id.innerHTML=state.plans.map(p=>`<option value="${p.id}">${esc(p.name)} (#${p.id})</option>`).join('');f.node_id.innerHTML=state.nodes.filter(n=>n.status==='active').map(n=>`<option value="${n.id}">${esc(n.name)} / ${esc(n.region)}</option>`).join('');if(u.plan_id)f.plan_id.value=u.plan_id;if(u.node_id)f.node_id.value=u.node_id;f.active.value=String(u.access_active);f.expires_at.value=inputDate(u.expires_at);f.vpn_link.value=u.vpn_link||'';document.getElementById('activityInfo').innerHTML=`Последнее подключение: <b>${esc(u.last_connected_at||'нет')}</b> · IP: <b>${esc(u.last_ip||'нет')}</b> · Client ID: <b>${esc(u.client_id||'нет')}</b>${u.link_overridden?' · ссылка изменена вручную':''}`;document.getElementById('accessDialog').showModal()}

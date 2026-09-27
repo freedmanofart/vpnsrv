@@ -1437,6 +1437,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
                 json={"install_id": install_id, "name": "Trial phone", "platform": "android"},
             )
             self.assertEqual(200, activation.status_code, activation.text)
+            self.assertRegex(activation.json()["trial_id"], r"^trial-\d+$")
             old_token = activation.json()["access_token"]
             profile = await self.client.get(
                 "/v1/client/profile",
@@ -1445,6 +1446,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, profile.status_code, profile.text)
         payload = profile.json()
+        self.assertEqual(activation.json()["trial_id"], payload["trial_id"])
         self.assertEqual("Freedom VPN", payload["provider_name"])
         self.assertEqual("Service message", payload["announcement"])
         self.assertEqual(2, len(payload["nodes"]))
@@ -1471,6 +1473,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             self.assertEqual(2, len(clients))
             self.assertEqual(1024, clients[0].upload_bytes)
             self.assertEqual(4096, clients[0].download_bytes)
+            trial_device_id = trial_device.id
 
         with patch("app.api.routes.client.ThreeXUIClient") as panel:
             panel.return_value.add_vless_user = AsyncMock()
@@ -1485,6 +1488,36 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             headers={"Authorization": f"Bearer {old_token}"},
         )
         self.assertEqual(401, rejected.status_code)
+
+        overview = await self.client.get("/admin/overview", auth=self.admin_auth)
+        self.assertEqual(200, overview.status_code, overview.text)
+        trial_row = next(item for item in overview.json()["devices"] if item["id"] == trial_device_id)
+        self.assertTrue(trial_row["trial"])
+        self.assertEqual(f"trial-{trial_device_id}", trial_row["trial_id"])
+        self.assertIsNotNone(trial_row["trial_subscription_id"])
+
+        with patch("app.api.routes.admin.ThreeXUIClient") as admin_panel:
+            admin_panel.return_value.update_vless_user = AsyncMock()
+            admin_panel.return_value.add_vless_user = AsyncMock()
+            refreshed = await self.client.post(
+                f"/admin/devices/{trial_device_id}/trial/refresh",
+                auth=self.admin_auth,
+            )
+        self.assertEqual(200, refreshed.status_code, refreshed.text)
+        self.assertEqual(f"trial-{trial_device_id}", refreshed.json()["trial_id"])
+
+        with patch("app.api.routes.admin.ThreeXUIClient") as admin_panel:
+            admin_panel.return_value.remove_vless_user = AsyncMock()
+            revoked = await self.client.delete(
+                f"/admin/devices/{trial_device_id}/trial",
+                auth=self.admin_auth,
+            )
+        self.assertEqual(200, revoked.status_code, revoked.text)
+        self.assertEqual("revoked", revoked.json()["status"])
+        overview = await self.client.get("/admin/overview", auth=self.admin_auth)
+        trial_row = next(item for item in overview.json()["devices"] if item["id"] == trial_device_id)
+        self.assertEqual("revoked", trial_row["status"])
+        self.assertEqual("expired", trial_row["trial_subscription_status"])
 
     async def test_incy_telegram_import_bridge_shows_android_launcher(self) -> None:
         async with self.session_factory() as db:
