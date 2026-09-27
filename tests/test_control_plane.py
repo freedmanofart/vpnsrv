@@ -1569,7 +1569,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertIn("freevpn://import/", response.text)
         self.assertIn("/v1/client/subscription/", response.text)
-        self.assertIn("window.location.href", response.text)
+        self.assertNotIn("window.location.href", response.text)
         self.assertIn("Открыть в Freedom VPN", response.text)
 
     async def test_freevpn_import_bridge_rejects_invalid_token(self) -> None:
