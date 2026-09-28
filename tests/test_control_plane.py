@@ -1447,7 +1447,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, profile.status_code, profile.text)
         payload = profile.json()
         self.assertEqual(activation.json()["trial_id"], payload["trial_id"])
-        self.assertRegex(payload["vpn_id"], r"^vpn-\d+$")
+        self.assertEqual(str(activation.json()["device_id"]), payload["vpn_id"])
         self.assertEqual("Freedom VPN", payload["provider_name"])
         self.assertEqual("Service message", payload["announcement"])
         self.assertEqual(2, len(payload["nodes"]))

@@ -542,14 +542,12 @@ async def client_profile(
     sensitive_configs = []
     observed_panel_totals: list[int] = []
     configured_client_totals: list[int] = []
-    active_client_ids: list[int] = []
     upload_bytes = 0
     download_bytes = 0
     for client, node, node_config in result.all():
         uri = build_client_uri(client, node, node_config.config)
         if not uri:
             continue
-        active_client_ids.append(client.id)
         configured_total = max(int(client.traffic_limit_gb or 0), 0) * 1024**3
         if configured_total:
             configured_client_totals.append(configured_total)
@@ -616,7 +614,7 @@ async def client_profile(
         ),
         user_id=principal.user_id,
         subscription_id=subscription.id,
-        vpn_id=(f"vpn-{max(active_client_ids)}" if active_client_ids else None),
+        vpn_id=str(principal.device_id),
         expires_at=subscription.expires_at,
         provider=ClientProviderInfo(
             name=settings.client_provider_name.strip() or settings.provider_name,
