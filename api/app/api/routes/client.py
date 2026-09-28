@@ -540,12 +540,19 @@ async def client_profile(
         total_bytes = plan.traffic_limit_gb * 1024**3
     nodes = []
     sensitive_configs = []
+    observed_panel_totals: list[int] = []
+    configured_client_totals: list[int] = []
+    active_client_ids: list[int] = []
     upload_bytes = 0
     download_bytes = 0
     for client, node, node_config in result.all():
         uri = build_client_uri(client, node, node_config.config)
         if not uri:
             continue
+        active_client_ids.append(client.id)
+        configured_total = max(int(client.traffic_limit_gb or 0), 0) * 1024**3
+        if configured_total:
+            configured_client_totals.append(configured_total)
         client_upload = max(int(client.upload_bytes or 0), 0)
         client_download = max(int(client.download_bytes or 0), 0)
         if node_config.config.get("api_address") and client.protocol == "vless":
@@ -555,6 +562,9 @@ async def client_profile(
                 ).get_client_traffic(f"vpn-{client.id}")
                 client_upload = max(int(traffic.get("up", 0) or 0), 0)
                 client_download = max(int(traffic.get("down", 0) or 0), 0)
+                panel_total = max(int(traffic.get("total", 0) or 0), 0)
+                if panel_total:
+                    observed_panel_totals.append(panel_total)
                 client.upload_bytes = client_upload
                 client.download_bytes = client_download
             except (ThreeXUIError, TypeError, ValueError):
@@ -578,6 +588,13 @@ async def client_profile(
             )
         )
         sensitive_configs.append({"node_id": node.id, "vpn_uri": uri})
+    # 3x-ui is authoritative for a paid client's accumulated quota. A
+    # renewal can increase the client's totalGB while the original plan and
+    # subscription rows still contain the old package limit.
+    if observed_panel_totals:
+        total_bytes = max(observed_panel_totals)
+    elif total_bytes is None and configured_client_totals:
+        total_bytes = max(configured_client_totals)
     await db.commit()
     await write_audit(
         db,
@@ -599,6 +616,7 @@ async def client_profile(
         ),
         user_id=principal.user_id,
         subscription_id=subscription.id,
+        vpn_id=(f"vpn-{max(active_client_ids)}" if active_client_ids else None),
         expires_at=subscription.expires_at,
         provider=ClientProviderInfo(
             name=settings.client_provider_name.strip() or settings.provider_name,

@@ -74,6 +74,7 @@ class ClientProfileResponse(BaseModel):
     device_id: int
     user_id: int
     subscription_id: int
+    vpn_id: str | None = None
     expires_at: datetime
     trial_id: str | None = None
     provider: ClientProviderInfo
