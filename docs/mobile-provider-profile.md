@@ -1,6 +1,6 @@
-# Мобильный профиль Freedom VPN
+# Мобильный профиль INCY и Freedom VPN
 
-Мобильный API выдаёт Android/iOS-клиенту только scoped device token и VPN URI
+Мобильный API выдаёт приложениям INCY и Freedom VPN только scoped device token и VPN URI
 назначенных профилей. Сервисный токен и доступ к 3x-ui на телефон не попадают.
 
 ## Тестовый доступ

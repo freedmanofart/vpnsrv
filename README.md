@@ -119,8 +119,14 @@ Frontend-структура лендинга, web-кабинета и админ
 | `GET` | `/payment-methods` | Доступные способы оплаты |
 | `POST` | `/v1/client/activation-codes` | Код активации клиентского устройства |
 | `POST` | `/v1/client/trial` | Тестовый профиль Android/iOS на 1 день и 3 ГБ |
-| `GET` | `/v1/client/profile` | Профили, метаданные провайдера и актуальный трафик |
 | `POST` | `/v1/client/activate` | Обмен кода провайдера на device token |
+| `POST` | `/v1/client/import` | Привязка текущего устройства к подписанной ссылке INCY/Freedom VPN |
+| `GET` | `/v1/client/profile` | Профили, метаданные провайдера и актуальный трафик |
+| `POST` | `/v1/client/refresh` | Ротация device token и обновление срока устройства |
+| `GET` | `/v1/client/subscription/{token}` | Подписка с конфигурацией и метаданными для приложений |
+| `GET` | `/v1/client/import/{token}` | HTTPS-переходник Telegram для импорта в INCY |
+| `GET` | `/v1/client/freevpn-import/{token}` | HTTPS-переходник Telegram/site для импорта в Freedom VPN |
+| `GET` | `/vpn/clients/{client_id}/config` | Сервисные ссылки и конфигурация клиента |
 | `GET` | `/` | Публичный лендинг |
 | `GET` | `/cabinet` | Резервный кабинет по защищённой cookie |
 | `POST` | `/web/register` | Отправить одноразовый email-код |
@@ -139,6 +145,167 @@ webhook. Telegram-регистрация `/users` не публична. Мар�
 
 Мобильный trial, синхронизация конфигураций нод, диплинк и счётчики трафика
 описаны в [`docs/mobile-provider-profile.md`](docs/mobile-provider-profile.md).
+
+## Backend-интеграция мобильных приложений
+
+Backend поддерживает два клиента — INCY и Freedom VPN. Оба приложения получают
+только короткоживущий device token и профили подписки; `SERVICE_API_TOKEN`, токен
+3x-ui и административные секреты на устройство не выдаются.
+
+### Общий жизненный цикл устройства
+
+1. При нажатии пользователем кнопки теста приложение отправляет `POST
+   /v1/client/trial`:
+
+   ```json
+   {
+     "install_id": "<UUID установки>",
+     "name": "Мой телефон",
+     "platform": "android"
+   }
+   ```
+
+   Допустимы платформы `android` и `ios`. В ответе приходят `device_id`,
+   `access_token`, `expires_at` и `trial_id` формата `trial-<device_id>`. Один
+   `install_id` не получает второй trial: повторный запрос ротирует токен уже
+   существующего устройства.
+
+2. Приложение передаёт токен в заголовке:
+
+   ```http
+   Authorization: Bearer <device-access-token>
+   ```
+
+   и запрашивает `GET /v1/client/profile`. Ответ содержит `nodes` с
+   конфигурациями, `profile_id`, регионом, протоколом и доступностью, а также
+   `usage` (`upload_bytes`, `download_bytes`, `total_bytes`,
+   `remaining_bytes`), срок, тариф, объявление и ссылки провайдера.
+
+3. Синхронизация приложения повторяет `GET /v1/client/profile`. Для обновления
+   токена используется `POST /v1/client/refresh` с тем же Bearer-токеном.
+   После успешной привязки оплаченной подписки `trial_id` в профиле становится
+   `null`.
+
+4. Для устройств без trial оператор выпускает одноразовый код через
+   `POST /v1/client/activation-codes` с service Bearer, а приложение обменивает
+   его через `POST /v1/client/activate`. Код одноразовый, имеет короткий срок и
+   не содержит VPN-конфигурацию.
+
+Тестовый доступ не выдаётся автоматически при запуске приложения. Backend
+создаёт отдельные VLESS-клиенты в 3x-ui, а для статических протоколов использует
+`client_uri` из конфигурации ноды. Трафик VLESS читается из `clientStats` 3x-ui;
+при временной недоступности панели используются последние сохранённые значения.
+
+### Подписанные ссылки и импорт
+
+После оплаты backend создаёт подписанный токен для конкретного `VPNClient`.
+Токен содержит ID клиента, срок действия и HMAC-подпись. Он не требует
+авторизации приложения, но перестаёт работать после истечения срока или отзыва
+клиента. Канонический endpoint подписки:
+
+```text
+GET /v1/client/subscription/<signed-token>
+```
+
+Он возвращает текстовый профиль с VPN URI, названием региона, интервалом
+обновления, сроком, ссылкой поддержки, ссылкой сайта/кабинета и предупреждением:
+`Из-за блокировок РКН наш сервис может работать нестабильно.`
+
+#### INCY
+
+Для web-кабинета и прямого запуска используется:
+
+```text
+incy://import/https://<public-host>/v1/client/subscription/<signed-token>
+```
+
+Для Telegram используется HTTPS-переходник:
+
+```text
+GET /v1/client/import/<signed-token>
+```
+
+Он показывает кнопку `Открыть в INCY` с Android `intent://` и резервной
+обычной ссылкой. Прямой `incy://` в Telegram-кнопку помещать нельзя: Telegram
+WebView может вернуть `ERR_UNKNOWN_URL_SCHEME`.
+
+Если INCY был запущен на мобильном trial и пользователь импортирует оплаченную
+ссылку, приложение после успешной загрузки профиля вызывает общий endpoint
+`POST /v1/client/import` с текущим device token и полем `token`. Это сохраняет
+установленное устройство и переводит его с synthetic trial-пользователя на
+владельца оплаченной подписки. После вызова приложение повторяет
+`GET /v1/client/profile` и считает импорт завершённым только после успешного
+ответа.
+
+#### Freedom VPN
+
+Канонический deep link приложения имеет вид:
+
+```text
+freevpn://import/https://<public-host>/v1/client/subscription/<signed-token>
+```
+
+В Telegram, web-кабинете и уведомлениях используется HTTPS-переходник:
+
+```text
+GET /v1/client/freevpn-import/<signed-token>
+```
+
+Переходник формирует Android `intent://` с package
+`org.freedomvpn.app`, автоматически нажимает единственную кнопку
+`Открыть в Freedom VPN`, а саму кнопку оставляет как ручной fallback. Другие
+ссылки на странице переходника не выводятся.
+
+После того как Freedom VPN загрузил подписку, приложение также привязывает
+устройство к её владельцу через общий endpoint:
+
+```http
+POST /v1/client/import
+Authorization: Bearer <device-access-token>
+Content-Type: application/json
+
+{"token":"<signed-token>"}
+```
+
+Backend проверяет подпись и срок токена, активность подписки и VPN-клиента,
+перепривязывает текущий `ClientDevice` к пользователю подписки и возвращает
+`device_id`, `subscription_id` и `expires_at`. После этого приложение повторно
+запрашивает `/v1/client/profile`; импорт считается успешным только после этого
+запроса.
+
+### Где используются ссылки
+
+- `GET /vpn/clients/{client_id}/config` с service Bearer возвращает
+  `incy_subscription_url`, `incy_import_url`, `incy_telegram_import_url`,
+  `freevpn_subscription_url`, `freevpn_import_url` и
+  `freevpn_telegram_import_url`.
+- Web-кабинет показывает кнопки импорта в INCY и Freedom VPN рядом с ключом.
+- После подтверждённой покупки Telegram и email уведомления содержат HTTPS
+  ссылки импорта обоих приложений и комментарий о возможной нестабильности из-за
+  блокировок РКН.
+- В `ClientProfileResponse.provider` передаются `support_url` и `cabinet_url`,
+  а в `links` — канал/бот, поддержка, сайт и личный кабинет. Ссылки строятся из
+  `CLIENT_*_URL`, `PROVIDER_*_URL`, `BOT_USERNAME` и `PUBLIC_BASE_URL`.
+
+Подробные контракты: [`docs/mobile-provider-profile.md`](docs/mobile-provider-profile.md),
+[`docs/incy-integration.md`](docs/incy-integration.md) и
+[`docs/freevpn-deeplinks.md`](docs/freevpn-deeplinks.md).
+
+### Управление мобильными trial в админке
+
+В `/admin/overview` мобильные устройства помечаются полями `trial_id`,
+`trial_subscription_id`, `trial_client_id` и `trial_node_id`. Для конкретного
+`device_id` доступны:
+
+```http
+POST   /admin/devices/{device_id}/trial/refresh
+DELETE /admin/devices/{device_id}/trial
+```
+
+`refresh` повторно активирует trial только выбранному устройству, обновляет срок
+и квоту в базе и синхронизирует клиента в 3x-ui. `DELETE` отзывает доступ и
+удаляет trial-клиентов из 3x-ui. Оба маршрута требуют административную
+авторизацию и не затрагивают другие устройства.
 
 Повторный подтверждённый платёж не создаёт вторую активную подписку: он
 продлевает существующую, меняет тариф и выбранную страну согласно заказу,

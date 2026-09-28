@@ -24,11 +24,27 @@ API `/vpn/clients/{client_id}/config` дополнительно возвращ�
 - `incy_import_url` — готовый deep link `incy://import/...`.
 - `incy_telegram_import_url` — HTTPS-переходник для кнопки в Telegram. Telegram
   не принимает произвольные custom-scheme URL в `InlineKeyboardButton`, поэтому
-  переходник отвечает редиректом на `incy://import/...`.
+  переходник показывает кнопку с Android `intent://` на `incy://import/...`.
 
 Deep link используется в web-кабинете, а HTTPS-переходник — в Telegram-боте. Для приложения
 добавлены официальные ссылки INCY для iOS, Android, Windows, macOS, Linux,
 Android TV и Apple TV.
+
+Если INCY был активирован через мобильный trial, после импорта оплаченной
+подписки приложение должно отправить подписанный токен на общий endpoint:
+
+```http
+POST /v1/client/import
+Authorization: Bearer <device-access-token>
+Content-Type: application/json
+
+{"token":"<signed-token>"}
+```
+
+Backend проверяет токен, перепривязывает текущее устройство к владельцу
+подписки и возвращает `device_id`, `subscription_id` и `expires_at`. После этого
+INCY повторяет `GET /v1/client/profile`; успешным импорт считается только после
+получения оплаченного профиля с `trial_id: null`.
 
 ## Текущее состояние профилей
 
