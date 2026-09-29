@@ -226,7 +226,7 @@ def provider_links() -> list[ClientProfileLink]:
         ("channel", "Канал / Бот", settings.client_channel_url, "channel"),
         ("support", "Поддержка", settings.client_support_url or incy_support_url(), "support"),
         ("website", "Сайт", settings.client_website_url or f"{settings.public_base_url.rstrip('/')}/", "website"),
-        ("account", "Личный кабинет", account_url, "account"),
+        ("account", "Продлить подписку", account_url, "account"),
     )
     return [
         ClientProfileLink(id=link_id, title=title, url=url.strip(), icon=icon)
@@ -675,17 +675,11 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
 
     uri = build_client_uri(client, node, node_config.config)
     region = (node.region or "Швеция").split("|", 1)[-1]
-    warning = "Из-за блокировок РКН наш сервис может работать нестабильно."
     profile_title = f"{settings.provider_name} · {region}"
     site_url = f"{settings.public_base_url.rstrip('/')}/"
     cabinet_url = (
         settings.provider_cabinet_url.strip()
         or f"{settings.public_base_url.rstrip('/')}/cabinet"
-    )
-    bot_url = (
-        f"https://t.me/{settings.bot_username.lstrip('@').strip()}"
-        if settings.bot_username.strip()
-        else ""
     )
     support_url = incy_support_url()
     expires_at = int(aware(client.expires_at).timestamp())
@@ -706,11 +700,8 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
     body = "\n".join(
         [
             f"#profile-title: {profile_title}",
-            f"#profile-description: {warning}",
             f"#support-url: {support_url}",
             f"#profile-web-page-url: {site_url}",
-            f"#announce: {warning}",
-            f"#announce-url: {bot_url}",
             f"#profile-update-interval: 6",
             uri,
             "",
@@ -721,12 +712,9 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
         media_type="text/plain",
         headers={
             "profile-title": incy_metadata_header(profile_title),
-            "profile-description": incy_metadata_header(warning),
             "profile-update-interval": "6",
             "support-url": support_url,
             "profile-web-page-url": site_url,
-            "announce": incy_metadata_header(warning),
-            "announce-url": bot_url,
             "premium-url": cabinet_url,
             "subscription-userinfo": (
                 f"upload={traffic_upload_bytes}; "

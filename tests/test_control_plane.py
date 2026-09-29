@@ -1609,7 +1609,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn("#profile-title: Freedom VPN · de", response.text)
         self.assertIn("vless://", response.text)
         self.assertTrue(response.headers["profile-title"].startswith("base64:"))
-        self.assertTrue(response.headers["profile-description"].startswith("base64:"))
+        self.assertNotIn("Из-за блокировок РКН", response.text)
+        self.assertNotIn("profile-description", response.headers)
         self.assertEqual("6", response.headers["profile-update-interval"])
         self.assertEqual(f"{settings.public_base_url.rstrip('/')}/", response.headers["profile-web-page-url"])
         self.assertEqual(
@@ -1620,7 +1621,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             f"{settings.public_base_url.rstrip('/')}/cabinet",
             response.headers["premium-url"],
         )
-        self.assertEqual("https://t.me/vpn142323srv_bot", response.headers["announce-url"])
+        self.assertNotIn("announce", response.headers)
 
     async def test_incy_subscription_reports_traffic_usage(self) -> None:
         traffic_limit = 250 * 1024**3

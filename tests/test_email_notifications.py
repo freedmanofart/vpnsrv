@@ -48,9 +48,9 @@ class EmailNotificationContentTests(IsolatedAsyncioTestCase):
         self.assertEqual(3, len(sent))
         for message in sent:
             body = message.get_content()
-            self.assertIn("Web-кабинет: https://vpn.example.test/cabinet", body)
+            self.assertNotIn("Web-кабинет:", body)
             self.assertIn(
                 "Продлить подписку: https://vpn.example.test/cabinet?checkout=1#payment",
                 body,
             )
-            self.assertIn("продлите доступ", body)
+            self.assertIn("откройте ссылку", body)

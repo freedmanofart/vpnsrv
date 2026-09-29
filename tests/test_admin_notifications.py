@@ -124,7 +124,7 @@ class ProviderCodeNotificationTests(IsolatedAsyncioTestCase):
 
 
 class PaidNotificationTests(IsolatedAsyncioTestCase):
-    async def test_paid_client_notifications_include_incy_import_link_and_comment(self) -> None:
+    async def test_paid_client_notifications_include_import_links_without_rkn_warning(self) -> None:
         user = SimpleNamespace(
             id=7,
             email="user@example.com",
@@ -177,4 +177,6 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
             self.assertIn("/v1/client/freevpn-import/", text)
             self.assertIn("Импортировать конфигурацию в Freedom VPN", text)
             self.assertIn("Откройте ссылку на устройстве с установленным Freedom VPN", text)
-            self.assertIn("Из-за блокировок РКН", text)
+            self.assertNotIn("Из-за блокировок РКН", text)
+            self.assertNotIn("Web-кабинет:", text)
+            self.assertIn("Продлить подписку:", text)

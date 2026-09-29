@@ -390,16 +390,14 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
             incy_text = (
                 "\n\n📲 Импортировать конфигурацию в INCY:\n"
                 f"{incy_import_url}\n"
-                "Откройте ссылку на устройстве с установленным INCY.\n"
-                "⚠️ Из-за блокировок РКН наш сервис может работать нестабильно."
+                "Откройте ссылку на устройстве с установленным INCY."
             )
         freevpn_text = ""
         if freevpn_import_url:
             freevpn_text = (
                 "\n\n📲 Импортировать конфигурацию в Freedom VPN:\n"
                 f"{freevpn_import_url}\n"
-                "Откройте ссылку на устройстве с установленным Freedom VPN.\n"
-                "⚠️ Из-за блокировок РКН наш сервис может работать нестабильно."
+                "Откройте ссылку на устройстве с установленным Freedom VPN."
             )
         provider_code_text = ""
         try:
@@ -437,7 +435,6 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
             f"{incy_text}"
             f"{freevpn_text}"
             "\n\n"
-            f"Web-кабинет: {_user_cabinet_url(user)}\n"
             f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}\n\n"
             "VPN-ключ и статус подписки доступны в web-кабинете."
         )

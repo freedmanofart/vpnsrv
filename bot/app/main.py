@@ -583,7 +583,7 @@ def cabinet_credentials_text(email_address: str, payload: dict) -> str:
         "<b>Креды для входа:</b>\n"
         f"Email: <code>{html.escape(email_address)}</code>\n"
         f"Код: <code>{html.escape(str(code))}</code>\n"
-        f"Web-кабинет: {html.escape(cabinet_url)}\n"
+        f"Продлить подписку: {html.escape(cabinet_url)}\n"
         + (f"Код действует до: <b>{html.escape(expires_at)}</b>\n\n" if expires_at else "\n")
         + "Теперь пришлите чек фотографией или файлом."
     )
