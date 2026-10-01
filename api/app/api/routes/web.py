@@ -394,7 +394,7 @@ body:has(.landing-v2),body:has(.login-page){{font-family:ui-rounded,"SF Pro Roun
 @media(max-width:767px){{.l-platform-line{{width:100%}}.l-phone-glow{{width:270px;height:140px;bottom:2px;filter:blur(34px)}}.l-benefits{{margin-top:16px}}.l-footer{{align-items:center;justify-content:center;flex-direction:row}}.l-footer-links{{justify-content:center;text-align:center}}}}
 @media(max-width:350px){{.l-hero h1{{font-size:32px;line-height:35px}}.l-download-card{{padding-inline:8px;gap:6px}}.l-download-arrow{{display:none}}}}
 @media(prefers-reduced-motion:reduce){{.landing-v2 *{{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}.l-phone,.l-cta:hover,.l-download-card:hover{{transform:none}}}}
-</style><script src="https://telegram.org/js/telegram-web-app.js?63"></script><script>document.addEventListener('click',function(event){{const link=event.target.closest('a[href^="http"]');if(link&&!link.matches('[data-native-store]')&&window.Telegram?.WebApp?.initData&&window.Telegram.WebApp.openLink){{event.preventDefault();window.Telegram.WebApp.openLink(link.href)}}}});</script></head><body>{content}</body></html>"""
+</style><script>document.addEventListener('click',function(event){{const link=event.target.closest('a[href^="http"]');if(link&&!link.matches('[data-native-store]')&&window.Telegram?.WebApp?.openLink){{event.preventDefault();window.Telegram.WebApp.openLink(link.href)}}}});</script></head><body>{content}</body></html>"""
 
 
 @router.get("/", response_class=HTMLResponse)

@@ -744,13 +744,9 @@ async def incy_import_redirect(token: str):
         f"{token}"
     )
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
-    encoded_fallback_url = quote(subscription_url, safe="")
-    external_url = f"{settings.public_base_url.rstrip('/')}/v1/client/import/{token}?external=1"
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
-        "#Intent;scheme=incy;package=llc.itdev.incy;"
-        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
-        f"S.browser_fallback_url={encoded_fallback_url};end"
+        "#Intent;scheme=incy;package=llc.itdev.incy;end"
     )
     return HTMLResponse(
         content=f"""<!doctype html>
@@ -773,23 +769,8 @@ async def incy_import_redirect(token: str):
   <main>
     <h1>Импорт конфигурации</h1>
     <p>Нажмите кнопку, чтобы открыть конфигурацию в установленном приложении INCY.</p>
-    <a id="open-incy" data-external-url="{html.escape(external_url, quote=True)}" href="{html.escape(android_intent, quote=True)}">Открыть в INCY</a>
+    <a href="{html.escape(android_intent, quote=True)}">Открыть в INCY</a>
   </main>
-  <script src="https://telegram.org/js/telegram-web-app.js?63"></script>
-  <script>
-    const appLink = document.getElementById("open-incy");
-    appLink.addEventListener("click", function (event) {{
-      const webApp = window.Telegram?.WebApp;
-      if (webApp?.initData && typeof webApp.openLink === "function") {{
-        event.preventDefault();
-        webApp.openLink(this.dataset.externalUrl);
-      }}
-    }});
-    if (new URLSearchParams(window.location.search).get("external") === "1"
-        && !window.Telegram?.WebApp?.initData) {{
-      window.setTimeout(() => appLink.click(), 150);
-    }}
-  </script>
 </body>
 </html>""",
         status_code=status.HTTP_200_OK,
@@ -809,13 +790,10 @@ async def freevpn_import_redirect(token: str):
         f"{token}"
     )
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
-    encoded_fallback_url = quote(subscription_url, safe="")
-    external_url = f"{settings.public_base_url.rstrip('/')}/v1/client/freevpn-import/{token}?external=1"
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
         "#Intent;scheme=freevpn;package=org.freedomvpn.app;"
-        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
-        f"S.browser_fallback_url={encoded_fallback_url};end"
+        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end"
     )
     return HTMLResponse(
         content=f"""<!doctype html>
@@ -837,22 +815,14 @@ async def freevpn_import_redirect(token: str):
   <main>
     <h1>Импорт конфигурации</h1>
     <p>Нажмите кнопку, чтобы открыть подписку в установленном приложении Freedom VPN.</p>
-    <a id="open-freedom-vpn" data-external-url="{html.escape(external_url, quote=True)}" href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
+    <a id="open-freedom-vpn" href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
   </main>
-  <script src="https://telegram.org/js/telegram-web-app.js?63"></script>
   <script>
-    const appLink = document.getElementById("open-freedom-vpn");
-    appLink.addEventListener("click", function (event) {{
-      const webApp = window.Telegram?.WebApp;
-      if (webApp?.initData && typeof webApp.openLink === "function") {{
-        event.preventDefault();
-        webApp.openLink(this.dataset.externalUrl);
-      }}
+    window.addEventListener("load", function () {{
+      window.setTimeout(function () {{
+        document.getElementById("open-freedom-vpn").click();
+      }}, 100);
     }});
-    if (new URLSearchParams(window.location.search).get("external") === "1"
-        && !window.Telegram?.WebApp?.initData) {{
-      window.setTimeout(() => appLink.click(), 150);
-    }}
   </script>
 </body>
 </html>""",
