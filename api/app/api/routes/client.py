@@ -1,5 +1,6 @@
 import secrets
 import html
+import json
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -795,6 +796,7 @@ async def freevpn_import_redirect(token: str):
         "#Intent;scheme=freevpn;package=org.freedomvpn.app;"
         "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end"
     )
+    android_intent_js = json.dumps(android_intent)
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru">
@@ -818,11 +820,7 @@ async def freevpn_import_redirect(token: str):
     <a id="open-freedom-vpn" href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
   </main>
   <script>
-    window.addEventListener("load", function () {{
-      window.setTimeout(function () {{
-        document.getElementById("open-freedom-vpn").click();
-      }}, 100);
-    }});
+    window.setTimeout(function () {{ window.location.href = {android_intent_js}; }}, 150);
   </script>
 </body>
 </html>""",
