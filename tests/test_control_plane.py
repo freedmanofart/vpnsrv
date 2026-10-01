@@ -907,11 +907,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             response.text,
         )
         self.assertIn('class="pay-button incy-import-button"', response.text)
-        self.assertIn('href="incy://import/', response.text)
-        self.assertIn('href="freevpn://import/', response.text)
+        self.assertIn('/v1/client/import/', response.text)
+        self.assertIn('/v1/client/freevpn-import/', response.text)
         self.assertIn("Импортировать<br>в INCY", response.text)
         self.assertIn("Импортировать<br>в Freedom VPN", response.text)
-        self.assertIn("/v1/client/subscription/", response.text)
         self.assertNotIn("📲 Импортировать в INCY", response.text)
         self.assertNotIn("Из-за блокировок РКН", response.text)
         self.assertNotIn('class="support-link"', response.text)
@@ -1569,7 +1568,12 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, response.status_code)
         self.assertIn("intent://import/", response.text)
-        self.assertIn("scheme=incy;package=llc.itdev.incy", response.text)
+        self.assertIn(
+            "scheme=incy;package=llc.itdev.incy;action=android.intent.action.VIEW;"
+            "category=android.intent.category.BROWSABLE",
+            response.text,
+        )
+        self.assertIn("S.browser_fallback_url=", response.text)
         self.assertIn("/v1/client/subscription/", response.text)
         self.assertIn("Открыть в INCY", response.text)
 
@@ -1587,13 +1591,11 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             "category=android.intent.category.BROWSABLE",
             response.text,
         )
+        self.assertIn("S.browser_fallback_url=", response.text)
         self.assertIn("/v1/client/subscription/", response.text)
         self.assertNotIn("window.location.href", response.text)
         self.assertIn("Открыть в Freedom VPN", response.text)
         self.assertIn('id="open-freedom-vpn"', response.text)
-        self.assertIn('document.getElementById("open-freedom-vpn").click()', response.text)
-        self.assertNotIn("Открыть обычной ссылкой", response.text)
-        self.assertNotIn("Открыть ссылку подписки", response.text)
 
     async def test_freevpn_import_bridge_rejects_invalid_token(self) -> None:
         response = await self.client.get("/v1/client/freevpn-import/not-a-token")

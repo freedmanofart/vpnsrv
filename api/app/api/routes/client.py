@@ -41,7 +41,6 @@ from app.services.node_health import node_accepts_clients
 from app.services.provider_codes import issue_provider_code
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
 from app.services.vless import build_vless_url
-from app.services.incy import build_incy_import_link
 from app.core.config import settings
 from app.core.cabinet_links import verify_incy_subscription_token
 
@@ -744,11 +743,13 @@ async def incy_import_redirect(token: str):
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
         f"{token}"
     )
-    deep_link = build_incy_import_link(subscription_url)
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
+    encoded_fallback_url = quote(subscription_url, safe="")
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
-        "#Intent;scheme=incy;package=llc.itdev.incy;end"
+        "#Intent;scheme=incy;package=llc.itdev.incy;"
+        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
+        f"S.browser_fallback_url={encoded_fallback_url};end"
     )
     return HTMLResponse(
         content=f"""<!doctype html>
@@ -772,7 +773,6 @@ async def incy_import_redirect(token: str):
     <h1>Импорт конфигурации</h1>
     <p>Нажмите кнопку, чтобы открыть конфигурацию в установленном приложении INCY.</p>
     <a href="{html.escape(android_intent, quote=True)}">Открыть в INCY</a>
-    <a class="fallback" href="{html.escape(deep_link, quote=True)}">Открыть обычной ссылкой</a>
   </main>
 </body>
 </html>""",
@@ -793,10 +793,12 @@ async def freevpn_import_redirect(token: str):
         f"{token}"
     )
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
+    encoded_fallback_url = quote(subscription_url, safe="")
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
         "#Intent;scheme=freevpn;package=org.freedomvpn.app;"
-        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end"
+        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
+        f"S.browser_fallback_url={encoded_fallback_url};end"
     )
     return HTMLResponse(
         content=f"""<!doctype html>
@@ -820,13 +822,6 @@ async def freevpn_import_redirect(token: str):
     <p>Нажмите кнопку, чтобы открыть подписку в установленном приложении Freedom VPN.</p>
     <a id="open-freedom-vpn" href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
   </main>
-  <script>
-    window.addEventListener("load", function () {{
-      window.setTimeout(function () {{
-        document.getElementById("open-freedom-vpn").click();
-      }}, 100);
-    }});
-  </script>
 </body>
 </html>""",
         status_code=status.HTTP_200_OK,
