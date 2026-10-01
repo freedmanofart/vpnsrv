@@ -154,11 +154,6 @@ SUPPORT_REPLY_TARGETS: dict[int, int] = {}
 # =========================================================
 
 def main_menu() -> InlineKeyboardMarkup:
-    channel_button = (
-        InlineKeyboardButton(text="📣 Наш канал", url=TELEGRAM_CHANNEL_URL)
-        if TELEGRAM_CHANNEL_URL
-        else InlineKeyboardButton(text="📣 Наш канал", callback_data="channel_info")
-    )
     support_button = InlineKeyboardButton(text="🆘 Поддержка", callback_data="support_info")
     reviews_button = InlineKeyboardButton(text="⭐ Отзывы", callback_data="reviews")
     rows = [
@@ -166,7 +161,6 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🏷 Промокод", callback_data="promo_start"), InlineKeyboardButton(text="👥 Пригласить друга", callback_data="referral")],
         [InlineKeyboardButton(text="ℹ️ Информация", callback_data="information"), support_button],
         [reviews_button],
-        [channel_button],
     ]
     extra_buttons = [
         InlineKeyboardButton(text=item["text"], url=item["url"])
