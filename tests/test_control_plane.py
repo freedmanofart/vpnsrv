@@ -907,9 +907,11 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             response.text,
         )
         self.assertIn('class="pay-button incy-import-button"', response.text)
+        self.assertIn('href="incy://import/', response.text)
+        self.assertIn('href="freevpn://import/', response.text)
         self.assertIn("Импортировать<br>в INCY", response.text)
-        self.assertIn("/v1/client/import/", response.text)
-        self.assertNotIn('href="incy://import/', response.text)
+        self.assertIn("Импортировать<br>в Freedom VPN", response.text)
+        self.assertIn("/v1/client/subscription/", response.text)
         self.assertNotIn("📲 Импортировать в INCY", response.text)
         self.assertNotIn("Из-за блокировок РКН", response.text)
         self.assertNotIn('class="support-link"', response.text)

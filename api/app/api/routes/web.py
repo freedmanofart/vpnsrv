@@ -47,6 +47,8 @@ from app.schemas.payment import PaymentCreate
 from app.core.security import hash_password, require_api_access, verify_password
 from app.services.audit import write_audit
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
+from app.services.freevpn import build_freevpn_import_link
+from app.services.incy import build_incy_import_link
 
 
 router = APIRouter(tags=["Web cabinet"])
@@ -896,14 +898,15 @@ async def cabinet(
         if node and config:
             vpn_uri = client.config_override or build_client_uri(client, node, config.config)
             subscription_token = incy_subscription_token(client.id, client.expires_at)
-            # Use the HTTPS bridge here, just as in Telegram. Android browsers
-            # can hand off the redirect to INCY reliably; a direct `incy://`
-            # link can be parsed as a malformed certificate/URL by the app.
-            incy_import_url = f"{settings.public_base_url.rstrip('/')}/v1/client/import/{subscription_token}"
-            freevpn_import_url = (
-                f"{settings.public_base_url.rstrip('/')}/v1/client/freevpn-import/"
+            subscription_url = (
+                f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
                 f"{subscription_token}"
             )
+            # The cabinet is opened in a regular browser/webview, so use the
+            # app schemes directly. Telegram uses the HTTPS bridge endpoints
+            # below because its button validation rejects custom schemes.
+            incy_import_url = build_incy_import_link(subscription_url)
+            freevpn_import_url = build_freevpn_import_link(subscription_url)
     traffic_remaining_bytes = None
     traffic_limit_bytes = None
     traffic_used_bytes = None
