@@ -1576,6 +1576,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn("S.browser_fallback_url=", response.text)
         self.assertIn("/v1/client/subscription/", response.text)
         self.assertIn("Открыть в INCY", response.text)
+        self.assertIn("this.dataset.externalUrl", response.text)
+        self.assertIn("telegram-web-app.js", response.text)
+        self.assertIn("?external=1", response.text)
+        self.assertIn("URLSearchParams(window.location.search)", response.text)
 
     async def test_freevpn_import_bridge_exposes_custom_scheme(self) -> None:
         async with self.session_factory() as db:
@@ -1596,6 +1600,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertNotIn("window.location.href", response.text)
         self.assertIn("Открыть в Freedom VPN", response.text)
         self.assertIn('id="open-freedom-vpn"', response.text)
+        self.assertIn("this.dataset.externalUrl", response.text)
+        self.assertIn("telegram-web-app.js", response.text)
+        self.assertIn("?external=1", response.text)
+        self.assertIn("URLSearchParams(window.location.search)", response.text)
 
     async def test_freevpn_import_bridge_rejects_invalid_token(self) -> None:
         response = await self.client.get("/v1/client/freevpn-import/not-a-token")
