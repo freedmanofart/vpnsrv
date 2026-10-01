@@ -1569,6 +1569,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, response.status_code)
         self.assertIn("intent://import/", response.text)
         self.assertIn("scheme=incy;package=llc.itdev.incy", response.text)
+        self.assertIn("S.browser_fallback_url=", response.text)
         self.assertIn("/v1/client/subscription/", response.text)
         self.assertIn("Открыть в INCY", response.text)
 
@@ -1587,7 +1588,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             response.text,
         )
         self.assertIn("/v1/client/subscription/", response.text)
-        self.assertIn("window.location.href", response.text)
+        self.assertIn("S.browser_fallback_url=", response.text)
+        self.assertNotIn("window.setTimeout", response.text)
         self.assertIn("Открыть в Freedom VPN", response.text)
         self.assertIn('id="open-freedom-vpn"', response.text)
 

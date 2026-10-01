@@ -1,6 +1,5 @@
 import secrets
 import html
-import json
 from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -744,10 +743,13 @@ async def incy_import_redirect(token: str):
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
         f"{token}"
     )
+    encoded_fallback_url = quote(subscription_url, safe="")
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
-        "#Intent;scheme=incy;package=llc.itdev.incy;end"
+        "#Intent;scheme=incy;package=llc.itdev.incy;"
+        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
+        f"S.browser_fallback_url={encoded_fallback_url};end"
     )
     return HTMLResponse(
         content=f"""<!doctype html>
@@ -790,13 +792,14 @@ async def freevpn_import_redirect(token: str):
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
         f"{token}"
     )
+    encoded_fallback_url = quote(subscription_url, safe="")
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
         "#Intent;scheme=freevpn;package=org.freedomvpn.app;"
-        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;end"
+        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
+        f"S.browser_fallback_url={encoded_fallback_url};end"
     )
-    android_intent_js = json.dumps(android_intent)
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru">
@@ -819,9 +822,6 @@ async def freevpn_import_redirect(token: str):
     <p>Нажмите кнопку, чтобы открыть подписку в установленном приложении Freedom VPN.</p>
     <a id="open-freedom-vpn" href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
   </main>
-  <script>
-    window.setTimeout(function () {{ window.location.href = {android_intent_js}; }}, 150);
-  </script>
 </body>
 </html>""",
         status_code=status.HTTP_200_OK,
