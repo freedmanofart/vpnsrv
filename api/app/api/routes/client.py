@@ -41,6 +41,8 @@ from app.services.node_health import node_accepts_clients
 from app.services.provider_codes import issue_provider_code
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
 from app.services.vless import build_vless_url
+from app.services.incy import build_incy_import_link
+from app.services.freevpn import build_freevpn_import_link
 from app.core.config import settings
 from app.core.cabinet_links import verify_incy_subscription_token
 
@@ -727,7 +729,7 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/import/{token}", include_in_schema=False)
-async def incy_import_redirect(token: str):
+async def incy_import_redirect(token: str, request: Request):
     """Bridge Telegram's HTTPS-only button validation to the INCY deep link.
 
     Telegram's Android WebView renders a 302 to ``incy://`` as
@@ -745,12 +747,15 @@ async def incy_import_redirect(token: str):
     )
     encoded_fallback_url = quote(subscription_url, safe="")
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
+    direct_link = build_incy_import_link(subscription_url)
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
         "#Intent;scheme=incy;package=llc.itdev.incy;"
         "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
         f"S.browser_fallback_url={encoded_fallback_url};end"
     )
+    user_agent = request.headers.get("user-agent", "").lower()
+    launch_link = android_intent if "android" in user_agent else direct_link
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru">
@@ -772,7 +777,7 @@ async def incy_import_redirect(token: str):
   <main>
     <h1>Импорт конфигурации</h1>
     <p>Нажмите кнопку, чтобы открыть конфигурацию в установленном приложении INCY.</p>
-    <a href="{html.escape(android_intent, quote=True)}">Открыть в INCY</a>
+    <a href="{html.escape(launch_link, quote=True)}">Открыть в INCY</a>
   </main>
 </body>
 </html>""",
@@ -782,7 +787,7 @@ async def incy_import_redirect(token: str):
 
 
 @router.get("/freevpn-import/{token}", include_in_schema=False)
-async def freevpn_import_redirect(token: str):
+async def freevpn_import_redirect(token: str, request: Request):
     """Bridge an HTTPS Telegram/site click to the Freedom VPN deep link."""
 
     if verify_incy_subscription_token(token) is None:
@@ -794,12 +799,15 @@ async def freevpn_import_redirect(token: str):
     )
     encoded_fallback_url = quote(subscription_url, safe="")
     encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
+    direct_link = build_freevpn_import_link(subscription_url)
     android_intent = (
         f"intent://import/{encoded_subscription_url}"
         "#Intent;scheme=freevpn;package=org.freedomvpn.app;"
         "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
         f"S.browser_fallback_url={encoded_fallback_url};end"
     )
+    user_agent = request.headers.get("user-agent", "").lower()
+    launch_link = android_intent if "android" in user_agent else direct_link
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru">
@@ -820,7 +828,7 @@ async def freevpn_import_redirect(token: str):
   <main>
     <h1>Импорт конфигурации</h1>
     <p>Нажмите кнопку, чтобы открыть подписку в установленном приложении Freedom VPN.</p>
-    <a id="open-freedom-vpn" href="{html.escape(android_intent, quote=True)}">Открыть в Freedom VPN</a>
+    <a id="open-freedom-vpn" href="{html.escape(launch_link, quote=True)}">Открыть в Freedom VPN</a>
   </main>
 </body>
 </html>""",

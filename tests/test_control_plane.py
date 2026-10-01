@@ -1564,7 +1564,10 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             client = await db.get(VPNClient, self.client_id)
             token = incy_subscription_token(client.id, client.expires_at)
 
-        response = await self.client.get(f"/v1/client/import/{token}")
+        response = await self.client.get(
+            f"/v1/client/import/{token}",
+            headers={"user-agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8)"},
+        )
 
         self.assertEqual(200, response.status_code)
         self.assertIn("intent://import/", response.text)
@@ -1573,12 +1576,22 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn("/v1/client/subscription/", response.text)
         self.assertIn("Открыть в INCY", response.text)
 
+        mac_response = await self.client.get(
+            f"/v1/client/import/{token}",
+            headers={"user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6)"},
+        )
+        self.assertIn('href="incy://import/', mac_response.text)
+        self.assertNotIn('href="intent://import/', mac_response.text)
+
     async def test_freevpn_import_bridge_exposes_custom_scheme(self) -> None:
         async with self.session_factory() as db:
             client = await db.get(VPNClient, self.client_id)
             token = incy_subscription_token(client.id, client.expires_at)
 
-        response = await self.client.get(f"/v1/client/freevpn-import/{token}")
+        response = await self.client.get(
+            f"/v1/client/freevpn-import/{token}",
+            headers={"user-agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8)"},
+        )
 
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn("intent://import/", response.text)
