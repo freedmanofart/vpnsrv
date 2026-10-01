@@ -907,7 +907,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             response.text,
         )
         self.assertIn('class="pay-button incy-import-button"', response.text)
-        self.assertIn("Импортировать в INCY", response.text)
+        self.assertIn("Импортировать<br>в INCY", response.text)
         self.assertIn("/v1/client/import/", response.text)
         self.assertNotIn('href="incy://import/', response.text)
         self.assertNotIn("📲 Импортировать в INCY", response.text)

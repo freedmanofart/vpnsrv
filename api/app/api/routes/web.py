@@ -991,8 +991,8 @@ async def cabinet(
             f'<div class="key"><code id="vpn-key" data-value="{html.escape(vpn_uri, quote=True)}">{html.escape(scheme)}://••••••••••••</code></div>'
             '<button class="button copy-button" type="button" onclick="copyKey(this)" aria-label="Скопировать VPN-ключ"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>Копировать ключ</button>'
             '</div><div class="import-buttons">'
-            f'<a class="pay-button incy-import-button" href="{html.escape(incy_import_url, quote=True)}">Импортировать в INCY</a>'
-            f'<a class="pay-button freevpn-import-button" href="{html.escape(freevpn_import_url, quote=True)}">Импортировать в Freedom VPN</a>'
+            f'<a class="pay-button incy-import-button" href="{html.escape(incy_import_url, quote=True)}">Импортировать<br>в INCY</a>'
+            f'<a class="pay-button freevpn-import-button" href="{html.escape(freevpn_import_url, quote=True)}">Импортировать<br>в Freedom VPN</a>'
             '</div>'
         )
     body = f"""
