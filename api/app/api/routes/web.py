@@ -247,19 +247,36 @@ def _format_gb(value: float) -> str:
     return f"{value:.1f} ГБ"
 
 
-def _plan_cards(plans: list[Plan]) -> str:
+def _package_limits_description(max_connections: int, traffic_limit_gb: int) -> str:
+    connections = "без ограничений" if not max_connections else f"{max_connections} подключений"
+    traffic = "без ограничений" if not traffic_limit_gb else f"{traffic_limit_gb} ГБ трафика"
+    return f"{connections} · {traffic}"
+
+
+def _package_description(package: PlanPackage) -> str:
+    return (package.description or "").strip() or _package_limits_description(
+        package.max_connections,
+        package.traffic_limit_gb,
+    )
+
+
+def _plan_cards(plans: list[Plan], packages: list[PlanPackage] | None = None) -> str:
+    packages_by_id = {item.id: item for item in packages or []}
     cards = []
     for plan in plans:
+        package = packages_by_id.get(plan.package_id) if plan.package_id else None
         tier = _tier(plan)
-        if tier is None:
+        if package is None and tier is None:
             continue
-        title, connections, traffic_label = TIER_META[tier]
+        title = package.name if package else TIER_META[tier][0]
+        description = _package_description(package) if package else " · ".join(TIER_META[tier][1:])
         devices = "без ограничений" if not plan.max_connections else str(plan.max_connections)
         traffic = "без ограничений" if not plan.traffic_limit_gb else f"{plan.traffic_limit_gb} ГБ"
+        featured = package.code == "standard" if package else tier == "standard"
         cards.append(
-            f'<article class="plan {"featured" if tier == "standard" else ""}"><span class="pill">{title}</span>'
-            f'<p class="plan-copy">{connections} · {traffic_label}</p>'
-            f'<div class="price">{plan.price:g} ₽ <small>/ месяц</small></div>'
+            f'<article class="plan {"featured" if featured else ""}"><span class="pill">{html.escape(title)}</span>'
+            f'<p class="plan-copy">{html.escape(description)}</p>'
+            f'<div class="price">{html.escape(_format_money(plan.price, plan.currency))} <small>/ {plan.duration_days} дн.</small></div>'
             f'<ul><li>До {devices} одновременных подключений</li><li>{traffic} трафика</li><li>Все поддерживаемые устройства</li></ul>'
             f'<button class="button primary" data-plan="{plan.id}">Выбрать</button></article>'
         )
@@ -282,23 +299,23 @@ def _package_label(plan: Plan, packages_by_id: dict[int, PlanPackage] | None = N
 def _tier_selector(plans: list[Plan], packages: list[PlanPackage] | None = None) -> str:
     packages_by_id = {item.id: item for item in packages or []}
     groups: dict[str, list[Plan]] = {key: [] for key in TIER_META}
-    package_meta: dict[str, tuple[str, str, str]] = dict(TIER_META)
+    package_meta: dict[str, tuple[str, str]] = {
+        key: (title, f"{connections} · {traffic}")
+        for key, (title, connections, traffic) in TIER_META.items()
+    }
     for package in packages or []:
-        package_meta[package.code] = (
-            package.name,
-            "без ограничений" if not package.max_connections else f"{package.max_connections} подключений",
-            "без ограничений" if not package.traffic_limit_gb else f"{package.traffic_limit_gb} ГБ трафика",
-        )
+        package_meta[package.code] = (package.name, _package_description(package))
         groups.setdefault(package.code, [])
     for plan in plans:
         tier = _package_code(plan, packages_by_id)
         if tier:
+            groups.setdefault(tier, [])
             groups[tier].append(plan)
     cards = []
     for tier, tier_plans in groups.items():
         if not tier_plans:
             continue
-        title, connections, traffic = package_meta[tier]
+        title, description = package_meta.get(tier, ("Тариф", ""))
         ordered_plans = sorted(
             tier_plans,
             key=lambda item: (abs(item.duration_days - 30), item.duration_days),
@@ -309,8 +326,8 @@ def _tier_selector(plans: list[Plan], packages: list[PlanPackage] | None = None)
             for index, plan in enumerate(ordered_plans)
         )
         cards.append(
-            f'<article class="tier-group" data-tier="{tier}"><h3>{title}</h3>'
-            f'<p class="muted">{connections} · {traffic}</p>'
+            f'<article class="tier-group" data-tier="{html.escape(tier, quote=True)}"><h3>{html.escape(title)}</h3>'
+            f'<p class="muted">{html.escape(description)}</p>'
             f'<div class="duration-buttons">{buttons}</div></article>'
         )
     return "".join(cards)
@@ -399,7 +416,8 @@ body:has(.landing-v2),body:has(.login-page){{font-family:ui-rounded,"SF Pro Roun
 
 @router.get("/", response_class=HTMLResponse)
 async def landing(db: AsyncSession = Depends(get_db)):
-    all_plans = [plan for plan in await _plans(db) if _tier(plan)]
+    all_plans = await _plans(db)
+    packages = await _plan_packages(db)
     body = f"""<div class=\"landing-v2\">
 <header class=\"l-header\"><a class=\"l-brand\" href=\"/\" aria-label=\"Freedom VPN — главная\"><img src=\"/static/freedom-vpn-mark.webp\" srcset=\"/static/freedom-vpn-mark.webp 1x, /static/freedom-vpn-mark@2x.webp 2x\" width=\"32\" height=\"32\" alt=\"\"><span>Freedom <i>VPN</i></span></a><a class=\"l-cabinet\" href=\"/cabinet\">Кабинет</a></header>
 <main>
@@ -418,7 +436,7 @@ async def landing(db: AsyncSession = Depends(get_db)):
 </main>
 <footer class=\"l-footer\"><nav class=\"l-footer-links\" aria-label=\"Документы и контакты\"><a href=\"/static/privacy.html\">Конфиденциальность</a><a href=\"/static/terms.html\">Условия использования</a><a href=\"https://t.me/Freedom_VPN_Support\" target=\"_blank\" rel=\"noopener noreferrer\">Контакты</a></nav></footer>
 </div>
-<div class=\"modal\" id=\"register\"><div class=\"modal-card plan-modal\"><h3>Выберите подписку</h3><p class=\"muted\">Нажмите на срок, чтобы раскрыть остальные планы этой группы.</p><div class=\"tier-groups\">{_tier_selector(all_plans)}</div><input id=\"plan\" type=\"hidden\"><p id=\"result\"></p><div class=\"actions\"><button class=\"button\" type=\"button\" onclick=\"closeModal()\">Отмена</button><button class=\"button primary\" type=\"button\" onclick=\"checkout()\">Оплата</button></div></div></div>
+<div class=\"modal\" id=\"register\"><div class=\"modal-card plan-modal\"><h3>Выберите подписку</h3><p class=\"muted\">Нажмите на срок, чтобы раскрыть остальные планы этой группы.</p><div class=\"tier-groups\">{_tier_selector(all_plans, packages)}</div><input id=\"plan\" type=\"hidden\"><p id=\"result\"></p><div class=\"actions\"><button class=\"button\" type=\"button\" onclick=\"closeModal()\">Отмена</button><button class=\"button primary\" type=\"button\" onclick=\"checkout()\">Оплата</button></div></div></div>
 <script>const modal=document.getElementById('register'),plan=document.getElementById('plan');function openPlans(id=''){{modal.classList.add('open');if(id)selectPlan(id)}}function selectPlan(id){{plan.value=id;document.querySelectorAll('[data-order-plan]').forEach(x=>x.classList.toggle('selected',x.dataset.orderPlan===String(id)));document.querySelectorAll('.tier-group').forEach(x=>x.classList.toggle('selected',!!x.querySelector('.selected')));document.querySelector(`[data-order-plan="${{id}}"]`)?.closest('.tier-group')?.classList.add('expanded')}}document.querySelectorAll('[data-choose-plan]').forEach(b=>b.onclick=()=>openPlans());document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>openPlans(b.dataset.plan));document.querySelectorAll('.plan-modal .tier-group').forEach(group=>group.onclick=event=>{{if(!event.target.closest('[data-order-plan]'))group.classList.toggle('expanded')}});document.querySelectorAll('[data-order-plan]').forEach(b=>b.onclick=event=>{{event.stopPropagation();selectPlan(b.dataset.orderPlan)}});function closeModal(){{modal.classList.remove('open')}}function checkout(){{const out=document.getElementById('result');if(!plan.value){{out.className='error';out.textContent='Выберите подписку';return}}location.href=`/cabinet?checkout=1&plan_id=${{encodeURIComponent(plan.value)}}#payment`}}</script>"""
     return HTMLResponse(_shell(body), headers=_headers())
 

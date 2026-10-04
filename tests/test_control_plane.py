@@ -202,6 +202,23 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn("Коды подключения провайдера", authenticated.text)
         self.assertIn('name="is_active"', authenticated.text)
 
+    async def test_landing_uses_current_package_name_and_description(self) -> None:
+        async with self.session_factory() as db:
+            package = await db.get(PlanPackage, self.package_id)
+            package.name = "Актуальный пакет"
+            package.description = "2 устройства · 80 ГБ трафика"
+            package.max_connections = 2
+            package.traffic_limit_gb = 80
+            await db.commit()
+
+        response = await self.client.get("/")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("Актуальный пакет", response.text)
+        self.assertIn("2 устройства · 80 ГБ трафика", response.text)
+        self.assertIn('data-order-plan="1"', response.text)
+        self.assertNotIn("250 ГБ трафика", response.text)
+
     async def test_admin_creates_lists_and_deletes_promo_codes(self) -> None:
         created = await self.client.post(
             "/admin/promo-codes",
