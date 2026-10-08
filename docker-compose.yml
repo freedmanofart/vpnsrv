@@ -56,6 +56,7 @@ services:
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "api.telegram.org:host-gateway"
 
     volumes:
       - ./api/app:/app/app
@@ -154,6 +155,9 @@ services:
       YOOMONEY_30D_URL: ${YOOMONEY_30D_URL:-}
       YOOMONEY_90D_URL: ${YOOMONEY_90D_URL:-}
       TRY_PAYMENT_URL: ${TRY_PAYMENT_URL:-}
+
+    extra_hosts:
+      - "api.telegram.org:host-gateway"
 
     volumes:
       - ./bot/app:/app/app

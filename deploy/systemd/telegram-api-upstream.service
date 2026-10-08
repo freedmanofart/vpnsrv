@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegram API upstream TLS relay
+Wants=network-online.target
+After=network-online.target tailscaled.service
+Requires=tailscaled.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:18443,bind=100.117.14.51,reuseaddr,fork TCP:api.telegram.org:443
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
