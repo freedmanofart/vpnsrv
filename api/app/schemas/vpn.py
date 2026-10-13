@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class VPNNodeCreate(BaseModel):
@@ -87,6 +87,13 @@ class VPNClientResponse(BaseModel):
     revoked_at: datetime | None
 
 
+class VPNClientProfileVariant(BaseModel):
+    index: int
+    name: str
+    protocol: str
+    config: str
+
+
 class VPNClientConfigResponse(BaseModel):
     client_id: int
     protocol: str
@@ -98,6 +105,9 @@ class VPNClientConfigResponse(BaseModel):
     freevpn_subscription_url: str | None = None
     freevpn_import_url: str | None = None
     freevpn_telegram_import_url: str | None = None
+    amnezia_import_url: str | None = None
+    v2raytun_import_url: str | None = None
+    profiles: list[VPNClientProfileVariant] = Field(default_factory=list)
 
 
 class VPNNodeHealthResponse(BaseModel):

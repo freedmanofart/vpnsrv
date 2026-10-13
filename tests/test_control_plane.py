@@ -23,7 +23,11 @@ os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
 import app.main as main_module
 from app.api.routes import admin as admin_routes
-from app.api.routes.client import kit_subscription_for_client, kit_subscription_uris
+from app.api.routes.client import (
+    kit_amnezia_profiles,
+    kit_subscription_for_client,
+    kit_subscription_uris,
+)
 from app.core.config import settings
 from app.core.cabinet_links import incy_subscription_token
 from app.core.tokens import token_hash
@@ -99,6 +103,59 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             session.get.side_effect = httpx.ConnectError("upstream unavailable")
             self.assertIsNone(await kit_subscription_for_client(client, node, config, "INCY/1.0"))
         self.assertEqual([], kit_subscription_uris(b"<html>unavailable</html>"))
+
+    async def test_kit_subscription_can_be_enabled_for_all_clients(self) -> None:
+        client = SimpleNamespace(id=97, protocol="vless")
+        node = SimpleNamespace(ip_address="203.0.113.20", hostname="vpn.example.test")
+        config = SimpleNamespace(config={
+            "kit_subscription_all_clients": True,
+            "kit_subscription_base_url": "https://vpn.example.test/kit/",
+            "api_address": "https://master.example.test/panel/",
+        })
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        session.get.return_value = httpx.Response(
+            200,
+            content=b"vless://one@example.test:443#VLESS",
+        )
+        with (
+            patch("app.api.routes.client.ThreeXUIClient") as panel,
+            patch("app.api.routes.client.httpx.AsyncClient", return_value=session),
+        ):
+            panel.return_value.get_client_subscription_info = AsyncMock(return_value={
+                "sub_id": "all-client-sub", "inbound_ids": [8, 12],
+            })
+            result = await kit_subscription_for_client(client, node, config, "INCY/1.0")
+        self.assertEqual(["vless://one@example.test:443#VLESS"], result["uris"])
+
+    def test_kit_amnezia_profiles_build_import_and_router_configs(self) -> None:
+        body = b"""proxies:
+  - name: AmneziaWG
+    type: wireguard
+    server: vpn.example.test
+    port: 443
+    ip: [10.8.0.2/32]
+    private-key: private
+    public-key: public
+    mtu: 1280
+    amnezia-wg-option: {jc: 5, jmin: 50, jmax: 1000, h1: 1, h2: 2, h3: 3, h4: 4}
+  - name: AmneziaWG 3.1
+    type: wireguard
+    server: vpn.example.test
+    port: 443
+    ip: [10.9.0.2/32]
+    private-key: private3
+    public-key: public3
+    amnezia-wg-option:
+      header-protection-key: hp-key
+      content-padding-addition: 7
+"""
+        profiles = kit_amnezia_profiles(body)
+        self.assertEqual(["AmneziaWG", "AmneziaWG 3.1"], [item["name"] for item in profiles])
+        self.assertTrue(all(item["config"].startswith("vpn://") for item in profiles))
+        self.assertIn("PersistentKeepalive = 25", profiles[0]["wireguard_config"])
+        self.assertIn("Jc = 5", profiles[0]["wireguard_config"])
+        self.assertIn("HeaderProtectionKey = hp-key", profiles[1]["wireguard_config"])
 
     async def asyncSetUp(self) -> None:
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -979,8 +1036,12 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertIn('class="pay-button incy-import-button"', response.text)
         self.assertIn('/v1/client/import/', response.text)
         self.assertIn('/v1/client/freevpn-import/', response.text)
+        self.assertIn('/v1/client/amnezia-import/', response.text)
+        self.assertIn('/v1/client/v2raytun-import/', response.text)
         self.assertIn("Импортировать<br>в INCY", response.text)
         self.assertIn("Импортировать<br>в Freedom VPN", response.text)
+        self.assertIn("Импортировать<br>в Amnezia VPN", response.text)
+        self.assertIn("Импортировать<br>в V2rayTUN", response.text)
         self.assertNotIn("📲 Импортировать в INCY", response.text)
         self.assertNotIn("Из-за блокировок РКН", response.text)
         self.assertNotIn('class="support-link"', response.text)
@@ -1483,12 +1544,13 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             await db.commit()
 
         bundle = {
-            "body": b"vless://one@example.test:443#VLESS\nhysteria2://two@example.test:443#HY2",
+            "body": b"vless://one@example.test:443#VLESS\nhysteria2://two@example.test:443#HY2\ntrojan://three@example.test:443#Trojan",
             "content_type": "text/plain; charset=utf-8",
             "headers": {},
             "uris": [
                 "vless://one@example.test:443#VLESS",
                 "hysteria2://two@example.test:443#HY2",
+                "trojan://three@example.test:443#Trojan",
             ],
         }
         with (
@@ -1509,9 +1571,9 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         profiles = response.json()["nodes"]
-        self.assertEqual(["vless", "hysteria2"], [p["protocol"] for p in profiles])
+        self.assertEqual(["vless", "trojan"], [p["protocol"] for p in profiles])
         self.assertEqual(2, len({p["profile_id"] for p in profiles}))
-        self.assertIn("hysteria2://", profiles[1]["config"])
+        self.assertNotIn("hysteria2", {p["protocol"] for p in profiles})
 
     async def test_mobile_trial_returns_all_profiles_and_live_usage(self) -> None:
         async with self.session_factory() as db:
@@ -1727,6 +1789,35 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         response = await self.client.get("/v1/client/freevpn-import/not-a-token")
 
         self.assertEqual(404, response.status_code)
+
+    async def test_v2raytun_import_bridge_exposes_custom_scheme(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            token = incy_subscription_token(client.id, client.expires_at)
+
+        response = await self.client.get(f"/v1/client/v2raytun-import/{token}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn('href="v2raytun://import/', response.text)
+        self.assertIn("/v1/client/subscription/", response.text)
+        self.assertIn("Открыть в V2rayTUN", response.text)
+
+    async def test_profile_qr_uses_selected_configuration(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            token = incy_subscription_token(client.id, client.expires_at)
+        profiles = [
+            {"name": "VLESS", "protocol": "vless", "config": "vless://one@example.test"},
+            {"name": "Trojan", "protocol": "trojan", "config": "trojan://two@example.test"},
+        ]
+        with patch(
+            "app.api.routes.client.kit_all_profiles_for_client",
+            new=AsyncMock(return_value=profiles),
+        ):
+            response = await self.client.get(f"/v1/client/qr/{token}/1")
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("image/png", response.headers["content-type"])
+        self.assertTrue(response.content.startswith(b"\x89PNG"))
 
     async def test_incy_subscription_returns_utf8_metadata_and_vless(self) -> None:
         async with self.session_factory() as db:

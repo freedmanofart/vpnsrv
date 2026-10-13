@@ -349,14 +349,17 @@ def active_vpn_keyboard() -> InlineKeyboardMarkup:
 
 def vpn_key_copy_keyboard(
     client_id: int,
+    profile_index: int = 0,
     freevpn_import_url: str = "",
     incy_import_url: str = "",
+    amnezia_import_url: str = "",
+    v2raytun_import_url: str = "",
 ) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
                 text="📋 Скопировать ключ",
-                callback_data=f"vpn_key_copy:{client_id}",
+                callback_data=f"vpn_key_copy:{client_id}:{profile_index}",
             )
         ],
     ]
@@ -374,10 +377,38 @@ def vpn_key_copy_keyboard(
                 url=freevpn_import_url,
             )
         ])
+    if amnezia_import_url:
+        rows.append([
+            InlineKeyboardButton(
+                text="📲 Импортировать в Amnezia VPN",
+                url=amnezia_import_url,
+            )
+        ])
+    if v2raytun_import_url:
+        rows.append([
+            InlineKeyboardButton(
+                text="📲 Импортировать в V2rayTUN",
+                url=v2raytun_import_url,
+            )
+        ])
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(
         inline_keyboard=rows,
     )
+
+
+def vpn_profile_selection_keyboard(client_id: int, profiles: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=str(profile.get("name") or profile.get("protocol") or f"Профиль {index + 1}"),
+                callback_data=f"vpn_key_profile:{client_id}:{index}",
+            )
+        ]
+        for index, profile in enumerate(profiles)
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def human_traffic(value: int | None) -> str:
@@ -878,21 +909,43 @@ async def show_try_payment(target: Message | CallbackQuery) -> None:
     )
 
 
-async def send_key_message(message: Message, client_id: int) -> None:
-    data = await get_vpn_client_config(client_id)
-    value = data["config"]
+async def send_key_message(
+    message: Message,
+    client_id: int,
+    profile_index: int | None = None,
+    data: dict | None = None,
+) -> None:
+    data = data or await get_vpn_client_config(client_id)
+    profiles = data.get("profiles") or [
+        {"name": "Основная конфигурация", "protocol": data.get("protocol"), "config": data["config"]}
+    ]
+    if profile_index is None and len(profiles) > 1:
+        await message.answer(
+            "🔑 <b>Выберите конфигурацию</b>\n\nПосле выбора бот покажет QR-код и кнопку копирования.",
+            parse_mode="HTML",
+            reply_markup=vpn_profile_selection_keyboard(client_id, profiles),
+        )
+        return
+    selected_index = profile_index or 0
+    if selected_index < 0 or selected_index >= len(profiles):
+        raise ValueError("VPN profile index is out of range")
+    profile = profiles[selected_index]
+    value = profile["config"]
     await message.answer_photo(
         photo=qr_file(value),
         caption=(
-            "🔑 <b>Ваш VPN-ключ</b>\n\n"
+            f"🔑 <b>{html.escape(str(profile.get('name') or 'Ваш VPN-ключ'))}</b>\n\n"
             "Отсканируйте QR-код или нажмите «Скопировать ключ»."
         ),
         parse_mode="HTML",
         reply_markup=vpn_key_copy_keyboard(
             client_id,
+            selected_index,
             data.get("freevpn_telegram_import_url")
             or data.get("freevpn_import_url", ""),
             data.get("incy_telegram_import_url") or data.get("incy_import_url", ""),
+            data.get("amnezia_import_url", ""),
+            data.get("v2raytun_import_url", ""),
         ),
     )
 
@@ -2029,7 +2082,9 @@ async def vpn_key_handler(callback: CallbackQuery):
 async def vpn_key_copy_handler(callback: CallbackQuery):
     await callback.answer()
     try:
-        client_id = int(callback.data.split(":", 1)[1])
+        parts = callback.data.split(":")
+        client_id = int(parts[1])
+        profile_index = int(parts[2]) if len(parts) > 2 else 0
         status_data = await get_vpn_status(callback.from_user.id)
         active_client = status_data.get("vpn_client")
         if not active_client or int(active_client["id"]) != client_id:
@@ -2038,8 +2093,11 @@ async def vpn_key_copy_handler(callback: CallbackQuery):
             )
             return
         data = await get_vpn_client_config(client_id)
+        profiles = data.get("profiles") or [{"config": data["config"]}]
+        if profile_index < 0 or profile_index >= len(profiles):
+            raise ValueError("VPN profile index is out of range")
         await callback.message.answer(
-            vpn_key_copy_message(data["config"]),
+            vpn_key_copy_message(profiles[profile_index]["config"]),
             parse_mode="HTML",
             reply_markup=active_vpn_keyboard(),
         )
@@ -2049,6 +2107,33 @@ async def vpn_key_copy_handler(callback: CallbackQuery):
     except Exception:
         logging.exception("Failed to prepare VPN key for copying")
         await callback.message.answer("Не удалось получить ключ. Попробуйте ещё раз.")
+
+
+@router.callback_query(F.data.startswith("vpn_key_profile:"))
+async def vpn_key_profile_handler(callback: CallbackQuery):
+    try:
+        _, raw_client_id, raw_profile_index = callback.data.split(":", 2)
+        client_id = int(raw_client_id)
+        profile_index = int(raw_profile_index)
+        status_data = await get_vpn_status(callback.from_user.id)
+        active_client = status_data.get("vpn_client")
+        if not active_client or int(active_client["id"]) != client_id:
+            await callback.answer("Этот VPN-ключ больше не активен", show_alert=True)
+            return
+        data = await get_vpn_client_config(client_id)
+        await send_key_message(
+            callback.message,
+            client_id,
+            profile_index=profile_index,
+            data=data,
+        )
+        await callback.answer()
+    except (KeyError, TypeError, ValueError):
+        logging.exception("Invalid VPN profile callback")
+        await callback.answer("Не удалось определить конфигурацию", show_alert=True)
+    except Exception:
+        logging.exception("Failed to show selected VPN profile")
+        await callback.answer("Не удалось получить конфигурацию", show_alert=True)
 
 
 @router.callback_query(F.data == "vpn_reissue")
