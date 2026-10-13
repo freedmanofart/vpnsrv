@@ -174,6 +174,41 @@ class ThreeXUIClient:
             if isinstance(item, dict)
         ]
 
+    async def get_client_subscription_info(self, email: str) -> dict:
+        """Return the panel subId and inbound IDs for one client without exposing its key."""
+        rows = await self._request("GET", "inbounds/list")
+        if not isinstance(rows, list):
+            raise ThreeXUIError("3x-ui returned an invalid inbound list")
+
+        sub_ids: set[str] = set()
+        inbound_ids: set[int] = set()
+        for inbound in rows:
+            if not isinstance(inbound, dict):
+                continue
+            raw_settings = inbound.get("settings") or {}
+            if isinstance(raw_settings, str):
+                try:
+                    raw_settings = json.loads(raw_settings)
+                except ValueError as exc:
+                    raise ThreeXUIError("3x-ui returned invalid inbound settings") from exc
+            clients = raw_settings.get("clients", []) if isinstance(raw_settings, dict) else []
+            for item in clients:
+                if not isinstance(item, dict) or item.get("email") != email:
+                    continue
+                try:
+                    inbound_ids.add(int(inbound["id"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if item.get("subId"):
+                    sub_ids.add(str(item["subId"]))
+
+        if len(sub_ids) > 1:
+            raise ThreeXUIError("3x-ui returned conflicting subscription IDs for a client")
+        return {
+            "sub_id": next(iter(sub_ids), ""),
+            "inbound_ids": sorted(inbound_ids),
+        }
+
     async def get_client_traffic(self, email: str) -> dict:
         rows = await self._request("GET", "inbounds/list")
         if not isinstance(rows, list):

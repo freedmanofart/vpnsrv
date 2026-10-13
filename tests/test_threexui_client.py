@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 
-from app.services.threexui import ThreeXUIClient
+from app.services.threexui import ThreeXUIClient, ThreeXUIError
 
 
 class FakeAsyncClient:
@@ -101,6 +102,46 @@ class ThreeXUIClientTests(IsolatedAsyncioTestCase):
             users = await ThreeXUIClient("https://master.example/base").get_users("17")
         self.assertEqual(["vpn-42"], [user.email for user in users])
         self.assertTrue(FakeAsyncClient.requests[0][1].endswith("/panel/api/inbounds/list"))
+
+    async def test_get_client_subscription_info_collects_attached_inbounds(self):
+        FakeAsyncClient.responses = [{
+            "success": True,
+            "obj": [
+                {"id": 8, "settings": {"clients": [
+                    {"email": "vpn-42", "subId": "sub-42"},
+                ]}},
+                {"id": 12, "settings": json.dumps({"clients": [
+                    {"email": "vpn-42", "subId": "sub-42"},
+                ]})},
+                {"id": 13, "settings": {"clients": [
+                    {"email": "other", "subId": "other-sub"},
+                ]}},
+            ],
+        }]
+        with (
+            patch("app.services.threexui.settings.threexui_api_token", "node-token"),
+            patch("app.services.threexui.httpx.AsyncClient", FakeAsyncClient),
+        ):
+            info = await ThreeXUIClient("https://master.example/base").get_client_subscription_info(
+                "vpn-42"
+            )
+
+        self.assertEqual({"sub_id": "sub-42", "inbound_ids": [8, 12]}, info)
+
+    async def test_get_client_subscription_info_rejects_conflicting_subids(self):
+        FakeAsyncClient.responses = [{
+            "success": True,
+            "obj": [
+                {"id": 8, "settings": {"clients": [{"email": "vpn-42", "subId": "first"}]}},
+                {"id": 12, "settings": {"clients": [{"email": "vpn-42", "subId": "second"}]}},
+            ],
+        }]
+        with (
+            patch("app.services.threexui.settings.threexui_api_token", "node-token"),
+            patch("app.services.threexui.httpx.AsyncClient", FakeAsyncClient),
+        ):
+            with self.assertRaises(ThreeXUIError):
+                await ThreeXUIClient("https://master.example/base").get_client_subscription_info("vpn-42")
 
     async def test_get_client_traffic_uses_email_endpoint(self):
         FakeAsyncClient.responses = [{

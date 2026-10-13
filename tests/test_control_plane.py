@@ -23,6 +23,7 @@ os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
 import app.main as main_module
 from app.api.routes import admin as admin_routes
+from app.api.routes.client import kit_subscription_for_client, kit_subscription_uris
 from app.core.config import settings
 from app.core.cabinet_links import incy_subscription_token
 from app.core.tokens import token_hash
@@ -47,6 +48,58 @@ from app.db.session import get_db
 
 
 class ControlPlaneTests(IsolatedAsyncioTestCase):
+    async def test_kit_subscription_requires_explicit_client_and_trusted_node_url(self) -> None:
+        client = SimpleNamespace(id=137, protocol="vless")
+        node = SimpleNamespace(ip_address="203.0.113.20", hostname="vpn.example.test")
+        for config in [
+            {"kit_subscription_base_url": "https://vpn.example.test/kit/"},
+            {"kit_subscription_client_ids": [138], "kit_subscription_base_url": "https://vpn.example.test/kit/"},
+            {"kit_subscription_client_ids": [137], "kit_subscription_base_url": "https://other.example.test/kit/"},
+            {"kit_subscription_client_ids": [137], "kit_subscription_base_url": "http://vpn.example.test/kit/"},
+            {"kit_subscription_client_ids": [137], "kit_subscription_base_url": "https://vpn.example.test:bad/kit/"},
+        ]:
+            with patch("app.api.routes.client.ThreeXUIClient") as panel:
+                result = await kit_subscription_for_client(
+                    client, node, SimpleNamespace(config=config), "INCY/1.0"
+                )
+                self.assertIsNone(result)
+                panel.assert_not_called()
+
+    async def test_kit_subscription_decodes_base64_and_falls_back_on_error(self) -> None:
+        client = SimpleNamespace(id=137, protocol="vless")
+        node = SimpleNamespace(ip_address="203.0.113.20", hostname="vpn.example.test")
+        config = SimpleNamespace(config={
+            "kit_subscription_client_ids": [137],
+            "kit_subscription_base_url": "https://vpn.example.test/kit/",
+            "api_address": "https://master.example.test/panel/",
+        })
+        uris = ["vless://one@example.test:443#VLESS", "hysteria2://two@example.test:443#HY2"]
+        body = base64.b64encode("\n".join(uris).encode())
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        session.get.return_value = httpx.Response(200, content=body)
+        with (
+            patch("app.api.routes.client.ThreeXUIClient") as panel,
+            patch("app.api.routes.client.httpx.AsyncClient", return_value=session),
+        ):
+            panel.return_value.get_client_subscription_info = AsyncMock(return_value={
+                "sub_id": "test-sub", "inbound_ids": [8, 12],
+            })
+            result = await kit_subscription_for_client(client, node, config, "INCY/1.0")
+            self.assertEqual(uris, result["uris"])
+            self.assertEqual(body, result["body"])
+            self.assertEqual("INCY/1.0", session.get.await_args.kwargs["headers"]["User-Agent"])
+
+            panel.return_value.get_client_subscription_info.return_value["inbound_ids"] = [8]
+            session.get.reset_mock()
+            self.assertIsNone(await kit_subscription_for_client(client, node, config, "INCY/1.0"))
+            session.get.assert_not_awaited()
+
+            panel.return_value.get_client_subscription_info.return_value["inbound_ids"] = [8, 12]
+            session.get.side_effect = httpx.ConnectError("upstream unavailable")
+            self.assertIsNone(await kit_subscription_for_client(client, node, config, "INCY/1.0"))
+        self.assertEqual([], kit_subscription_uris(b"<html>unavailable</html>"))
+
     async def asyncSetUp(self) -> None:
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
@@ -1413,6 +1466,53 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(200, accepted.status_code, accepted.text)
 
+    async def test_client_profile_includes_multi_inbound_kit_variants(self) -> None:
+        device_token = "device-profile-token"
+        async with self.session_factory() as db:
+            db.add(
+                ClientDevice(
+                    user_id=self.user_id,
+                    name="Profile test",
+                    platform="android",
+                    token_hash=token_hash(device_token),
+                    token_prefix="device",
+                    status="active",
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=10),
+                )
+            )
+            await db.commit()
+
+        bundle = {
+            "body": b"vless://one@example.test:443#VLESS\nhysteria2://two@example.test:443#HY2",
+            "content_type": "text/plain; charset=utf-8",
+            "headers": {},
+            "uris": [
+                "vless://one@example.test:443#VLESS",
+                "hysteria2://two@example.test:443#HY2",
+            ],
+        }
+        with (
+            patch(
+                "app.api.routes.client.kit_subscription_for_client",
+                new=AsyncMock(return_value=bundle),
+            ),
+            patch("app.api.routes.client.ThreeXUIClient") as panel,
+        ):
+            panel.return_value.get_client_traffic = AsyncMock(return_value={})
+            response = await self.client.get(
+                "/v1/client/profile",
+                headers={
+                    "Authorization": f"Bearer {device_token}",
+                    "User-Agent": "FreedomVPN/1.0",
+                },
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        profiles = response.json()["nodes"]
+        self.assertEqual(["vless", "hysteria2"], [p["protocol"] for p in profiles])
+        self.assertEqual(2, len({p["profile_id"] for p in profiles}))
+        self.assertIn("hysteria2://", profiles[1]["config"])
+
     async def test_mobile_trial_returns_all_profiles_and_live_usage(self) -> None:
         async with self.session_factory() as db:
             node = VPNNode(
@@ -1652,6 +1752,39 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             response.headers["premium-url"],
         )
         self.assertNotIn("announce", response.headers)
+
+    async def test_incy_subscription_returns_all_attached_kit_variants(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            token = incy_subscription_token(client.id, client.expires_at)
+
+        body = (
+            b"vless://one@example.test:443#VLESS\n"
+            b"hysteria2://two@example.test:443#HY2\n"
+        )
+        bundle = {
+            "body": body,
+            "content_type": "text/plain; charset=utf-8",
+            "headers": {"subscription-userinfo": "upload=10; download=20; total=100"},
+            "uris": [
+                "vless://one@example.test:443#VLESS",
+                "hysteria2://two@example.test:443#HY2",
+            ],
+        }
+        with patch(
+            "app.api.routes.client.kit_subscription_for_client",
+            new=AsyncMock(return_value=bundle),
+        ) as get_kit:
+            response = await self.client.get(
+                f"/v1/client/subscription/{token}",
+                headers={"User-Agent": "INCY/1.0"},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(body, response.content)
+        self.assertEqual("upload=10; download=20; total=100", response.headers["subscription-userinfo"])
+        self.assertTrue(response.headers["profile-title"].startswith("base64:"))
+        self.assertEqual("INCY/1.0", get_kit.await_args.args[3])
 
     async def test_incy_subscription_reports_traffic_usage(self) -> None:
         traffic_limit = 250 * 1024**3

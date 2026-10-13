@@ -1,12 +1,14 @@
 import secrets
 import html
-from base64 import b64encode
+import re
+from base64 import b64decode, b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -79,6 +81,98 @@ def incy_support_url() -> str:
         return configured
     username = settings.bot_username.strip().lstrip("@")
     return f"https://t.me/{username}?start=support" if username else ""
+
+
+_KIT_URI = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://\S+$")
+_KIT_SCHEMES = {
+    "vless", "vmess", "trojan", "ss", "hysteria2", "hy2", "tuic",
+    "wireguard", "amneziawg", "vpn", "socks", "socks5", "http",
+}
+
+
+def kit_subscription_uris(body: bytes) -> list[str]:
+    text = body.decode("utf-8-sig", errors="ignore").strip()
+    if "://" not in text:
+        try:
+            padded = text.encode("ascii") + b"=" * (-len(text) % 4)
+            decoded = b64decode(padded, altchars=b"-_", validate=True).decode(
+                "utf-8-sig", errors="ignore"
+            )
+            if "://" in decoded:
+                text = decoded
+        except (UnicodeEncodeError, ValueError):
+            pass
+    uris = []
+    for line in text.splitlines():
+        candidate = line.strip()
+        match = _KIT_URI.match(candidate)
+        if match and match.group(1).lower() in _KIT_SCHEMES:
+            uris.append(candidate)
+    return uris
+
+
+async def kit_subscription_for_client(
+    client: VPNClient,
+    node: VPNNode,
+    node_config: VPNNodeConfig,
+    user_agent: str,
+    accept: str = "",
+) -> dict | None:
+    """Fetch app-compatible KIT profiles only when this user has multiple inbounds."""
+    enabled_clients = node_config.config.get("kit_subscription_client_ids", [])
+    if not isinstance(enabled_clients, list) or client.id not in enabled_clients:
+        return None
+    base = str(node_config.config.get("kit_subscription_base_url") or "").strip()
+    try:
+        parsed = urlsplit(base)
+        parsed_port = parsed.port
+    except ValueError:
+        return None
+    allowed_hosts = {node.ip_address.lower()}
+    if node.hostname:
+        allowed_hosts.add(node.hostname.lower())
+    if (
+        client.protocol != "vless"
+        or parsed.scheme != "https"
+        or (parsed.hostname or "").lower() not in allowed_hosts
+        or parsed_port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or not re.fullmatch(r"/[A-Za-z0-9_-]{1,64}/", parsed.path)
+    ):
+        return None
+
+    try:
+        panel = ThreeXUIClient(node_config.config.get("api_address"), timeout=8)
+        info = await panel.get_client_subscription_info(f"vpn-{client.id}")
+        sub_id = info["sub_id"]
+        if not sub_id or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", sub_id):
+            return None
+        if len(info["inbound_ids"]) < 2:
+            return None
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as session:
+            response = await session.get(
+                f"{base.rstrip('/')}/{quote(sub_id, safe='._@-')}",
+                headers={
+                    "User-Agent": (user_agent or "Freedom VPN")[:200],
+                    "Accept": accept[:256] or "*/*",
+                },
+            )
+        if response.status_code != 200 or len(response.content) > 2 * 1024 * 1024:
+            return None
+        uris = kit_subscription_uris(response.content)
+        if not uris:
+            return None
+        return {
+            "body": response.content,
+            "content_type": "text/plain",
+            "headers": response.headers,
+            "uris": uris,
+        }
+    except (ThreeXUIError, httpx.HTTPError, KeyError, TypeError, ValueError):
+        return None
 
 
 async def active_subscription_for_user(
@@ -514,6 +608,7 @@ async def import_subscription_for_device(
 
 @router.get("/profile", response_model=ClientProfileResponse)
 async def client_profile(
+    request: Request,
     principal: DevicePrincipal = Depends(require_device),
     db: AsyncSession = Depends(get_db),
 ):
@@ -570,23 +665,37 @@ async def client_profile(
                 pass
         upload_bytes += client_upload
         download_bytes += client_download
-        nodes.append(
-            ClientProfileNode(
-                profile_id=f"{node.id}:{client.protocol}",
-                node_id=node.id,
-                name=node.name,
-                region=node.region,
-                available=node_accepts_clients(
-                    node, management_mode="threexui"
-                ),
-                latency_ms=node.latency_ms,
-                protocol=client.protocol,
-                config=uri,
-                upload_bytes=client_upload,
-                download_bytes=client_download,
-            )
+        kit_subscription = await kit_subscription_for_client(
+            client,
+            node,
+            node_config,
+            request.headers.get("user-agent", ""),
+            request.headers.get("accept", ""),
         )
-        sensitive_configs.append({"node_id": node.id, "vpn_uri": uri})
+        profile_uris = kit_subscription["uris"] if kit_subscription else [uri]
+        available = node_accepts_clients(node, management_mode="threexui")
+        for index, profile_uri in enumerate(profile_uris):
+            scheme = urlsplit(profile_uri).scheme.lower()
+            multi_profile = kit_subscription is not None
+            nodes.append(
+                ClientProfileNode(
+                    profile_id=(
+                        f"{node.id}:{scheme}:{index}"
+                        if multi_profile
+                        else f"{node.id}:{client.protocol}"
+                    ),
+                    node_id=node.id,
+                    name=f"{node.name} · {scheme.upper()}" if multi_profile else node.name,
+                    region=node.region,
+                    available=available,
+                    latency_ms=node.latency_ms,
+                    protocol=scheme if multi_profile else client.protocol,
+                    config=profile_uri,
+                    upload_bytes=client_upload if index == 0 else 0,
+                    download_bytes=client_download if index == 0 else 0,
+                )
+            )
+            sensitive_configs.append({"node_id": node.id, "vpn_uri": profile_uri})
     # 3x-ui is authoritative for a paid client's accumulated quota. A
     # renewal can increase the client's totalGB while the original plan and
     # subscription rows still contain the old package limit.
@@ -646,7 +755,11 @@ async def client_profile(
 
 
 @router.get("/subscription/{token}")
-async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
+async def incy_subscription(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Return an INCY-compatible subscription for a signed client link."""
 
     client_id = verify_incy_subscription_token(token)
@@ -675,6 +788,13 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="VPN node configuration not found")
 
     uri = build_client_uri(client, node, node_config.config)
+    kit_subscription = await kit_subscription_for_client(
+        client,
+        node,
+        node_config,
+        request.headers.get("user-agent", ""),
+        request.headers.get("accept", ""),
+    )
     region = (node.region or "Швеция").split("|", 1)[-1]
     profile_title = f"{settings.provider_name} · {region}"
     site_url = f"{settings.public_base_url.rstrip('/')}/"
@@ -698,7 +818,7 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             # Keep the quota visible when 3x-ui is temporarily unavailable;
             # never report a fabricated amount of consumed traffic.
             pass
-    body = "\n".join(
+    body = kit_subscription["body"] if kit_subscription else "\n".join(
         [
             f"#profile-title: {profile_title}",
             f"#support-url: {support_url}",
@@ -708,20 +828,29 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             "",
         ]
     )
+    subscription_userinfo = (
+        kit_subscription["headers"].get("subscription-userinfo")
+        if kit_subscription
+        else None
+    ) or (
+        f"upload={traffic_upload_bytes}; "
+        f"download={traffic_download_bytes}; "
+        f"total={traffic_total_bytes}; expire={expires_at}"
+    )
     return Response(
         content=body,
-        media_type="text/plain",
+        media_type=(
+            kit_subscription["content_type"]
+            if kit_subscription
+            else "text/plain"
+        ),
         headers={
             "profile-title": incy_metadata_header(profile_title),
             "profile-update-interval": "6",
             "support-url": support_url,
             "profile-web-page-url": site_url,
             "premium-url": cabinet_url,
-            "subscription-userinfo": (
-                f"upload={traffic_upload_bytes}; "
-                f"download={traffic_download_bytes}; "
-                f"total={traffic_total_bytes}; expire={expires_at}"
-            ),
+            "subscription-userinfo": subscription_userinfo,
             "content-disposition": 'inline; filename="freedom-vpn-incy.txt"',
             "cache-control": "no-store",
         },
