@@ -91,7 +91,10 @@ _KIT_SCHEMES = {
     "vless", "vmess", "trojan", "ss", "hysteria2", "hy2", "tuic",
     "wireguard", "amneziawg", "vpn", "socks", "socks5", "http",
 }
-_FREEDOM_PROFILE_SCHEMES = {"vless", "vmess", "trojan"}
+# Freedom VPN's managed-profile importer supports its URL-style VMess parser,
+# while 3X-UI KIT exports VMess as legacy base64 JSON. Passing that entry makes
+# the client reject the complete provider response as unsupported_service_config.
+_FREEDOM_PROFILE_SCHEMES = {"vless", "trojan"}
 _AWG_OPTION_NAMES = {
     "jc": "Jc",
     "jmin": "Jmin",

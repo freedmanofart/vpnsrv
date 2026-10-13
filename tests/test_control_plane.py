@@ -1544,13 +1544,14 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             await db.commit()
 
         bundle = {
-            "body": b"vless://one@example.test:443#VLESS\nhysteria2://two@example.test:443#HY2\ntrojan://three@example.test:443#Trojan",
+            "body": b"vless://one@example.test:443#VLESS\nhysteria2://two@example.test:443#HY2\ntrojan://three@example.test:443#Trojan\nvmess://legacy-base64-json",
             "content_type": "text/plain; charset=utf-8",
             "headers": {},
             "uris": [
                 "vless://one@example.test:443#VLESS",
                 "hysteria2://two@example.test:443#HY2",
                 "trojan://three@example.test:443#Trojan",
+                "vmess://legacy-base64-json",
             ],
         }
         with (
@@ -1574,6 +1575,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(["vless", "trojan"], [p["protocol"] for p in profiles])
         self.assertEqual(2, len({p["profile_id"] for p in profiles}))
         self.assertNotIn("hysteria2", {p["protocol"] for p in profiles})
+        self.assertNotIn("vmess", {p["protocol"] for p in profiles})
 
     async def test_mobile_trial_returns_all_profiles_and_live_usage(self) -> None:
         async with self.session_factory() as db:
