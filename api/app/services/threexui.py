@@ -110,6 +110,21 @@ class ThreeXUIClient:
                 raise ThreeXUIClientNotFound(f"3x-ui client {email} is already absent") from exc
             raise
 
+    async def attach_client(self, email: str, inbound_ids: list[int]) -> None:
+        """Attach an existing client to additional explicitly configured inbounds."""
+
+        requested = sorted({self._inbound_id(str(value)) for value in inbound_ids})
+        if not requested:
+            return
+        current = await self.get_client_subscription_info(email)
+        missing = [value for value in requested if value not in current["inbound_ids"]]
+        if missing:
+            await self._request(
+                "POST",
+                f"clients/{quote(email, safe='')}/attach",
+                json={"inboundIds": missing},
+            )
+
     async def update_vless_user(
         self,
         inbound_tag: str,

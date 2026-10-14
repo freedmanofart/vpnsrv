@@ -108,6 +108,21 @@ def _validate_profile(client_type: str, flow: str, fingerprint: str) -> None:
         raise ProvisioningInvalid("Unsupported fingerprint")
 
 
+def _kit_inbound_ids(node_config: VPNNodeConfig) -> list[int]:
+    values = node_config.config.get("kit_inbound_ids", [])
+    if values in (None, []):
+        return []
+    if not isinstance(values, list):
+        raise ProvisioningInvalid("kit_inbound_ids must be a list")
+    try:
+        inbound_ids = sorted({int(value) for value in values})
+    except (TypeError, ValueError) as exc:
+        raise ProvisioningInvalid("kit_inbound_ids contains an invalid ID") from exc
+    if any(value <= 0 for value in inbound_ids):
+        raise ProvisioningInvalid("kit_inbound_ids contains an invalid ID")
+    return inbound_ids
+
+
 async def provision_subscription(
     db: AsyncSession,
     *,
@@ -202,7 +217,9 @@ async def provision_subscription(
         ) from exc
 
     inbound_tag = node_config.config.get("inbound_tag", "vless-reality")
+    kit_inbound_ids = _kit_inbound_ids(node_config)
     xray = panel_factory(address=api_address)
+    client_added = False
     try:
         await xray.add_vless_user(
             inbound_tag=inbound_tag,
@@ -214,7 +231,15 @@ async def provision_subscription(
             limit_ip=client.max_connections,
             total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
         )
+        client_added = True
+        if kit_inbound_ids:
+            await xray.attach_client(f"vpn-{client.id}", kit_inbound_ids)
     except ThreeXUIError as exc:
+        if client_added:
+            try:
+                await xray.remove_vless_user(inbound_tag=inbound_tag, email=f"vpn-{client.id}")
+            except (ThreeXUIError, ThreeXUIClientNotFound):
+                pass
         await db.rollback()
         raise ProvisioningThreeXUIError(f"Failed to add VPN client to 3x-ui: {exc}") from exc
 
@@ -297,6 +322,7 @@ async def renew_paid_subscription(
         client = previous
 
     inbound_tag = node_config.config.get("inbound_tag", "vless-reality")
+    kit_inbound_ids = _kit_inbound_ids(node_config)
     xray = panel_factory(address=node_config.config["api_address"])
     email = f"vpn-{client.id}"
     panel_values = {
@@ -338,7 +364,16 @@ async def renew_paid_subscription(
                 await xray.add_vless_user(**panel_values)
             except ThreeXUIClientAlreadyExists:
                 await xray.update_vless_user(**panel_values)
+        if kit_inbound_ids:
+            await xray.attach_client(email, kit_inbound_ids)
     except ThreeXUIError as exc:
+        try:
+            if previous_snapshot is not None:
+                await previous_snapshot.restore()
+            elif remove_current_on_compensate:
+                await xray.remove_vless_user(inbound_tag=inbound_tag, email=email)
+        except (ThreeXUIError, ThreeXUIClientNotFound):
+            pass
         await db.rollback()
         raise ProvisioningThreeXUIError(f"Failed to renew VPN client in 3x-ui: {exc}") from exc
 
