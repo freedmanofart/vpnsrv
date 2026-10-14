@@ -353,10 +353,10 @@ async def renew_paid_subscription(
                 limit_ip=previous.max_connections,
                 total_gb=previous.traffic_limit_gb * 1024 * 1024 * 1024,
             )
+            previous_snapshot = snapshot
+            remove_current_on_compensate = False
             try:
                 await xray.update_vless_user(**panel_values)
-                previous_snapshot = snapshot
-                remove_current_on_compensate = False
             except ThreeXUIClientNotFound:
                 await xray.add_vless_user(**panel_values)
         else:
