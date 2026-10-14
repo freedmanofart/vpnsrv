@@ -237,23 +237,28 @@ async def process_payment_event(
             await db.rollback()
             raise PaymentInvalidTransition("Payment has no VPN node")
         try:
-            active = (
+            renewable = (
                 await db.execute(
                     select(Subscription)
                     .where(
                         Subscription.user_id == payment.user_id,
-                        Subscription.status == "active",
+                        Subscription.status.in_(("active", "expired")),
+                    )
+                    .order_by(
+                        (Subscription.status == "active").desc(),
+                        Subscription.expires_at.desc(),
+                        Subscription.id.desc(),
                     )
                     .with_for_update()
                 )
-            ).scalar_one_or_none()
-            if active is not None:
+            ).scalars().first()
+            if renewable is not None:
                 plan = await db.get(Plan, payment.plan_id)
                 if plan is None:
                     raise ProvisioningNotFound("Plan not found")
                 provisioning = await renew_paid_subscription(
                     db,
-                    subscription=active,
+                    subscription=renewable,
                     plan=plan,
                     node_id=payment.node_id,
                     client_type=payment.client_type,

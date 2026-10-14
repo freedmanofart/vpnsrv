@@ -153,6 +153,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         profiles = kit_amnezia_profiles(body)
         self.assertEqual(["AmneziaWG", "AmneziaWG 3.1"], [item["name"] for item in profiles])
         self.assertTrue(all(item["config"].startswith("vpn://") for item in profiles))
+        self.assertTrue(all(item["incy_config"].startswith("amneziawg://") for item in profiles))
         self.assertIn("PersistentKeepalive = 25", profiles[0]["wireguard_config"])
         self.assertIn("Jc = 5", profiles[0]["wireguard_config"])
         self.assertIn("HeaderProtectionKey = hp-key", profiles[1]["wireguard_config"])
@@ -1629,7 +1630,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, profile.status_code, profile.text)
         payload = profile.json()
         self.assertEqual(activation.json()["trial_id"], payload["trial_id"])
-        self.assertEqual(str(activation.json()["device_id"]), payload["vpn_id"])
+        self.assertGreater(int(payload["vpn_id"]), 0)
+        self.assertNotEqual(str(activation.json()["device_id"]), payload["vpn_id"])
         self.assertEqual("Freedom VPN", payload["provider_name"])
         self.assertEqual("Service message", payload["announcement"])
         self.assertEqual(2, len(payload["nodes"]))
@@ -1860,24 +1862,70 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             "content_type": "text/plain; charset=utf-8",
             "headers": {"subscription-userinfo": "upload=10; download=20; total=100"},
             "uris": [
-                "vless://one@example.test:443#VLESS",
+                "vless://one@example.test:443#REALITY-vpn-137%7C%F0%9F%93%8A10GB%7C%E2%8F%B930D",
                 "hysteria2://two@example.test:443#HY2",
             ],
         }
-        with patch(
-            "app.api.routes.client.kit_subscription_for_client",
-            new=AsyncMock(return_value=bundle),
-        ) as get_kit:
+        with (
+            patch(
+                "app.api.routes.client.kit_subscription_for_client",
+                new=AsyncMock(return_value=bundle),
+            ) as get_kit,
+            patch(
+                "app.api.routes.client.kit_amnezia_profiles_for_client",
+                new=AsyncMock(return_value=[{
+                    "incy_config": "amneziawg://encoded#AmneziaWG",
+                }]),
+            ),
+        ):
             response = await self.client.get(
                 f"/v1/client/subscription/{token}",
                 headers={"User-Agent": "INCY/1.0"},
             )
 
         self.assertEqual(200, response.status_code, response.text)
-        self.assertEqual(body, response.content)
+        self.assertEqual(
+            [
+                "vless://one@example.test:443#REALITY",
+                "hysteria2://two@example.test:443#HY2",
+                "amneziawg://encoded#AmneziaWG",
+            ],
+            response.text.splitlines(),
+        )
         self.assertEqual("upload=10; download=20; total=100", response.headers["subscription-userinfo"])
         self.assertTrue(response.headers["profile-title"].startswith("base64:"))
         self.assertEqual("INCY/1.0", get_kit.await_args.args[3])
+
+    async def test_expired_client_link_resolves_current_active_vpn(self) -> None:
+        async with self.session_factory() as db:
+            current = await db.get(VPNClient, self.client_id)
+            old_uuid = str(uuid4())
+            old = VPNClient(
+                user_id=current.user_id,
+                subscription_id=current.subscription_id,
+                node_id=current.node_id,
+                protocol=current.protocol,
+                client_uuid=old_uuid,
+                status="revoked",
+                expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+                revoked_at=datetime.now(timezone.utc) - timedelta(days=1),
+                client_type=current.client_type,
+                flow=current.flow,
+                fingerprint=current.fingerprint,
+                max_connections=current.max_connections,
+                traffic_limit_gb=current.traffic_limit_gb,
+            )
+            db.add(old)
+            await db.commit()
+            await db.refresh(old)
+            token = incy_subscription_token(old.id, old.expires_at)
+            current_uuid = current.client_uuid
+
+        response = await self.client.get(f"/v1/client/subscription/{token}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn(current_uuid, response.text)
+        self.assertNotIn(old_uuid, response.text)
 
     async def test_incy_subscription_reports_traffic_usage(self) -> None:
         traffic_limit = 250 * 1024**3

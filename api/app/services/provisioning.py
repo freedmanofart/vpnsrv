@@ -55,16 +55,20 @@ class PanelClientSnapshot:
     total_gb: int
 
     async def restore(self) -> None:
-        await self.xray.add_vless_user(
-            inbound_tag=self.inbound_tag,
-            client_uuid=self.client_uuid,
-            email=self.email,
-            flow=self.flow,
-            expiry_time=self.expiry_time,
-            telegram_id=self.telegram_id,
-            limit_ip=self.limit_ip,
-            total_gb=self.total_gb,
-        )
+        values = {
+            "inbound_tag": self.inbound_tag,
+            "client_uuid": self.client_uuid,
+            "email": self.email,
+            "flow": self.flow,
+            "expiry_time": self.expiry_time,
+            "telegram_id": self.telegram_id,
+            "limit_ip": self.limit_ip,
+            "total_gb": self.total_gb,
+        }
+        try:
+            await self.xray.update_vless_user(**values)
+        except ThreeXUIClientNotFound:
+            await self.xray.add_vless_user(**values)
 
 
 @dataclass
@@ -75,17 +79,19 @@ class ProvisioningResult:
     inbound_tag: str
     client_email: str | None = None
     previous_client: PanelClientSnapshot | None = None
+    remove_current_on_compensate: bool = True
 
     async def compensate(self) -> None:
         if self.xray is None:
             return
-        try:
-            await self.xray.remove_vless_user(
-                inbound_tag=self.inbound_tag,
-                email=self.client_email or f"vpn-{self.client.id}",
-            )
-        except (ThreeXUIError, ThreeXUIClientNotFound):
-            pass
+        if self.remove_current_on_compensate:
+            try:
+                await self.xray.remove_vless_user(
+                    inbound_tag=self.inbound_tag,
+                    email=self.client_email or f"vpn-{self.client.id}",
+                )
+            except (ThreeXUIError, ThreeXUIClientNotFound):
+                pass
         if self.previous_client is not None:
             try:
                 await self.previous_client.restore()
@@ -232,123 +238,133 @@ async def renew_paid_subscription(
     fingerprint: str,
     panel_factory: Callable[..., ThreeXUIClient] = ThreeXUIClient,
 ) -> ProvisioningResult:
-    """Replace the active client and extend from the current expiry for a paid order."""
+    """Extend a paid subscription without changing its VPN identity."""
     _validate_profile(client_type, flow, fingerprint)
     now = datetime.now(timezone.utc)
     user = await db.get(User, subscription.user_id)
-    node = await db.get(VPNNode, node_id)
+    previous = (
+        await db.execute(
+            select(VPNClient)
+            .where(
+                VPNClient.subscription_id == subscription.id,
+            )
+            .order_by(VPNClient.id.desc())
+            .with_for_update()
+        )
+    ).scalars().first()
+
+    # A renewal keeps the node, UUID, email and subscription URL stable. The
+    # selected checkout node is used only for legacy subscriptions without a
+    # client; moving an existing key remains an explicit rotate operation.
+    target_node_id = previous.node_id if previous is not None else node_id
+    node = await db.get(VPNNode, target_node_id)
     if user is None or node is None:
         raise ProvisioningNotFound("User or VPN node not found")
     if node.status != "active":
         raise ProvisioningInvalid("VPN node is not active")
     node_config = await db.scalar(
         select(VPNNodeConfig).where(
-            VPNNodeConfig.node_id == node_id,
+            VPNNodeConfig.node_id == target_node_id,
             VPNNodeConfig.protocol == "vless",
         )
     )
     if node_config is None or not node_config.config.get("api_address"):
         raise ProvisioningNotFound("VPN node configuration not found")
-    previous = (
-        await db.execute(
-            select(VPNClient)
-            .where(
-                VPNClient.subscription_id == subscription.id,
-                VPNClient.status == "active",
-            )
-            .order_by(VPNClient.id.desc())
-            .with_for_update()
-        )
-    ).scalars().first()
-    previous_snapshot: PanelClientSnapshot | None = None
-    if previous is not None:
-        previous_config = await db.scalar(
-            select(VPNNodeConfig).where(
-                VPNNodeConfig.node_id == previous.node_id,
-                VPNNodeConfig.protocol == previous.protocol,
-            )
-        )
-        if previous_config is None or not previous_config.config.get("api_address"):
-            raise ProvisioningNotFound("Previous VPN node configuration not found")
-        previous_inbound_tag = previous_config.config.get("inbound_tag", "vless-reality")
-        previous_xray = panel_factory(address=previous_config.config["api_address"])
-        previous_expiry = previous.expires_at
-        if previous_expiry.tzinfo is None:
-            previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
-        previous_snapshot = PanelClientSnapshot(
-            xray=previous_xray,
-            inbound_tag=previous_inbound_tag,
-            client_uuid=previous.client_uuid,
-            email=f"vpn-{previous.id}",
-            flow=previous.flow,
-            expiry_time=int(previous_expiry.timestamp() * 1000),
-            telegram_id=user.telegram_id,
-            limit_ip=previous.max_connections,
-            total_gb=previous.traffic_limit_gb * 1024 * 1024 * 1024,
-        )
+
     current_expiry = subscription.expires_at
     if current_expiry.tzinfo is None:
         current_expiry = current_expiry.replace(tzinfo=timezone.utc)
     expires_at = max(current_expiry, now) + timedelta(days=plan.duration_days)
     traffic_limit_gb = plan.traffic_limit_gb + (previous.traffic_limit_gb if previous is not None else 0)
-    client = VPNClient(
-        user_id=user.id,
-        subscription_id=subscription.id,
-        node_id=node.id,
-        protocol="vless",
-        client_type=client_type,
-        flow=flow,
-        fingerprint=fingerprint,
-        max_connections=plan.max_connections,
-        traffic_limit_gb=traffic_limit_gb,
-        client_uuid=str(uuid4()),
-        status="provisioning",
-        expires_at=expires_at,
-    )
-    db.add(client)
-    await db.flush()
+    if previous is None:
+        client = VPNClient(
+            user_id=user.id,
+            subscription_id=subscription.id,
+            node_id=node.id,
+            protocol="vless",
+            client_type=client_type,
+            flow=flow,
+            fingerprint=fingerprint,
+            max_connections=plan.max_connections,
+            traffic_limit_gb=traffic_limit_gb,
+            client_uuid=str(uuid4()),
+            status="provisioning",
+            expires_at=expires_at,
+        )
+        db.add(client)
+        await db.flush()
+    else:
+        client = previous
+
     inbound_tag = node_config.config.get("inbound_tag", "vless-reality")
     xray = panel_factory(address=node_config.config["api_address"])
+    email = f"vpn-{client.id}"
+    panel_values = {
+        "inbound_tag": inbound_tag,
+        "client_uuid": client.client_uuid,
+        "email": email,
+        "flow": flow,
+        "expiry_time": int(expires_at.timestamp() * 1000),
+        "telegram_id": user.telegram_id,
+        "limit_ip": plan.max_connections,
+        "total_gb": traffic_limit_gb * 1024 * 1024 * 1024,
+    }
+    previous_snapshot: PanelClientSnapshot | None = None
+    remove_current_on_compensate = True
     try:
-        await xray.add_vless_user(
-            inbound_tag=inbound_tag,
-            client_uuid=client.client_uuid,
-            email=f"vpn-{client.id}",
-            flow=client.flow,
-            expiry_time=int(expires_at.timestamp() * 1000),
-            telegram_id=user.telegram_id,
-            limit_ip=client.max_connections,
-            total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
-        )
-        if previous is not None:
+        if previous is not None and previous.status == "active":
+            old_expiry = previous.expires_at
+            if old_expiry.tzinfo is None:
+                old_expiry = old_expiry.replace(tzinfo=timezone.utc)
+            snapshot = PanelClientSnapshot(
+                xray=xray,
+                inbound_tag=inbound_tag,
+                client_uuid=previous.client_uuid,
+                email=email,
+                flow=previous.flow,
+                expiry_time=int(old_expiry.timestamp() * 1000),
+                telegram_id=user.telegram_id,
+                limit_ip=previous.max_connections,
+                total_gb=previous.traffic_limit_gb * 1024 * 1024 * 1024,
+            )
             try:
-                await previous_snapshot.xray.remove_vless_user(
-                    inbound_tag=previous_snapshot.inbound_tag,
-                    email=previous_snapshot.email,
-                )
+                await xray.update_vless_user(**panel_values)
+                previous_snapshot = snapshot
+                remove_current_on_compensate = False
             except ThreeXUIClientNotFound:
-                pass
+                await xray.add_vless_user(**panel_values)
+        else:
+            try:
+                await xray.add_vless_user(**panel_values)
+            except ThreeXUIClientAlreadyExists:
+                await xray.update_vless_user(**panel_values)
     except ThreeXUIError as exc:
-        try:
-            await xray.remove_vless_user(inbound_tag=inbound_tag, email=f"vpn-{client.id}")
-        except (ThreeXUIError, ThreeXUIClientNotFound):
-            pass
         await db.rollback()
         raise ProvisioningThreeXUIError(f"Failed to renew VPN client in 3x-ui: {exc}") from exc
-    if previous is not None:
-        previous.status = "revoked"
-        previous.revoked_at = now
+
+    client.node_id = node.id
+    client.protocol = "vless"
+    client.client_type = client_type
+    client.flow = flow
+    client.fingerprint = fingerprint
+    client.max_connections = plan.max_connections
+    client.traffic_limit_gb = traffic_limit_gb
     client.status = "active"
+    client.revoked_at = None
+    client.expires_at = expires_at
     subscription.plan_id = plan.id
     subscription.status = "active"
+    if current_expiry <= now:
+        subscription.starts_at = now
     subscription.expires_at = expires_at
     return ProvisioningResult(
         subscription=subscription,
         client=client,
         xray=xray,
         inbound_tag=inbound_tag,
-        client_email=f"vpn-{client.id}",
+        client_email=email,
         previous_client=previous_snapshot,
+        remove_current_on_compensate=remove_current_on_compensate,
     )
 
 

@@ -1,12 +1,14 @@
 import secrets
+import binascii
 import html
+import json
 import re
 from base64 import b64decode, b64encode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -139,17 +141,42 @@ def kit_subscription_uris(body: bytes) -> list[str]:
     return uris
 
 
+def clean_profile_name(value: str) -> str:
+    """Remove panel quota counters and internal client IDs from a link name."""
+
+    name = unquote(str(value or "")).split("|", 1)[0].strip()
+    if re.fullmatch(r"vpn-\d+", name):
+        return ""
+    return re.sub(r"-vpn-\d+$", "", name).strip(" -")
+
+
+def normalized_profile_uri(uri: str, index: int) -> str:
+    """Return an app-facing URI with a stable, human-readable profile name."""
+
+    parsed = urlsplit(uri)
+    scheme = parsed.scheme.lower()
+    if scheme == "vmess":
+        try:
+            raw = uri.split("://", 1)[1]
+            document = json.loads(b64decode(raw + "=" * (-len(raw) % 4)).decode())
+            document["ps"] = clean_profile_name(document.get("ps", "")) or "VMess-WS"
+            encoded = b64encode(
+                json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+            ).decode().rstrip("=")
+            return f"vmess://{encoded}"
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            return uri
+
+    label = clean_profile_name(parsed.fragment) or profile_display_name(uri, index)
+    return parsed._replace(fragment=quote(label, safe="")).geturl()
+
+
 def profile_display_name(uri: str, index: int) -> str:
     parsed = urlsplit(uri)
     scheme = parsed.scheme.lower() or "vpn"
-    fragment = parsed.fragment.strip()
+    fragment = clean_profile_name(parsed.fragment)
     if fragment:
-        try:
-            from urllib.parse import unquote
-
-            return unquote(fragment)[:80]
-        except ValueError:
-            pass
+        return fragment[:80]
     labels = {
         "vless": "VLESS",
         "vmess": "VMess",
@@ -239,6 +266,7 @@ def kit_amnezia_profiles(body: bytes) -> list[dict]:
                 "name": name[:80],
                 "protocol": "vpn",
                 "config": f"vpn://{encoded}#{quote(name[:80])}",
+                "incy_config": f"amneziawg://{encoded}#{quote(name[:80])}",
                 "wireguard_config": config,
             }
         )
@@ -387,6 +415,37 @@ async def active_subscription_for_user(
         .order_by(Subscription.expires_at.desc(), Subscription.id.desc())
     )
     return result.scalars().first()
+
+
+async def subscription_client_for_token(
+    token: str,
+    db: AsyncSession,
+) -> tuple[VPNClient, Subscription]:
+    """Resolve an old signed URL to the user's current active VPN client."""
+
+    client_id = verify_incy_subscription_token(token, allow_expired=True)
+    if client_id is None:
+        raise HTTPException(status_code=404, detail="Subscription link is invalid")
+    original = await db.get(VPNClient, client_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail="Subscription client not found")
+
+    now = datetime.now(timezone.utc)
+    subscription = await active_subscription_for_user(db, original.user_id, now)
+    if subscription is None:
+        raise HTTPException(status_code=410, detail="Subscription is no longer active")
+    client = await db.scalar(
+        select(VPNClient)
+        .where(
+            VPNClient.subscription_id == subscription.id,
+            VPNClient.status == "active",
+            VPNClient.expires_at > now,
+        )
+        .order_by(VPNClient.id.desc())
+    )
+    if client is None:
+        raise HTTPException(status_code=410, detail="Subscription has no active VPN client")
+    return client, subscription
 
 
 async def require_device(
@@ -757,26 +816,8 @@ async def import_subscription_for_device(
     without exposing a service credential.
     """
 
-    client_id = verify_incy_subscription_token(data.token)
-    if client_id is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
-    result = await db.execute(
-        select(VPNClient, Subscription)
-        .join(Subscription, Subscription.id == VPNClient.subscription_id)
-        .where(VPNClient.id == client_id)
-    )
-    row = result.first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Subscription client not found")
-    client, subscription = row
+    client, subscription = await subscription_client_for_token(data.token, db)
     now = datetime.now(timezone.utc)
-    if (
-        subscription.status != "active"
-        or aware(subscription.expires_at) <= now
-        or client.status != "active"
-        or aware(client.expires_at) <= now
-    ):
-        raise HTTPException(status_code=410, detail="Subscription is no longer active")
     device = await db.get(ClientDevice, principal.device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -837,10 +878,12 @@ async def client_profile(
     configured_client_totals: list[int] = []
     upload_bytes = 0
     download_bytes = 0
+    active_vpn_ids: list[int] = []
     for client, node, node_config in result.all():
         uri = build_client_uri(client, node, node_config.config)
         if not uri:
             continue
+        active_vpn_ids.append(client.id)
         configured_total = max(int(client.traffic_limit_gb or 0), 0) * 1024**3
         if configured_total:
             configured_client_totals.append(configured_total)
@@ -929,7 +972,7 @@ async def client_profile(
         ),
         user_id=principal.user_id,
         subscription_id=subscription.id,
-        vpn_id=str(principal.device_id),
+        vpn_id=str(max(active_vpn_ids)) if active_vpn_ids else None,
         expires_at=subscription.expires_at,
         provider=ClientProviderInfo(
             name=settings.client_provider_name.strip() or settings.provider_name,
@@ -967,18 +1010,7 @@ async def incy_subscription(
 ):
     """Return an INCY-compatible subscription for a signed client link."""
 
-    client_id = verify_incy_subscription_token(token)
-    if client_id is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
-
-    client = await db.get(VPNClient, client_id)
-    now = datetime.now(timezone.utc)
-    if (
-        client is None
-        or client.status != "active"
-        or aware(client.expires_at) <= now
-    ):
-        raise HTTPException(status_code=404, detail="Subscription is inactive or expired")
+    client, _subscription = await subscription_client_for_token(token, db)
 
     node = await db.get(VPNNode, client.node_id)
     if node is None:
@@ -1023,16 +1055,29 @@ async def incy_subscription(
             # Keep the quota visible when 3x-ui is temporarily unavailable;
             # never report a fabricated amount of consumed traffic.
             pass
-    body = kit_subscription["body"] if kit_subscription else "\n".join(
-        [
-            f"#profile-title: {profile_title}",
-            f"#support-url: {support_url}",
-            f"#profile-web-page-url: {site_url}",
-            f"#profile-update-interval: 6",
-            uri,
-            "",
+    if kit_subscription:
+        app_uris = [
+            normalized_profile_uri(profile_uri, index)
+            for index, profile_uri in enumerate(kit_subscription["uris"])
         ]
-    )
+        awg_profiles = await kit_amnezia_profiles_for_client(client, node, node_config)
+        app_uris.extend(
+            profile["incy_config"]
+            for profile in awg_profiles
+            if profile.get("incy_config")
+        )
+        body = "\n".join(app_uris) + "\n"
+    else:
+        body = "\n".join(
+            [
+                f"#profile-title: {profile_title}",
+                f"#support-url: {support_url}",
+                f"#profile-web-page-url: {site_url}",
+                f"#profile-update-interval: 6",
+                normalized_profile_uri(uri, 0),
+                "",
+            ]
+        )
     subscription_userinfo = (
         kit_subscription["headers"].get("subscription-userinfo")
         if kit_subscription
@@ -1063,7 +1108,11 @@ async def incy_subscription(
 
 
 @router.get("/import/{token}", include_in_schema=False)
-async def incy_import_redirect(token: str, request: Request):
+async def incy_import_redirect(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Bridge Telegram's HTTPS-only button validation to the INCY deep link.
 
     Telegram's Android WebView renders a 302 to ``incy://`` as
@@ -1072,8 +1121,7 @@ async def incy_import_redirect(token: str, request: Request):
     launch the installed app from an explicit user tap.
     """
 
-    if verify_incy_subscription_token(token) is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
+    await subscription_client_for_token(token, db)
 
     subscription_url = (
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
@@ -1124,13 +1172,7 @@ async def _subscription_client_context(
     token: str,
     db: AsyncSession,
 ) -> tuple[VPNClient, VPNNode, VPNNodeConfig]:
-    client_id = verify_incy_subscription_token(token)
-    if client_id is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
-    client = await db.get(VPNClient, client_id)
-    now = datetime.now(timezone.utc)
-    if client is None or client.status != "active" or aware(client.expires_at) <= now:
-        raise HTTPException(status_code=404, detail="Subscription is inactive or expired")
+    client, _subscription = await subscription_client_for_token(token, db)
     node = await db.get(VPNNode, client.node_id)
     node_config = await db.scalar(
         select(VPNNodeConfig).where(
@@ -1232,11 +1274,14 @@ async def client_profile_qr(
 
 
 @router.get("/freevpn-import/{token}", include_in_schema=False)
-async def freevpn_import_redirect(token: str, request: Request):
+async def freevpn_import_redirect(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Bridge an HTTPS Telegram/site click to the Freedom VPN deep link."""
 
-    if verify_incy_subscription_token(token) is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
+    await subscription_client_for_token(token, db)
 
     subscription_url = (
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"

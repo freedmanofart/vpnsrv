@@ -66,7 +66,7 @@ def incy_subscription_token(client_id: int, expires_at: datetime) -> str:
     return f"{encoded}.{_signature(encoded, purpose=INCY_SUBSCRIPTION_PURPOSE)}"
 
 
-def verify_incy_subscription_token(token: str) -> int | None:
+def verify_incy_subscription_token(token: str, *, allow_expired: bool = False) -> int | None:
     try:
         encoded, signature = token.split(".", 1)
     except ValueError:
@@ -83,6 +83,6 @@ def verify_incy_subscription_token(token: str) -> int | None:
         expires_at = int(payload["exp"])
     except (KeyError, TypeError, ValueError, binascii.Error, json.JSONDecodeError):
         return None
-    if expires_at < int(datetime.now(timezone.utc).timestamp()):
+    if not allow_expired and expires_at < int(datetime.now(timezone.utc).timestamp()):
         return None
     return client_id
