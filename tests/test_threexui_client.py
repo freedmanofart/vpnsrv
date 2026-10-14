@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import sys
@@ -60,6 +61,8 @@ class ThreeXUIClientTests(IsolatedAsyncioTestCase):
         self.assertEqual("https://master.example/hidden/panel/api/clients/add", add[1])
         self.assertEqual([17], add[2]["json"]["inboundIds"])
         self.assertEqual("uuid-1", add[2]["json"]["client"]["id"])
+        password = add[2]["json"]["client"]["password"]
+        self.assertEqual(16, len(base64.b64decode(password, validate=True)))
         self.assertEqual(1893456000000, add[2]["json"]["client"]["expiryTime"])
         self.assertEqual(12345, add[2]["json"]["client"]["tgId"])
         self.assertEqual(3, add[2]["json"]["client"]["limitIp"])

@@ -1,4 +1,6 @@
+import base64
 import json
+import secrets
 from types import SimpleNamespace
 from urllib.parse import quote
 
@@ -82,6 +84,11 @@ class ThreeXUIClient:
                     "client": {
                         "email": email,
                         "id": client_uuid,
+                        # A 16-byte base64 key is accepted by the shared
+                        # password-based inbounds and is required by
+                        # Shadowsocks 2022 AES-128 when the client is attached
+                        # to the KIT profile set later in provisioning.
+                        "password": base64.b64encode(secrets.token_bytes(16)).decode("ascii"),
                         "flow": flow,
                         "enable": True,
                         "totalGB": total_gb,
