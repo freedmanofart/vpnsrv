@@ -16,6 +16,7 @@ from bot.app.domain import (
     plans_by_tier,
     select_public_plans,
     subscription_payload,
+    subscription_import_actions,
     supports_threexui,
     vpn_key_copy_message,
 )
@@ -52,6 +53,30 @@ class KeyTests(unittest.TestCase):
         self.assertIn("</pre>", rendered)
         self.assertIn("vless://user@example.test:8443?security=reality&amp;x=1", rendered)
         self.assertNotIn("copy_text", rendered)
+
+    def test_subscription_import_actions_include_every_app_in_ui_order(self):
+        actions = subscription_import_actions(
+            {
+                "freevpn_import_url": "freevpn://fallback",
+                "freevpn_telegram_import_url": "https://example.test/freevpn",
+                "incy_import_url": "incy://fallback",
+                "incy_telegram_import_url": "https://example.test/incy",
+                "amnezia_import_url": "https://example.test/amnezia",
+                "v2raytun_import_url": "https://example.test/v2raytun",
+            }
+        )
+
+        self.assertEqual(
+            [
+                "📲 Импортировать конфигурацию в Freedom VPN",
+                "📲 Импортировать конфигурацию в Incy",
+                "📲 Импортировать конфигурацию в Amnezia VPN",
+                "📲 Импортировать конфигурацию в V2rayTUN",
+            ],
+            [label for label, _url in actions],
+        )
+        self.assertEqual("https://example.test/freevpn", actions[0][1])
+        self.assertEqual("https://example.test/incy", actions[1][1])
 
 
 class PlanSelectionTests(unittest.TestCase):

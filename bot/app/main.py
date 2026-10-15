@@ -23,6 +23,7 @@ from app.domain import (
     rotation_payload,
     select_public_plans,
     subscription_payload,
+    subscription_import_actions,
     supports_threexui,
     vpn_key_copy_message,
 )
@@ -340,11 +341,16 @@ def cabinet_open_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def active_vpn_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def active_vpn_keyboard(config: dict | None = None) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton(text="🔑 Показать ключ и QR", callback_data="vpn_key")],
-        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")],
-    ])
+    ]
+    rows.extend(
+        [InlineKeyboardButton(text=label, url=url)]
+        for label, url in subscription_import_actions(config)
+    )
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def vpn_key_copy_keyboard(
@@ -363,34 +369,17 @@ def vpn_key_copy_keyboard(
             )
         ],
     ]
-    if incy_import_url:
-        rows.append([
-            InlineKeyboardButton(
-                text="📲 Импортировать в INCY",
-                url=incy_import_url,
-            )
-        ])
-    if freevpn_import_url:
-        rows.append([
-            InlineKeyboardButton(
-                text="📲 Импортировать в Freedom VPN",
-                url=freevpn_import_url,
-            )
-        ])
-    if amnezia_import_url:
-        rows.append([
-            InlineKeyboardButton(
-                text="📲 Импортировать в Amnezia VPN",
-                url=amnezia_import_url,
-            )
-        ])
-    if v2raytun_import_url:
-        rows.append([
-            InlineKeyboardButton(
-                text="📲 Импортировать в V2rayTUN",
-                url=v2raytun_import_url,
-            )
-        ])
+    rows.extend(
+        [InlineKeyboardButton(text=label, url=url)]
+        for label, url in subscription_import_actions(
+            {
+                "freevpn_import_url": freevpn_import_url,
+                "incy_import_url": incy_import_url,
+                "amnezia_import_url": amnezia_import_url,
+                "v2raytun_import_url": v2raytun_import_url,
+            }
+        )
+    )
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(
         inline_keyboard=rows,
@@ -1095,7 +1084,8 @@ async def vpn_command_handler(message: Message):
         else:
             expires_at = (subscription.get("expires_at") or "—").replace("T", " ").replace("+00:00", "")
             text = subscription_text(data)
-            keyboard = active_vpn_keyboard() if client else main_menu()
+            config = await get_vpn_client_config(client["id"]) if client else None
+            keyboard = active_vpn_keyboard(config) if client else main_menu()
         await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     except Exception:
         logging.exception("Failed to show VPN status from command")
@@ -2034,10 +2024,12 @@ async def vpn_status_handler(callback: CallbackQuery):
 
         text = subscription_text(data)
 
+        config = await get_vpn_client_config(vpn_client["id"]) if vpn_client else None
+
         await show_screen(
             callback,
             text,
-            active_vpn_keyboard() if vpn_client else main_menu(),
+            active_vpn_keyboard(config) if vpn_client else main_menu(),
         )
 
         await callback.answer()
@@ -2099,7 +2091,7 @@ async def vpn_key_copy_handler(callback: CallbackQuery):
         await callback.message.answer(
             vpn_key_copy_message(profiles[profile_index]["config"]),
             parse_mode="HTML",
-            reply_markup=active_vpn_keyboard(),
+            reply_markup=active_vpn_keyboard(data),
         )
     except (KeyError, TypeError, ValueError):
         logging.exception("Invalid VPN key copy callback")
