@@ -356,10 +356,6 @@ def active_vpn_keyboard(config: dict | None = None) -> InlineKeyboardMarkup:
 def vpn_key_copy_keyboard(
     client_id: int,
     profile_index: int = 0,
-    freevpn_import_url: str = "",
-    incy_import_url: str = "",
-    amnezia_import_url: str = "",
-    v2raytun_import_url: str = "",
 ) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -369,17 +365,6 @@ def vpn_key_copy_keyboard(
             )
         ],
     ]
-    rows.extend(
-        [InlineKeyboardButton(text=label, url=url)]
-        for label, url in subscription_import_actions(
-            {
-                "freevpn_import_url": freevpn_import_url,
-                "incy_import_url": incy_import_url,
-                "amnezia_import_url": amnezia_import_url,
-                "v2raytun_import_url": v2raytun_import_url,
-            }
-        )
-    )
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(
         inline_keyboard=rows,
@@ -930,11 +915,6 @@ async def send_key_message(
         reply_markup=vpn_key_copy_keyboard(
             client_id,
             selected_index,
-            data.get("freevpn_telegram_import_url")
-            or data.get("freevpn_import_url", ""),
-            data.get("incy_telegram_import_url") or data.get("incy_import_url", ""),
-            data.get("amnezia_import_url", ""),
-            data.get("v2raytun_import_url", ""),
         ),
     )
 
