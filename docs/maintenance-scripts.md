@@ -32,13 +32,16 @@ VPN находятся только в отдельной БД `vpn`.
 │   ├── worktrees/vpn-service-incy-deploy -> /home/freedman/vpn-service-incy-deploy
 │   ├── archives/
 │   └── operations/openclaw-freedomvpn -> /opt/openclaw-freedomvpn
-└── backup/                         # отдельный XFS том fedora-vpnclient_build, 70 GiB
+└── backup/                         # отдельный XFS том fedora/backup, 70 GiB
     ├── vpn-service/               # автоматические и ручные backup-файлы
     └── legacy/                     # ранее собранные снимки и backup-копии
 ```
 
 Канонический host-путь для backup — `/home/freedman/projects/backup`.
-70 GiB XFS LV `fedora-vpnclient_build` смонтирован туда через `/etc/fstab`.
+70 GiB XFS LV `fedora/backup` (устройство `/dev/mapper/fedora-backup`)
+смонтирован туда через `/etc/fstab`.
+Путь `/var/backups/vpn-service` на host bind-mounted на тот же каталог для
+старых host-сервисов.
 Production-репозиторий и его Docker bind mounts остаются в
 `/home/freedman/vpn-service`.
 
@@ -97,6 +100,10 @@ web-админку.
   `/home/freedman/projects/backup/vpn-service/tailscale-cert-health.json`;
   файл доступен API-контейнеру по внутреннему пути
   `/var/backups/vpn-service/tailscale-cert-health.json` через bind mount;
+- host-снимка состояния Tailscale/Funnel: `vpn-tailscale-health.service`
+  сохраняет `/home/freedman/projects/backup/vpn-service/tailscale-health.json`;
+  API и OpenClaw читают его через совместимый путь
+  `/var/backups/vpn-service/tailscale-health.json`;
 - SMTP-логина для писем web-кабинета;
 - каждой активной VPN-ноды через её `api_address` master 3x-ui.
 

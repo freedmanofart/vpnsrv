@@ -18,7 +18,7 @@ HOST = os.environ.get("TAILSCALE_HEALTH_HOST", "freedomvpn.taile485ac.ts.net")
 HEALTH_FILE = Path(
     os.environ.get(
         "TAILSCALE_HEALTH_FILE",
-        "/var/backups/vpn-service/tailscale-health.json",
+            "/home/freedman/projects/backup/vpn-service/tailscale-health.json",
     )
 )
 PUBLIC_RESOLVERS = ("1.1.1.1", "8.8.8.8")
