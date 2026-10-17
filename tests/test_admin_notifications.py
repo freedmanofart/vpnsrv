@@ -133,7 +133,16 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
         plan = SimpleNamespace(name="Лайт 1 день")
         expires_at = datetime.now(timezone.utc) + timedelta(days=30)
         subscription = SimpleNamespace(expires_at=expires_at)
-        client = SimpleNamespace(id=42, status="active", expires_at=expires_at)
+        client = SimpleNamespace(
+            id=42,
+            status="active",
+            expires_at=expires_at,
+            node_id=5,
+            protocol="vless",
+        )
+        node = SimpleNamespace(id=5, ip_address="203.0.113.20", hostname="vpn.example.test")
+        node_config = SimpleNamespace(config={"kit_subscription_client_ids": [42]})
+        telegram_proxy_uri = "tg://proxy?server=proxy.example.test&port=443&secret=0123456789abcdef"
         payment = SimpleNamespace(
             id=9,
             user_id=user.id,
@@ -151,9 +160,13 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
                     return plan
                 if model is notifications.Subscription:
                     return subscription
+                if model is notifications.VPNNode:
+                    return node
                 return None
 
             async def scalar(self, query):
+                if "vpn_node_configs" in str(query):
+                    return node_config
                 return client
 
         with (
@@ -164,6 +177,11 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
             patch.object(notifications, "_send_client_telegram_message", new=AsyncMock(return_value=True)) as send_message,
             patch.object(notifications, "_send_client_email_message", new=AsyncMock(return_value=True)) as send_email,
             patch("app.services.provider_codes.issue_provider_code", new=AsyncMock(side_effect=RuntimeError("skip"))),
+            patch.object(
+                notifications,
+                "kit_telegram_proxy_for_client",
+                new=AsyncMock(return_value=telegram_proxy_uri),
+            ),
             patch.object(notifications, "write_audit", new=AsyncMock()),
         ):
             await notifications.notify_payment_paid(FakeDB(), payment)
@@ -177,6 +195,9 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
             self.assertIn("/v1/client/freevpn-import/", text)
             self.assertIn("Импортировать конфигурацию в Freedom VPN", text)
             self.assertIn("Откройте ссылку на устройстве с установленным Freedom VPN", text)
+            self.assertIn(telegram_proxy_uri, text)
+            self.assertIn("Прокси для Telegram", text)
+            self.assertIn("Данные и память → Прокси → Добавить прокси → MTProto", text)
             self.assertNotIn("Из-за блокировок РКН", text)
             self.assertNotIn("Web-кабинет:", text)
             self.assertIn("Продлить подписку:", text)

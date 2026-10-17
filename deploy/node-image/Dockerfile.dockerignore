@@ -1,0 +1,6 @@
+**
+!deploy/
+!deploy/node-image/
+!deploy/node-image/kit-sub.py
+!scripts/
+!scripts/kit.sh

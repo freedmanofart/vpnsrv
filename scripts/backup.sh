@@ -40,11 +40,33 @@ chmod 600 "$dump_path" "$config_path"
 pg_restore --list "$dump_path" >/dev/null 2>&1 || \
   docker exec -i "$postgres_container" pg_restore --list <"$dump_path" >/dev/null
 
-# Храним 14 полных дней. Глубина и шаблоны имён ограничены, чтобы неверно
-# настроенный каталог не привёл к удалению посторонних файлов.
-find "$backup_directory" -maxdepth 1 -type f \
-  \( -name 'vpn-db-*.dump' -o -name 'vpn-config-*.tar.gz' \) \
-  -mtime +14 -delete
+# Keep three complete restore points, pairing each database dump with its config.
+mapfile -t backup_timestamps < <(
+  for existing_dump in "$backup_directory"/vpn-db-*.dump; do
+    [[ -f "$existing_dump" ]] || continue
+    existing_timestamp=${existing_dump##*vpn-db-}
+    existing_timestamp=${existing_timestamp%.dump}
+    [[ -f "$backup_directory/vpn-config-$existing_timestamp.tar.gz" ]] &&
+      printf '%s\n' "$existing_timestamp"
+  done | sort -r
+)
+retained_timestamps=("${backup_timestamps[@]:0:3}")
+for backup_file in "$backup_directory"/vpn-db-*.dump \
+  "$backup_directory"/vpn-config-*.tar.gz; do
+  [[ -f "$backup_file" ]] || continue
+  case "$backup_file" in
+    *vpn-db-*.dump)
+      file_timestamp=${backup_file##*vpn-db-}
+      file_timestamp=${file_timestamp%.dump}
+      ;;
+    *vpn-config-*.tar.gz)
+      file_timestamp=${backup_file##*vpn-config-}
+      file_timestamp=${file_timestamp%.tar.gz}
+      ;;
+  esac
+  [[ " ${retained_timestamps[*]} " == *" $file_timestamp "* ]] ||
+    rm -f -- "$backup_file"
+done
 
 # Машиночитаемый вывод попадает в журналы и может использоваться задачами загрузки.
 printf 'database=%s\nconfig=%s\n' "$dump_path" "$config_path"

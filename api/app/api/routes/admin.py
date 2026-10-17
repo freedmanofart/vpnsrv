@@ -191,23 +191,28 @@ def _resource_rows(xui_links: list[str]) -> list[dict]:
 
 
 ADMIN_DOCS = [
-    {"id": "mvp_presentation", "name": "Презентационный обзор MVP", "path": "docs/mvp-presentation.md"},
-    {"id": "frontend", "name": "Frontend-структура сайта и web-кабинета", "path": "docs/frontend-site-structure.md"},
-    {"id": "web_cabinet", "name": "Web-кабинет, почта, коды и пароли", "path": "docs/web-cabinet.md"},
-    {"id": "notifications", "name": "Уведомления: email, bot, lifecycle", "path": "docs/notifications.md"},
-    {"id": "platega", "name": "Подключение Platega: бот и web-кабинет", "path": "docs/platega-bot-payment-integration.md"},
-    {"id": "vpn_lifecycle", "name": "Жизненный цикл VPN API", "path": "docs/vpn-api-lifecycle.md"},
-    {"id": "provider_code_mobile", "name": "Подключение мобильного провайдера по коду", "path": "docs/provider-code-mobile.md"},
-    {"id": "mobile_provider_profile", "name": "Мобильный профиль и тестовый доступ", "path": "docs/mobile-provider-profile.md"},
-    {"id": "database_reference", "name": "Справочник по базе данных", "path": "docs/database-reference.md"},
-    {"id": "latest_changes", "name": "Последние изменения", "path": "docs/latest-changes-2026-09-01.md"},
-    {"id": "access", "name": "Доступы и переменные", "path": "docs/access-and-credentials.md"},
-    {"id": "bot", "name": "Редактирование Telegram-бота", "path": "docs/editing-telegram-bot.md"},
-    {"id": "maintenance", "name": "Скрипты обслуживания", "path": "docs/maintenance-scripts.md"},
-    {"id": "xui_master", "name": "3x-ui master и SSH proxy", "path": "docs/3x-ui-master.md"},
-    {"id": "add_node", "name": "Добавление 3x-ui ноды", "path": "docs/add-3x-ui-node.md"},
-    {"id": "admin_3xui", "name": "Администрирование 3x-ui API", "path": "docs/admin-3xui-api.md"},
-    {"id": "remediation", "name": "План восстановления и исправлений", "path": "docs/remediation-plan.md"},
+    {"id": "docs_index", "section": "Начать здесь", "name": "Каталог документации", "path": "docs/README.md"},
+    {"id": "architecture", "section": "Начать здесь", "name": "Архитектура и топология", "path": "docs/architecture.md"},
+    {"id": "database_reference", "section": "Начать здесь", "name": "Справочник базы данных", "path": "docs/database-reference.md"},
+    {"id": "codebase_review", "section": "Начать здесь", "name": "Обзор кодовой базы", "path": "docs/codebase-review.md"},
+    {"id": "maintenance", "section": "Ноды и эксплуатация", "name": "Обслуживание", "path": "docs/maintenance-scripts.md"},
+    {"id": "xui_master", "section": "Ноды и эксплуатация", "name": "3x-ui master и child-ноды", "path": "docs/3x-ui-master.md"},
+    {"id": "add_node", "section": "Ноды и эксплуатация", "name": "Добавление 3x-ui ноды", "path": "docs/add-3x-ui-node.md"},
+    {"id": "admin_3xui", "section": "Ноды и эксплуатация", "name": "Администрирование API 3x-ui", "path": "docs/admin-3xui-api.md"},
+    {"id": "telegram_node_routing", "section": "Ноды и эксплуатация", "name": "Маршрут Telegram API через ноду", "path": "docs/telegram-bot-node-routing.md"},
+    {"id": "node_image", "section": "Ноды и эксплуатация", "name": "Docker-образ 3x-ui + KIT", "path": "deploy/node-image/README.md"},
+    {"id": "vpn_lifecycle", "section": "API и подписки", "name": "Жизненный цикл VPN", "path": "docs/vpn-api-lifecycle.md"},
+    {"id": "web_cabinet", "section": "API и подписки", "name": "Web-кабинет", "path": "docs/web-cabinet.md"},
+    {"id": "freevpn_links", "section": "API и подписки", "name": "Ссылки приложения Freedom VPN", "path": "docs/freevpn-deeplinks.md"},
+    {"id": "incy", "section": "API и подписки", "name": "Интеграция INCY", "path": "docs/incy-integration.md"},
+    {"id": "notifications", "section": "API и подписки", "name": "Уведомления", "path": "docs/notifications.md"},
+    {"id": "platega", "section": "API и подписки", "name": "Платежи Platega", "path": "docs/platega-bot-payment-integration.md"},
+    {"id": "provider_code_mobile", "section": "Клиенты и интерфейсы", "name": "Мобильная активация по коду", "path": "docs/provider-code-mobile.md"},
+    {"id": "mobile_provider_profile", "section": "Клиенты и интерфейсы", "name": "Мобильный профиль и тестовый доступ", "path": "docs/mobile-provider-profile.md"},
+    {"id": "frontend", "section": "Клиенты и интерфейсы", "name": "Структура frontend", "path": "docs/frontend-site-structure.md"},
+    {"id": "bot", "section": "Клиенты и интерфейсы", "name": "Редактирование Telegram-бота", "path": "docs/editing-telegram-bot.md"},
+    {"id": "access", "section": "Клиенты и интерфейсы", "name": "Доступы и переменные окружения", "path": "docs/access-and-credentials.md"},
+    {"id": "history", "section": "Архив", "name": "Изменения 1–2 сентября 2026", "path": "docs/latest-changes-2026-09-01.md"},
 ]
 
 
@@ -514,12 +519,33 @@ def _pg_url() -> str:
     return settings.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
-def _doc_html(markdown: str) -> str:
+def _doc_html(markdown: str, source_path: str | None = None) -> str:
     body = html.escape(markdown)
+    if source_path:
+        def render_link(match: re.Match[str]) -> str:
+            label, destination = match.groups()
+            if destination.startswith("https://"):
+                href = html.escape(destination, quote=True)
+                return f'<a href="{href}" target="_blank" rel="noopener">{label}</a>'
+            target = (REPO_ROOT / source_path).parent.joinpath(destination).resolve()
+            doc = next(
+                (
+                    item
+                    for item in ADMIN_DOCS
+                    if (REPO_ROOT / item["path"]).resolve() == target
+                ),
+                None,
+            )
+            if doc is None:
+                return match.group(0)
+            return f'<a href="/admin/docs/{doc["id"]}">{label}</a>'
+
+        body = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", render_link, body)
+    body = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", body)
     body = re.sub(r"^# (.+)$", r"<h1>\1</h1>", body, flags=re.MULTILINE)
     body = re.sub(r"^## (.+)$", r"<h2>\1</h2>", body, flags=re.MULTILINE)
     body = re.sub(r"^### (.+)$", r"<h3>\1</h3>", body, flags=re.MULTILINE)
-    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Документация</title><style>body{{max-width:980px;margin:0 auto;padding:28px;font:16px/1.6 system-ui,sans-serif;color:#111827}}pre{{white-space:pre-wrap;background:#f5f7fb;border:1px solid #e6eaf2;border-radius:12px;padding:16px}}code{{background:#f5f7fb;padding:2px 5px;border-radius:6px}}a{{color:#175cff}}</style></head><body><a href="/admin">← Админка</a><pre>{body}</pre></body></html>"""
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Документация</title><style>body{{max-width:980px;margin:0 auto;padding:28px;font:16px/1.6 system-ui,sans-serif;color:#111827}}main{{white-space:pre-wrap;overflow-wrap:anywhere}}h1,h2,h3{{white-space:normal;line-height:1.3;margin:1.3em 0 .5em}}h1{{font-size:1.8rem}}h2{{font-size:1.4rem}}h3{{font-size:1.15rem}}main a{{color:#175cff}}code{{background:#f5f7fb;padding:2px 5px;border-radius:4px}}</style></head><body><a href="/admin">← Админка</a><main>{body}</main></body></html>"""
 
 
 def _create_postgres_backup() -> dict:
@@ -626,7 +652,7 @@ async def admin_doc(doc_id: str, _: APIPrincipal = Depends(require_admin)):
     path = (REPO_ROOT / doc["path"]).resolve()
     if not path.is_file() or REPO_ROOT not in path.parents:
         raise HTTPException(status_code=404, detail="Документ не найден")
-    return HTMLResponse(_doc_html(path.read_text(encoding="utf-8")))
+    return HTMLResponse(_doc_html(path.read_text(encoding="utf-8"), doc["path"]))
 
 
 @router.get("/overview", dependencies=[Depends(require_admin)])
@@ -1941,7 +1967,7 @@ async function load(){try{state=await request('/admin/overview');document.getEle
 document.getElementById('nav').innerHTML=sections.map(x=>`<button data-section="${x}" onclick="show('${x}')">${labels[x]}</button>`).join('');
 function renderAdminContacts(){let f=document.getElementById('adminContactsForm'),c=state.admin_contacts||{};if(!f)return;f.admin_notification_email.value=c.admin_notification_email||'';f.bot_admin_chat_id.value=c.bot_admin_chat_id||0}
 async function saveAdminContacts(e){e.preventDefault();let f=Object.fromEntries(new FormData(e.target));let out=document.getElementById('settings-result');out.className='';out.textContent='Сохраняю…';try{state.admin_contacts=await request('/admin/settings/admin-contacts',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({admin_notification_email:f.admin_notification_email||'',bot_admin_chat_id:Number(f.bot_admin_chat_id||0)})});renderAdminContacts();out.className='ok';out.textContent='Контакты сохранены'}catch(err){out.className='bad';out.textContent=err.message}}
-function renderDocs(){document.querySelector('#docs .doc-list').innerHTML=(state.docs||[]).map(d=>`<div class="doc-item"><b>${esc(d.name)}</b><br><code>${esc(d.path)}</code><p><a class="action" href="/admin/docs/${esc(d.id)}" target="_blank" rel="noopener">Открыть</a></p></div>`).join('')||'Нет данных'}
+function renderDocs(){let section='';const items=(state.docs||[]).map(d=>{let heading='';if(d.section&&d.section!==section){section=d.section;heading=`<h3 class="doc-section">${esc(section)}</h3>`}return `${heading}<div class="doc-item"><b>${esc(d.name)}</b><br><code>${esc(d.path)}</code><p><a class="action" href="/admin/docs/${esc(d.id)}" target="_blank" rel="noopener">Открыть</a></p></div>`}).join('');document.querySelector('#docs .doc-list').innerHTML=items||'Нет данных'}
 function renderScripts(){document.querySelector('#scripts .script-list').innerHTML=(state.scripts||[]).map(s=>`<div class="script-item"><b>${esc(s.name)}</b><code>${esc(s.command)}</code>${s.runnable&&s.id?`<p><button onclick="runScript('${esc(s.id)}',this)">Запустить</button></p><pre class="script-output" id="script-output-${esc(s.id)}"></pre>`:''}</div>`).join('')||'Нет данных'}
 function renderResources(){document.querySelector('#resources .resource-list').innerHTML=(state.resources||[]).map(r=>{let link=r.url?`<br><a class="action" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>`:'';let target=r.target?`<br><code>${esc(r.target)}</code>`:'';let path=r.path?`<br><code>${esc(r.path)}</code>`:'';let command=r.command?`<br><code>${esc(r.command)}</code>`:'';let note=r.note?`<p class="muted">${esc(r.note)}</p>`:'';return `<div class="resource-item"><b>${esc(r.name)}</b>${link}${target}${path}${command}${note}</div>`}).join('')||'Нет данных'}
 function renderHealth(data){let box=document.getElementById('health-grid');box.innerHTML=(data.checks||[]).map(h=>{let cls=h.status==='online'?'ok':(h.status==='offline'?'bad':'warn');return `<div class="health-item ${cls}"><b>${esc(h.name)}</b><p class="${cls}">${esc(h.status)}</p><p>${esc(h.details||'')}</p>${h.latency_ms?`<p class="muted">${esc(h.latency_ms)} мс</p>`:''}</div>`}).join('')||'Нет данных'}

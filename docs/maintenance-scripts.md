@@ -2,6 +2,9 @@
 
 ## Состав production
 
+Каталог документации и переходы к инструкциям сгруппированы в
+[`docs/README.md`](README.md).
+
 ```text
 postgres
 vpn-api
@@ -191,6 +194,79 @@ docker compose exec -T api python scripts/check_vpn_traffic.py vpn-80 --json
 email. Если клиент есть в БД, но `panel: not found`, проверьте синхронизацию
 ноды, SSL/API 3x-ui и worker.
 
+## RU-нода: профили и раздельная маршрутизация
+
+Действующая RU child — `176.108.250.142`, сервис `x-ui` на хосте. Прежняя
+`151.248.113.240` выключена и не используется для новых ссылок. На master
+RU child зарегистрирована как node 8, а в БД сервиса логическая RU-нода имеет
+ID 4. Пользовательские ссылки указывают на буквальный IP; TLS SNI и REALITY
+SNI задаются отдельно.
+
+| Профиль | Порт | ID в master 3x-ui | Тег на RU child |
+| --- | --- | --- | --- |
+| Россия (Reality) | TCP 443 | 28 | `in-443-tcp` |
+| Россия (Reality-2) | TCP 23691 | 29 | `in-23691-tcp` |
+| Россия (Hysteria2) | UDP 443 | 30 | `in-443-udp` |
+| Россия (xHTTP) | TCP 8443 | 31 | `in-8443-tcp` |
+| Россия (VLESS WebSocket) | TCP 2081 | 32 | `in-2081-tcp` |
+| Россия (Trojan gRPC) | TCP 2083 | 33 | `in-2083-tcp` |
+| Россия (VMess WebSocket) | TCP 2087 | 34 | `in-2087-tcp` |
+| Россия (TUIC) | UDP 8444 | 35 | `in-8444-udp` |
+| Россия (WireGuard) | UDP 51820 | 36 | `in-51820-udp` |
+
+В `VPNNodeConfig` RU `alternate_profile_links=true`, `share_address` и `host`
+равны действующему IP, `kit_inbound_ids` содержат 29–36. У SE конфигурации
+`alternate_node_ids=[4]`. Одна личность `vpn-<client_id>` прикрепляется к
+SE и RU входящим через master. KIT-подписка и формат мобильного профиля могут
+показывать разное подмножество протоколов. Старые RU inbound 10 и 25–27
+сохранены в master для отката, но активные клиенты от них отсоединены.
+
+Маршрутизация хранится в `xrayTemplateConfig` самого RU child. Порядок правил
+важен: Xray использует первое совпадение.
+
+1. Служебный API, запрет private IP и BitTorrent.
+2. `ext:geosite_RU.dat:ru-blocked` — в `cascade-sweden`.
+3. `ext:geosite_RU.dat:ru-available-only-inside` и `geosite:category-ru` — в `direct`.
+4. `geoip:ru` — в `direct`.
+5. Остальной трафик всех девяти RU-тегов — в `cascade-sweden` на
+   `89.127.212.239:2443`.
+
+`domainStrategy=AsIs`: доменные правила проверяют переданное или распознанное
+имя, GeoIP — адрес назначения. На входящих включён sniffing HTTP/TLS/QUIC;
+текущее `routeOnly=false`. Для `yandex.ru` и `77.88.8.8` встроенный routeTest
+17 октября вернул `direct`, для `youtube.com` и `8.8.8.8` —
+`cascade-sweden` на всех девяти тегах. Это подтверждает выбор правила, но
+не измеряет путь реального пользовательского соединения.
+
+### Загрузка и обновление списков
+
+Xray читает бинарные `.dat` из `/usr/local/x-ui/bin` на RU-хосте. HTTP-адрес
+списка нельзя вставить непосредственно в `routing`.
+`geosite:category-ru` использует `geosite.dat`, `geoip:ru` — `geoip.dat`;
+префикс `ext:geosite_RU.dat:` явно выбирает дополнительный файл.
+`geoip_RU.dat` содержит списки блокировок, а не замену страновой категории RU.
+
+Источник дополнительных российских списков:
+[runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat).
+Ветка `release` публикует актуальный `geosite.dat`; в 3x-ui он устанавливается
+под именем `geosite_RU.dat`. Файл уже присутствует на RU child, категории
+проверены API панели. Новый отдельный cron для скачивания не добавлялся.
+
+При обновлении сначала сохраните действующие `.dat` и конфигурацию, затем
+обновите нужный Geo-файл средствами 3x-ui. Проверьте категории через
+`POST /panel/api/xray/geodata/validate`, конфигурацию через
+`xray run -test -format json -config ...` и перезагрузите ядро для перечитывания
+файлов. После обновления используйте `POST /panel/api/xray/routeTest`
+(form-поля `domain` или `ip`, `inboundTag`, `port`, `network`):
+`yandex.ru`, `gosuslugi.ru`, `77.88.8.8` должны выбрать `direct`,
+`youtube.com`, `8.8.8.8` — `cascade-sweden` для каждого RU-тега.
+Проверка маршрута не заменяет тест реального трафика.
+
+TLS-профили RU используют сертификат для `176.108.250.142.nip.io` в
+`/root/cert/kit-nipio/`; после его продления проверяйте пути сертификата в
+inbound 3x-ui и результат внешней TLS-проверки. Не запускайте hook
+`sync-ru-xui-cert.sh` со старой `imba.shop` ноды на новом сервере.
+
 ## Обновление SSL-сертификатов master и 3x-ui нод
 
 В `/admin` → `Скрипты` есть:
@@ -368,6 +444,9 @@ python3 scripts/configctl.py apply --services api worker
 
 - custom-format dump БД `vpn` из контейнера `postgres`;
 - защищённый архив `.env` и `docker-compose.yml`.
+
+Скрипт хранит три последние полные точки восстановления: каждый dump БД и
+архив конфигурации с одинаковой временной меткой.
 
 ```bash
 sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/var/backups/vpn-service \

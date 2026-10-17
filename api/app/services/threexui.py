@@ -132,6 +132,21 @@ class ThreeXUIClient:
                 json={"inboundIds": missing},
             )
 
+    async def detach_client(self, email: str, inbound_ids: list[int]) -> None:
+        """Detach a client from selected inbounds without deleting its identity."""
+
+        requested = sorted({self._inbound_id(str(value)) for value in inbound_ids})
+        if not requested:
+            return
+        current = await self.get_client_subscription_info(email)
+        attached = [value for value in requested if value in current["inbound_ids"]]
+        if attached:
+            await self._request(
+                "POST",
+                f"clients/{quote(email, safe='')}/detach",
+                json={"inboundIds": attached},
+            )
+
     async def update_vless_user(
         self,
         inbound_tag: str,
@@ -230,6 +245,12 @@ class ThreeXUIClient:
             "sub_id": next(iter(sub_ids), ""),
             "inbound_ids": sorted(inbound_ids),
         }
+
+    async def get_client_links(self, email: str) -> list[str]:
+        links = await self._request("GET", f"clients/links/{quote(email, safe='')}")
+        if not isinstance(links, list) or any(not isinstance(link, str) for link in links):
+            raise ThreeXUIError("3x-ui returned invalid client links")
+        return links
 
     async def get_client_traffic(self, email: str) -> dict:
         rows = await self._request("GET", "inbounds/list")

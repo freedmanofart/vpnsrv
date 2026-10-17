@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 import httpx
@@ -28,6 +29,7 @@ from app.api.routes.client import (
     kit_subscription_for_client,
     kit_subscription_uris,
 )
+from app.services.kit_subscriptions import kit_telegram_proxy_uri
 from app.core.config import settings
 from app.core.cabinet_links import incy_subscription_token
 from app.core.tokens import token_hash
@@ -62,7 +64,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             {"kit_subscription_client_ids": [137], "kit_subscription_base_url": "http://vpn.example.test/kit/"},
             {"kit_subscription_client_ids": [137], "kit_subscription_base_url": "https://vpn.example.test:bad/kit/"},
         ]:
-            with patch("app.api.routes.client.ThreeXUIClient") as panel:
+            with patch("app.services.kit_subscriptions.ThreeXUIClient") as panel:
                 result = await kit_subscription_for_client(
                     client, node, SimpleNamespace(config=config), "INCY/1.0"
                 )
@@ -83,8 +85,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         session.__aenter__.return_value = session
         session.get.return_value = httpx.Response(200, content=body)
         with (
-            patch("app.api.routes.client.ThreeXUIClient") as panel,
-            patch("app.api.routes.client.httpx.AsyncClient", return_value=session),
+            patch("app.services.kit_subscriptions.ThreeXUIClient") as panel,
+            patch("app.services.kit_subscriptions.httpx.AsyncClient", return_value=session),
         ):
             panel.return_value.get_client_subscription_info = AsyncMock(return_value={
                 "sub_id": "test-sub", "inbound_ids": [8, 12],
@@ -119,14 +121,22 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             content=b"vless://one@example.test:443#VLESS",
         )
         with (
-            patch("app.api.routes.client.ThreeXUIClient") as panel,
-            patch("app.api.routes.client.httpx.AsyncClient", return_value=session),
+            patch("app.services.kit_subscriptions.ThreeXUIClient") as panel,
+            patch("app.services.kit_subscriptions.httpx.AsyncClient", return_value=session),
         ):
             panel.return_value.get_client_subscription_info = AsyncMock(return_value={
                 "sub_id": "all-client-sub", "inbound_ids": [8, 12],
             })
             result = await kit_subscription_for_client(client, node, config, "INCY/1.0")
         self.assertEqual(["vless://one@example.test:443#VLESS"], result["uris"])
+
+    def test_kit_subscription_extracts_mtproto_without_exposing_it_as_vpn_profile(self) -> None:
+        proxy_uri = "tg://proxy?server=proxy.example.test&port=443&secret=0123456789abcdef"
+        body = f"{proxy_uri}\nvless://one@example.test:443#VLESS".encode()
+
+        self.assertEqual(proxy_uri, kit_telegram_proxy_uri(body))
+        self.assertEqual(["vless://one@example.test:443#VLESS"], kit_subscription_uris(body))
+        self.assertIsNone(kit_telegram_proxy_uri(b"tg://proxy?server=host&port=bad&secret=x"))
 
     def test_kit_amnezia_profiles_build_import_and_router_configs(self) -> None:
         body = b"""proxies:
@@ -1574,6 +1584,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, response.status_code, response.text)
         profiles = response.json()["nodes"]
         self.assertEqual(["vless", "trojan"], [p["protocol"] for p in profiles])
+        self.assertTrue(all(p["name"].startswith("🇩🇪 de (") for p in profiles))
         self.assertEqual(2, len({p["profile_id"] for p in profiles}))
         self.assertNotIn("hysteria2", {p["protocol"] for p in profiles})
         self.assertNotIn("vmess", {p["protocol"] for p in profiles})
@@ -1831,7 +1842,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         response = await self.client.get(f"/v1/client/subscription/{token}")
 
         self.assertEqual(200, response.status_code, response.text)
-        self.assertIn("#profile-title: Freedom VPN · de", response.text)
+        self.assertIn("#profile-title: Freedom VPN\n", response.text)
+        self.assertIn("🇩🇪 de (Reality)", unquote(response.text))
         self.assertIn("vless://", response.text)
         self.assertTrue(response.headers["profile-title"].startswith("base64:"))
         self.assertNotIn("Из-за блокировок РКН", response.text)
@@ -1853,18 +1865,24 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             client = await db.get(VPNClient, self.client_id)
             token = incy_subscription_token(client.id, client.expires_at)
 
-        body = (
-            b"vless://one@example.test:443#VLESS\n"
-            b"hysteria2://two@example.test:443#HY2\n"
-        )
+        vmess_uri = "vmess://" + base64.b64encode(
+            json.dumps({"ps": "VMess-WS", "add": "example.test"}).encode()
+        ).decode().rstrip("=")
+        uris = [
+            "vless://one@example.test:443#REALITY-vpn-137%7C%F0%9F%93%8A10GB%7C%E2%8F%B930D",
+            "hysteria2://two@example.test:443#HY2",
+            "vless://three@example.test:443#XHTTP",
+            "vless://four@example.test:443#VLESS-WS",
+            "trojan://five@example.test:443#Trojan-gRPC",
+            vmess_uri,
+            "tuic://six@example.test:443#TUIC",
+            "ss://seven@example.test:443#Shadowsocks",
+        ]
         bundle = {
-            "body": body,
+            "body": "\n".join(uris).encode(),
             "content_type": "text/plain; charset=utf-8",
             "headers": {"subscription-userinfo": "upload=10; download=20; total=100"},
-            "uris": [
-                "vless://one@example.test:443#REALITY-vpn-137%7C%F0%9F%93%8A10GB%7C%E2%8F%B930D",
-                "hysteria2://two@example.test:443#HY2",
-            ],
+            "uris": uris,
         }
         with (
             patch(
@@ -1884,13 +1902,24 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(200, response.status_code, response.text)
+        lines = response.text.splitlines()
+        self.assertEqual(9, len(lines))
+        names = []
+        for uri in lines:
+            if uri.startswith("vmess://"):
+                raw = uri.split("://", 1)[1]
+                names.append(json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)))["ps"])
+            else:
+                names.append(unquote(urlsplit(uri).fragment))
         self.assertEqual(
             [
-                "vless://one@example.test:443#REALITY",
-                "hysteria2://two@example.test:443#HY2",
-                "amneziawg://encoded#AmneziaWG",
+                "🇩🇪 de (Reality)", "🇩🇪 de (Hysteria2)",
+                "🇩🇪 de (xHTTP)", "🇩🇪 de (VLESS WebSocket)",
+                "🇩🇪 de (Trojan gRPC)", "🇩🇪 de (VMess WebSocket)",
+                "🇩🇪 de (TUIC)", "🇩🇪 de (Shadowsocks)",
+                "🇩🇪 de (AmneziaWG)",
             ],
-            response.text.splitlines(),
+            names,
         )
         self.assertEqual("upload=10; download=20; total=100", response.headers["subscription-userinfo"])
         self.assertTrue(response.headers["profile-title"].startswith("base64:"))

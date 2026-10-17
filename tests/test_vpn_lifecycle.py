@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -17,6 +18,7 @@ sys.path.insert(0, str(ROOT / "api"))
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 
+from app.api.routes.client import alternate_client_profiles
 from app.api.routes.subscriptions import renew_subscription, rotate_subscription_client
 from app.db.base import Base
 from app.db.models import (
@@ -90,6 +92,7 @@ class FakePanel:
         users[email] = SimpleNamespace(
             email=email,
             inbound_tag=inbound_tag,
+            inbound_ids={str(inbound_tag)},
             client_uuid=client_uuid,
             level=level,
             flow=flow,
@@ -108,6 +111,18 @@ class FakePanel:
         if email not in users:
             raise ThreeXUIClientNotFound(email)
         del users[email]
+
+    async def attach_client(self, email: str, inbound_ids: list[int]) -> None:
+        user = self.users[self.address].get(email)
+        if user is None:
+            raise ThreeXUIClientNotFound(email)
+        user.inbound_ids.update(str(inbound_id) for inbound_id in inbound_ids)
+
+    async def detach_client(self, email: str, inbound_ids: list[int]) -> None:
+        user = self.users[self.address].get(email)
+        if user is None:
+            raise ThreeXUIClientNotFound(email)
+        user.inbound_ids.difference_update(str(inbound_id) for inbound_id in inbound_ids)
 
     async def update_vless_user(
         self,
@@ -138,7 +153,11 @@ class FakePanel:
         users[email].total_gb = total_gb
 
     async def get_users(self, inbound_tag: str) -> list[SimpleNamespace]:
-        return list(self.users[self.address].values())
+        return [
+            user
+            for user in self.users[self.address].values()
+            if str(inbound_tag) in getattr(user, "inbound_ids", {str(inbound_tag)})
+        ]
 
 
 class VPNLifecycleTests(IsolatedAsyncioTestCase):
@@ -423,6 +442,171 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             self.assertIsNone(client.revoked_at)
             self.assertIn(f"vpn-{client_id}", FakePanel.users["https://master.example/base"])
 
+    async def test_alternate_node_profile_reuses_the_existing_client_identity(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            source_config = await db.scalar(
+                select(VPNNodeConfig).where(
+                    VPNNodeConfig.node_id == self.node_id,
+                    VPNNodeConfig.protocol == "vless",
+                )
+            )
+            alternate = VPNNode(
+                name="node-ru",
+                provider="test",
+                region="RU|Россия",
+                hostname="ru.example.test",
+                ip_address="203.0.113.11",
+                status="active",
+                capacity=100,
+            )
+            db.add(alternate)
+            await db.flush()
+            db.add(
+                VPNNodeConfig(
+                    node_id=alternate.id,
+                    protocol="vless",
+                    config={
+                        "api_address": "https://master.example/base",
+                        "inbound_tag": "ru-vless",
+                        "host": "ru.example.test",
+                        "port": 8443,
+                        "type": "tcp",
+                        "security": "reality",
+                        "sni": "example.com",
+                        "fp": "chrome",
+                        "pbk": "public-key",
+                        "sid": "efgh",
+                    },
+                )
+            )
+            await db.flush()
+            source_config.config = {
+                **source_config.config,
+                "alternate_node_ids": [alternate.id],
+            }
+
+            profiles = await alternate_client_profiles(db, initial.client, source_config)
+
+            self.assertEqual(1, len(profiles))
+            self.assertEqual("🇷🇺 Россия (Reality)", profiles[0]["name"])
+            parsed = urlsplit(profiles[0]["config"])
+            self.assertEqual(("ru.example.test", 8443), (parsed.hostname, parsed.port))
+            self.assertEqual(initial.client.client_uuid, parsed.username)
+
+            alternate_config = await db.scalar(
+                select(VPNNodeConfig).where(VPNNodeConfig.node_id == alternate.id)
+            )
+            alternate_config.config = {
+                **alternate_config.config,
+                "share_address": "ru.example.test",
+                "alternate_profile_links": True,
+            }
+            links = [
+                "vless://key@ru.example.test:443?type=tcp&security=reality#reality",
+                "vless://key@ru.example.test:23691?type=tcp&security=reality#reality2",
+                "hysteria2://key@ru.example.test:443?sni=example.test#hy2-current",
+                "vless://key@ru.example.test:8443?type=xhttp&security=reality#xhttp-current",
+                "vless://key@ru.example.test:2081?type=ws&security=tls#ws",
+                "trojan://key@ru.example.test:2083?type=grpc&security=tls#grpc",
+                "vmess://eyJhZGQiOiJydS5leGFtcGxlLnRlc3QiLCJwb3J0IjoyMDg3LCJuZXQiOiJ3cyJ9",
+                "tuic://key:secret@ru.example.test:8444?sni=example.test#tuic-current",
+                "wireguard://key@ru.example.test:51820#wireguard",
+                "vless://key@other.example.test:443?type=tcp#unrelated",
+            ]
+            with patch("app.api.routes.client.ThreeXUIClient") as panel:
+                panel.return_value.get_client_links = AsyncMock(return_value=links)
+                profiles = await alternate_client_profiles(db, initial.client, source_config)
+            self.assertEqual(9, len(profiles))
+            self.assertEqual(
+                [
+                    "🇷🇺 Россия (Reality)",
+                    "🇷🇺 Россия (Reality 2)",
+                    "🇷🇺 Россия (Hysteria2)",
+                    "🇷🇺 Россия (xHTTP)",
+                    "🇷🇺 Россия (VLESS WebSocket)",
+                    "🇷🇺 Россия (Trojan gRPC)",
+                    "🇷🇺 Россия (VMess WebSocket)",
+                    "🇷🇺 Россия (TUIC)",
+                    "🇷🇺 Россия (WireGuard)",
+                ],
+                [profile["name"] for profile in profiles],
+            )
+            initial.client.node_id = alternate.id
+            with patch("app.api.routes.client.ThreeXUIClient") as panel:
+                panel.return_value.get_client_links = AsyncMock(return_value=links)
+                own_profiles = await alternate_client_profiles(db, initial.client, alternate_config)
+            self.assertEqual(
+                [
+                    "🇷🇺 Россия (Reality 2)",
+                    "🇷🇺 Россия (Hysteria2)",
+                    "🇷🇺 Россия (xHTTP)",
+                    "🇷🇺 Россия (VLESS WebSocket)",
+                    "🇷🇺 Россия (Trojan gRPC)",
+                    "🇷🇺 Россия (VMess WebSocket)",
+                    "🇷🇺 Россия (TUIC)",
+                    "🇷🇺 Россия (WireGuard)",
+                ],
+                [profile["name"] for profile in own_profiles],
+            )
+
+    async def test_reconciliation_preserves_shared_alternate_profile(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            source_config = await db.scalar(
+                select(VPNNodeConfig).where(
+                    VPNNodeConfig.node_id == self.node_id,
+                    VPNNodeConfig.protocol == "vless",
+                )
+            )
+            alternate = VPNNode(
+                name="node-ru",
+                provider="test",
+                region="RU|Россия",
+                hostname="ru.example.test",
+                ip_address="203.0.113.11",
+                status="active",
+                capacity=100,
+            )
+            db.add(alternate)
+            await db.flush()
+            db.add(
+                VPNNodeConfig(
+                    node_id=alternate.id,
+                    protocol="vless",
+                    config={
+                        "api_address": "https://master.example/base",
+                        "inbound_tag": "10",
+                        "host": "ru.example.test",
+                        "port": 8443,
+                    },
+                )
+            )
+            source_config.config = {
+                **source_config.config,
+                "alternate_node_ids": [alternate.id],
+            }
+            await db.commit()
+
+            report = await reconcile_node(db, alternate.id, panel_factory=FakePanel)
+            email = f"vpn-{initial.client.id}"
+            panel = FakePanel.users["https://master.example/base"]
+            self.assertEqual(1, report.restored)
+            self.assertEqual(initial.client.client_uuid, panel[email].client_uuid)
+            self.assertIn("10", panel[email].inbound_ids)
+            self.assertIn("vless-reality", panel[email].inbound_ids)
+
+            source_config.config = {
+                **source_config.config,
+                "alternate_node_ids": [],
+            }
+            await db.commit()
+            report = await reconcile_node(db, alternate.id, panel_factory=FakePanel)
+
+            self.assertEqual(1, report.removed)
+            self.assertNotIn("10", panel[email].inbound_ids)
+            self.assertIn("vless-reality", panel[email].inbound_ids)
+
     async def test_renew_commit_failure_restores_previous_panel_client(self) -> None:
         async with self.session_factory() as db:
             initial = await self.provision(db)
@@ -665,8 +849,12 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             initial = await self.provision(db)
             users = FakePanel.users["https://master.example/base"]
             users.clear()
-            users["vpn-9999"] = SimpleNamespace(email="vpn-9999")
-            users["vpn-test"] = SimpleNamespace(email="vpn-test")
+            users["vpn-9999"] = SimpleNamespace(
+                email="vpn-9999", inbound_ids={"vless-reality"}
+            )
+            users["vpn-test"] = SimpleNamespace(
+                email="vpn-test", inbound_ids={"vless-reality"}
+            )
 
             report = await reconcile_node(
                 db,
@@ -679,3 +867,23 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             self.assertIn(f"vpn-{initial.client.id}", users)
             self.assertIn("vpn-test", users)
             self.assertNotIn("vpn-9999", users)
+
+    async def test_reconciliation_restores_missing_kit_memberships(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            config = await db.scalar(
+                select(VPNNodeConfig).where(VPNNodeConfig.node_id == self.node_id)
+            )
+            config.config = {**config.config, "kit_inbound_ids": [2, 3]}
+            await db.commit()
+            email = f"vpn-{initial.client.id}"
+            user = FakePanel.users["https://master.example/base"][email]
+
+            report = await reconcile_node(db, self.node_id, panel_factory=FakePanel)
+            self.assertEqual((1, 0, 0), (report.present, report.restored, report.errors))
+            self.assertTrue({"2", "3"}.issubset(user.inbound_ids))
+
+            user.inbound_ids.remove("3")
+            report = await reconcile_node(db, self.node_id, panel_factory=FakePanel)
+            self.assertEqual(0, report.errors)
+            self.assertIn("3", user.inbound_ids)

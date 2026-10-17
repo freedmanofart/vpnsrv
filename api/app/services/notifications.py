@@ -19,9 +19,11 @@ from app.db.models.plan import Plan
 from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.vpn_node import VPNNode
+from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.models.vpn_client import VPNClient
 from app.services.admin_settings import get_admin_contacts
 from app.services.audit import write_audit
+from app.services.kit_subscriptions import kit_telegram_proxy_for_client
 from app.services.email import (
     EmailDeliveryError,
     _cabinet_url,
@@ -375,6 +377,20 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
                 VPNClient.status == "active",
             )
         )
+    telegram_proxy_uri = None
+    if client is not None:
+        node = await db.get(VPNNode, client.node_id)
+        if node is not None:
+            node_config = await db.scalar(
+                select(VPNNodeConfig).where(
+                    VPNNodeConfig.node_id == client.node_id,
+                    VPNNodeConfig.protocol == client.protocol,
+                )
+            )
+            if node_config is not None:
+                telegram_proxy_uri = await kit_telegram_proxy_for_client(
+                    client, node, node_config
+                )
     incy_import_url = _incy_import_url(client)
     freevpn_import_url = _freevpn_import_url(client)
     card = await _payment_card(db, payment, title="✅ Оплата Freedom VPN подтверждена")
@@ -399,6 +415,19 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
                 f"{freevpn_import_url}\n"
                 "Откройте ссылку на устройстве с установленным Freedom VPN."
             )
+        telegram_proxy_text = (
+            "\n\n✈️ Прокси для Telegram\n"
+            + (
+                f"Добавить прокси: {telegram_proxy_uri}\n"
+                "Откройте ссылку на устройстве с Telegram и подтвердите добавление.\n"
+                "Вручную: Telegram → Настройки → Данные и память → Прокси → "
+                "Добавить прокси → MTProto."
+                if telegram_proxy_uri
+                else "Telegram → Настройки → Данные и память → Прокси → "
+                "Добавить прокси → MTProto. Для настройки нужны сервер, порт и "
+                "секрет; персональную ссылку запросите у поддержки."
+            )
+        )
         provider_code_text = ""
         try:
             # The paid notification is the primary delivery for a new app device.
@@ -434,6 +463,7 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
             f"{provider_code_text}"
             f"{incy_text}"
             f"{freevpn_text}"
+            f"{telegram_proxy_text}"
             "\n\n"
             f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}\n\n"
             "VPN-ключ и статус подписки доступны в web-кабинете."

@@ -155,6 +155,33 @@ class ThreeXUIClientTests(IsolatedAsyncioTestCase):
         self.assertTrue(request[1].endswith("/panel/api/clients/vpn-42/attach"))
         self.assertEqual({"inboundIds": [13, 14]}, request[2]["json"])
 
+    async def test_detach_client_only_sends_attached_inbounds(self):
+        FakeAsyncClient.responses = [
+            {
+                "success": True,
+                "obj": [
+                    {"id": 12, "settings": {"clients": [
+                        {"email": "vpn-42", "subId": "sub-42"},
+                    ]}},
+                    {"id": 13, "settings": {"clients": [
+                        {"email": "vpn-42", "subId": "sub-42"},
+                    ]}},
+                ],
+            },
+            {"success": True, "msg": "Client detached"},
+        ]
+        with (
+            patch("app.services.threexui.settings.threexui_api_token", "node-token"),
+            patch("app.services.threexui.httpx.AsyncClient", FakeAsyncClient),
+        ):
+            await ThreeXUIClient("https://master.example/base").detach_client(
+                "vpn-42", [12, 14]
+            )
+
+        request = FakeAsyncClient.requests[1]
+        self.assertTrue(request[1].endswith("/panel/api/clients/vpn-42/detach"))
+        self.assertEqual({"inboundIds": [12]}, request[2]["json"])
+
     async def test_get_client_subscription_info_rejects_conflicting_subids(self):
         FakeAsyncClient.responses = [{
             "success": True,

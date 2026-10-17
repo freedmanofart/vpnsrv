@@ -349,16 +349,9 @@ GET /payment-methods
   `lite_* / standard_* / ultra_*` нужен только для старых записей без
   `package_id`.
 
-## Куда смотреть при изменениях
+## Навигация
 
-Перед frontend-правками полезно открыть:
-
-```text
-docs/web-cabinet.md
-docs/latest-changes-2026-09-01.md
-docs/editing-telegram-bot.md
-docs/maintenance-scripts.md
-```
+Каталог остальных инструкций сгруппирован в [общем указателе](README.md).
 
 Проверки после изменений:
 

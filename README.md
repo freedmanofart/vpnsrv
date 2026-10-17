@@ -1,357 +1,73 @@
-# VPN Service
+# Freedom VPN
 
-Telegram-сервис продажи и выдачи VPN-доступа. Управляющий API делегирует
-физическое управление нодами и Xray встроенному REST API панели
-`freedmanofart/3x-ui` версии 3.7.
+Сервис продажи, выдачи и продления VPN-доступа. Состояние пользователей,
+платежей и подписок хранится в PostgreSQL. Сетевые подключения и учёт трафика
+управляются через REST API нашего fork 3x-ui master; child-ноды запускают Xray.
 
-## Архитектура
+## Состав
 
-```text
-Telegram -> aiogram bot -> FastAPI -> PostgreSQL
-                              |
-                              +-> REST API 3x-ui master
-                                      |-> локальный Xray
-                                      +-> child-панели -> удалённый Xray
+| Каталог | Назначение |
+| --- | --- |
+| `api/app` | FastAPI, web-кабинет, admin, платежи, выдача ключей |
+| `bot/app` | Telegram-бот на aiogram 3 |
+| `alembic/versions` | Миграции PostgreSQL |
+| `scripts` | Операционные проверки и host-only обслуживание |
+| `deploy` | systemd, конфигурация нод и Docker-образ 3x-ui + KIT |
+| `tests` | Тесты API, жизненного цикла и интеграции 3x-ui |
+| `3x-ui` | Справка по API и настройкам панели |
 
+```mermaid
+flowchart LR
+  U[Клиент] --> B[Telegram-бот]
+  U --> W[Web-кабинет]
+  U --> A[Мобильное приложение]
+  B --> API[FastAPI]
+  W --> API
+  A --> API
+  API --> DB[(PostgreSQL)]
+  WK[Worker] --> DB
+  API --> M[3x-ui master]
+  WK --> M
+  M --> SE[SE child]
+  M --> RU[RU child]
+  U -->|Швеция| SE
+  U -->|Россия| RU
+  RU -->|зарубежный трафик| SE
+  RU -->|российские ресурсы| NET[Интернет]
 ```
 
-Основной сервер запускает 3x-ui в роли master. Удалённые VPS регистрируются в
-ней как child nodes. Этот репозиторий больше не запускает собственный Xray, не
-обращается к Xray gRPC и не разворачивает отдельный node-agent.
-
-| Компонент | Назначение |
-|---|---|
-| `api` | FastAPI, подписки, платежи, клиенты и web admin |
-| `bot` | Telegram-интерфейс на aiogram 3 |
-| внешний PostgreSQL | Единый контейнер `postgres`, отдельная БД `vpn` для данных сервиса |
-| `worker` | Истечение доступа и reconciliation с 3x-ui master |
-| `3x-ui master` | Inbound-конфигурации, физические ноды, Xray и трафик |
-
-## Интеграция с 3x-ui
-
-OpenAPI панели доступен по адресу
-`<panel-base>/panel/api/openapi.json`, интерактивная документация — по
-`<panel-base>/api-docs`. Для API и worker нужен отдельный Bearer token,
-созданный в `Settings → Security → API Token`. Если установленная сборка
-поддерживает scopes, выдайте минимально достаточный `node-sync`. Если scopes в
-ней нет, считайте API token полноадминистративным и дополнительно ограничьте
-доступ к панели сетью и TLS.
-
-```dotenv
-THREEXUI_API_TOKEN=одноразово-показанный-токен-master
-THREEXUI_VERIFY_TLS=true
-```
-
-Каждая логическая VPN-нода в нашей админке связывается с одним inbound панели:
-
-- `api_address` — URL master вместе с закрытым web base path;
-- `inbound_tag` — числовой `inboundId` в 3x-ui;
-- `host`, `port`, `sni`, `fp`, `pbk`, `sid` — публичные параметры Reality для
-  формирования VLESS URI.
-
-Inbound может работать на master или быть назначен child-ноде. Эту топологию
-хранит 3x-ui; приложение её не дублирует.
-
-Текущий минимальный стенд публикует в VPN API только одну тестовую локацию:
-`sweden` (`SE|Швеция`). Старые логические ноды хранятся как отключённая
-история и не предлагаются пользователю.
-
-Бот выдаёт только один вариант ключа: универсальный VLESS Reality xHTTP без
-выбора клиента и flow. При добавлении логической ноды страна автоматически
-определяется по публичному IP и используется в меню Telegram.
-
-Жизненный цикл клиента использует `/panel/api/clients/add`,
-`/clients/del/{email}` и `/inbounds/list`. Служебный email имеет формат
-`vpn-<client_id>`. Компенсационные операции сохранены: если транзакция БД
-завершается ошибкой, только что созданный клиент удаляется из 3x-ui.
-
-Подробная настройка master и child описана в
-[`docs/3x-ui-master.md`](docs/3x-ui-master.md).
-Презентационный обзор MVP с реализованными возможностями:
-[`docs/mvp-presentation.md`](docs/mvp-presentation.md).
-Добавление новой ноды скриптом описано в
-[`docs/add-3x-ui-node.md`](docs/add-3x-ui-node.md).
-Полный жизненный цикл тарифа, оплаты, выдачи, продления и отзыва описан в
-[`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md).
-Актуальная схема БД, связи таблиц и SQL/скрипты диагностики собраны в
-[`docs/database-reference.md`](docs/database-reference.md).
-
-Возможности и ограничения интеграции web admin с API 3x-ui:
-[`docs/admin-3xui-api.md`](docs/admin-3xui-api.md).
-Устройство, изменение и безопасный деплой Telegram-бота описаны в
-[`docs/editing-telegram-bot.md`](docs/editing-telegram-bot.md).
-
-## API
-
-После запуска публичный лендинг доступен по адресу `http://localhost:8000/`,
-резервный кабинет — на `/cabinet`, административная панель — на `/admin`, а
-OpenAPI — на `/docs`. В текущей реализации `/docs`, `/redoc` и
-`/openapi.json` публичны; закрывайте их на reverse proxy либо отключайте в
-FastAPI, если схема API не должна публиковаться. Вход в административную панель
-выполняется через HTTP Basic; учётные данные задают переменные
-`ADMIN_USERNAME` и `ADMIN_PASSWORD`.
-Настройка сайта, SMTP и токенизированного входа описана в
-[docs/web-cabinet.md](docs/web-cabinet.md).
-Frontend-структура лендинга, web-кабинета и админки для передачи фронтендеру:
-[docs/frontend-site-structure.md](docs/frontend-site-structure.md).
-Полный отчёт по последнему обновлению интерфейса, парольного входа, Telegram,
-миграций и деплоя: [docs/latest-changes-2026-09-01.md](docs/latest-changes-2026-09-01.md).
-
-`ADMIN_USERNAME` и `ADMIN_PASSWORD` в `.env`. Подробности — в
-[`docs/access-and-credentials.md`](docs/access-and-credentials.md).
-
-| Метод | Маршрут | Назначение |
-|---|---|---|
-| `GET` | `/health` | Состояние API |
-| `GET` | `/db-health` | Проверка PostgreSQL |
-| `POST` | `/users` | Регистрация Telegram-пользователя ботом; нужен service Bearer или admin Basic |
-| `GET`, `POST` | `/plans` | Тарифы |
-| `POST` | `/subscriptions` | Создание подписки и клиента 3x-ui |
-| `POST` | `/subscriptions/{id}/renew` | Продление с новым UUID |
-| `POST` | `/subscriptions/{id}/rotate` | Перевыпуск или перенос клиента |
-| `GET`, `POST` | `/vpn/nodes` | Логические VPN-локации |
-| `GET` | `/vpn/nodes/{id}/health` | Проверка master и inbound |
-| `POST` | `/vpn/nodes/{id}/reconcile` | Сверка БД с inbound панели |
-| `GET`, `POST` | `/vpn/nodes/{id}/configs` | Привязка ноды к inbound |
-| `POST` | `/payments` | Идемпотентное создание платежа |
-| `POST` | `/payments/webhooks/{provider}` | Подписанное событие провайдера |
-| `POST` | `/payments/manual` | Создание ручного платежа |
-| `GET` | `/payment-methods` | Доступные способы оплаты |
-| `POST` | `/v1/client/activation-codes` | Код активации клиентского устройства |
-| `POST` | `/v1/client/trial` | Тестовый профиль Android/iOS на 1 день и 3 ГБ |
-| `POST` | `/v1/client/activate` | Обмен кода провайдера на device token |
-| `POST` | `/v1/client/import` | Привязка текущего устройства к подписанной ссылке INCY/Freedom VPN |
-| `GET` | `/v1/client/profile` | Профили, метаданные провайдера и актуальный трафик |
-| `POST` | `/v1/client/refresh` | Ротация device token и обновление срока устройства |
-| `GET` | `/v1/client/subscription/{token}` | Подписка с конфигурацией и метаданными для приложений |
-| `GET` | `/v1/client/import/{token}` | HTTPS-переходник Telegram для импорта в INCY |
-| `GET` | `/v1/client/freevpn-import/{token}` | HTTPS-переходник Telegram/site для импорта в Freedom VPN |
-| `GET` | `/vpn/clients/{client_id}/config` | Сервисные ссылки и конфигурация клиента |
-| `GET` | `/` | Публичный лендинг |
-| `GET` | `/cabinet` | Резервный кабинет по защищённой cookie |
-| `POST` | `/web/register` | Отправить одноразовый email-код |
-| `POST` | `/web/code/login` | Погасить email-код и создать сессию |
-| `POST` | `/web/password/login` | Вход в кабинет по email и паролю |
-| `POST` | `/web/password` | Установка пароля с действующей cookie |
-| `GET` | `/admin` | Web admin с HTTP Basic |
-| `POST` | `/admin/users/{id}/rotate` | Перевыпуск ключа из админки |
-
-Служебные маршруты требуют service Bearer token или HTTP Basic администратора.
-Публичными остаются лендинг, health, документация FastAPI, регистрация и вход в
-web-кабинет, активация устройства по одноразовому коду, а также подписанный
-webhook. Telegram-регистрация `/users` не публична. Маршруты
-`/v1/client/profile` и `/refresh` используют отдельный токен активированного
-устройства.
-
-Мобильный trial, синхронизация конфигураций нод, диплинк и счётчики трафика
-описаны в [`docs/mobile-provider-profile.md`](docs/mobile-provider-profile.md).
-
-## Backend-интеграция мобильных приложений
-
-Backend поддерживает два клиента — INCY и Freedom VPN. Оба приложения получают
-только короткоживущий device token и профили подписки; `SERVICE_API_TOKEN`, токен
-3x-ui и административные секреты на устройство не выдаются.
-
-### Общий жизненный цикл устройства
-
-1. При нажатии пользователем кнопки теста приложение отправляет `POST
-   /v1/client/trial`:
-
-   ```json
-   {
-     "install_id": "<UUID установки>",
-     "name": "Мой телефон",
-     "platform": "android"
-   }
-   ```
-
-   Допустимы платформы `android` и `ios`. В ответе приходят `device_id`,
-   `access_token`, `expires_at` и `trial_id` формата `trial-<device_id>`. Один
-   `install_id` не получает второй trial: повторный запрос ротирует токен уже
-   существующего устройства.
-
-2. Приложение передаёт токен в заголовке:
-
-   ```http
-   Authorization: Bearer <device-access-token>
-   ```
-
-   и запрашивает `GET /v1/client/profile`. Ответ содержит `nodes` с
-   конфигурациями, `profile_id`, регионом, протоколом и доступностью, а также
-   `usage` (`upload_bytes`, `download_bytes`, `total_bytes`,
-   `remaining_bytes`), срок, тариф, объявление и ссылки провайдера.
-
-3. Синхронизация приложения повторяет `GET /v1/client/profile`. Для обновления
-   токена используется `POST /v1/client/refresh` с тем же Bearer-токеном.
-   После успешной привязки оплаченной подписки `trial_id` в профиле становится
-   `null`.
-
-4. Для устройств без trial оператор выпускает одноразовый код через
-   `POST /v1/client/activation-codes` с service Bearer, а приложение обменивает
-   его через `POST /v1/client/activate`. Код одноразовый, имеет короткий срок и
-   не содержит VPN-конфигурацию.
-
-Тестовый доступ не выдаётся автоматически при запуске приложения. Backend
-создаёт отдельные VLESS-клиенты в 3x-ui, а для статических протоколов использует
-`client_uri` из конфигурации ноды. Трафик VLESS читается из `clientStats` 3x-ui;
-при временной недоступности панели используются последние сохранённые значения.
-
-### Подписанные ссылки и импорт
-
-После оплаты backend создаёт подписанный токен для конкретного `VPNClient`.
-Токен содержит ID клиента, срок действия и HMAC-подпись. Он не требует
-авторизации приложения, но перестаёт работать после истечения срока или отзыва
-клиента. Канонический endpoint подписки:
-
-```text
-GET /v1/client/subscription/<signed-token>
-```
-
-Он возвращает текстовый профиль с VPN URI, названием региона, интервалом
-обновления, сроком и ссылкой поддержки.
-
-#### INCY
-
-Для web-кабинета и прямого запуска используется:
-
-```text
-incy://import/https://<public-host>/v1/client/subscription/<signed-token>
-```
-
-Для Telegram используется HTTPS-переходник:
-
-```text
-GET /v1/client/import/<signed-token>
-```
-
-Он показывает кнопку `Открыть в INCY` с Android `intent://` и резервной
-обычной ссылкой. Прямой `incy://` в Telegram-кнопку помещать нельзя: Telegram
-WebView может вернуть `ERR_UNKNOWN_URL_SCHEME`.
-
-Если INCY был запущен на мобильном trial и пользователь импортирует оплаченную
-ссылку, приложение после успешной загрузки профиля вызывает общий endpoint
-`POST /v1/client/import` с текущим device token и полем `token`. Это сохраняет
-установленное устройство и переводит его с synthetic trial-пользователя на
-владельца оплаченной подписки. После вызова приложение повторяет
-`GET /v1/client/profile` и считает импорт завершённым только после успешного
-ответа.
-
-#### Freedom VPN
-
-Канонический deep link приложения имеет вид:
-
-```text
-freevpn://import/https://<public-host>/v1/client/subscription/<signed-token>
-```
-
-В Telegram, web-кабинете и уведомлениях используется HTTPS-переходник:
-
-```text
-GET /v1/client/freevpn-import/<signed-token>
-```
-
-Переходник формирует Android `intent://` с package
-`org.freedomvpn.app`, автоматически нажимает единственную кнопку
-`Открыть в Freedom VPN`, а саму кнопку оставляет как ручной fallback. Другие
-ссылки на странице переходника не выводятся.
-
-После того как Freedom VPN загрузил подписку, приложение также привязывает
-устройство к её владельцу через общий endpoint:
-
-```http
-POST /v1/client/import
-Authorization: Bearer <device-access-token>
-Content-Type: application/json
-
-{"token":"<signed-token>"}
-```
-
-Backend проверяет подпись и срок токена, активность подписки и VPN-клиента,
-перепривязывает текущий `ClientDevice` к пользователю подписки и возвращает
-`device_id`, `subscription_id` и `expires_at`. После этого приложение повторно
-запрашивает `/v1/client/profile`; импорт считается успешным только после этого
-запроса.
-
-### Где используются ссылки
-
-- `GET /vpn/clients/{client_id}/config` с service Bearer возвращает
-  `incy_subscription_url`, `incy_import_url`, `incy_telegram_import_url`,
-  `freevpn_subscription_url`, `freevpn_import_url` и
-  `freevpn_telegram_import_url`.
-- Web-кабинет показывает кнопки импорта в INCY и Freedom VPN рядом с ключом.
-- После подтверждённой покупки Telegram и email уведомления содержат HTTPS
-  ссылки импорта обоих приложений и ссылку `Продлить подписку`.
-- В `ClientProfileResponse.provider` передаются `support_url` и `cabinet_url`,
-  а в `links` — канал/бот, поддержка, сайт и личный кабинет. Ссылки строятся из
-  `CLIENT_*_URL`, `PROVIDER_*_URL`, `BOT_USERNAME` и `PUBLIC_BASE_URL`.
-
-Подробные контракты: [`docs/mobile-provider-profile.md`](docs/mobile-provider-profile.md),
-[`docs/incy-integration.md`](docs/incy-integration.md) и
-[`docs/freevpn-deeplinks.md`](docs/freevpn-deeplinks.md).
-
-### Управление мобильными trial в админке
-
-В `/admin/overview` мобильные устройства помечаются полями `trial_id`,
-`trial_subscription_id`, `trial_client_id` и `trial_node_id`. Для конкретного
-`device_id` доступны:
-
-```http
-POST   /admin/devices/{device_id}/trial/refresh
-DELETE /admin/devices/{device_id}/trial
-```
-
-`refresh` повторно активирует trial только выбранному устройству, обновляет срок
-и квоту в базе и синхронизирует клиента в 3x-ui. `DELETE` отзывает доступ и
-удаляет trial-клиентов из 3x-ui. Оба маршрута требуют административную
-авторизацию и не затрагивают другие устройства.
-
-Повторный подтверждённый платёж не создаёт вторую активную подписку: он
-продлевает существующую, меняет тариф и выбранную страну согласно заказу,
-перевыпускает ключ и связывается с той же подпиской. Поэтому одна подписка может
-иметь несколько исторических платежей.
-
-## Недавние изменения
-
-- добавлены публичный лендинг и резервный web-кабинет с одноразовым email-кодом;
-- админка переведена на единый flow через боковое меню на русском: без
-  дублирующихся верхних карточек, с разделами документации, скриптов и
-  инфраструктурных ссылок;
-- добавлены просмотр последних email-кодов входа и ручная смена пароля
-  пользователя в `/admin`;
-- добавлены скрипты `scripts/check_mail_chain.sh` и
-  `scripts/check_online_apis.sh` для проверки почты, быстрого переподнятия
-  цепочки и online-тестов ключевых API;
-- Telegram-кнопки сайта и кабинета разделены через `WEB_SITE_URL` и
-  `WEB_CABINET_URL`;
-- из бота можно доверенно привязать email к существующему Telegram-пользователю;
-- web-кабинет поддерживает продление из блока подписки, отдельную страницу
-  смены тарифа, загрузку чека для ручных платежей и просмотр последних платежей;
-- тарифы сгруппированы через сущность «пакет тарифа» (`plan_packages`):
-  Лайт, Стандарт, Ультра; сами планы привязаны к пакету через `plans.package_id`;
-- повторный оплаченный заказ автоматически продлевает активную подписку и
-  заменяет её VPN-клиента;
-- live-трафик читается из разрешённого `clientStats` ответа 3x-ui;
-- Platega-платежи подтверждаются только callback `CONFIRMED`: ручной апрув в
-  админке для них отключён, уведомления админу и клиенту уходят после оплаты;
-- добавлены QR-изображения способов оплаты и восстановление старых Telegram
-  `file_id` чеков скриптом `bot/app/backfill_receipt.py`;
-- в каталоге `3x-ui/` зафиксирована справочная документация панели 3.7,
-  соответствующая интеграции проекта.
+Фактические адреса, профильные порты и маршруты на 17 октября 2026 года
+описаны в [архитектуре](docs/architecture.md). API не запускает собственный Xray
+и не управляет child-нодами по SSH. Подписка клиента может содержать несколько
+шведских и российских профилей при одной личности `vpn-<client_id>`.
 
 ## Локальный запуск
 
-```bash
-cp .env.example .env
-python3 scripts/configctl.py validate
+Создайте `.env` по используемому окружению и проверьте его:
 
+```bash
+python3 scripts/configctl.py validate
 docker compose run --rm api alembic upgrade head
 docker compose up -d
 ```
 
-Compose больше не содержит Xray. Для реальной выдачи ключей заранее нужны
-доступный 3x-ui master, API token и хотя бы один VLESS Reality inbound.
+`docker-compose.yml` запускает `api`, `worker` и `bot`. PostgreSQL и 3x-ui
+master существуют отдельно. Для выдачи VPN нужен доступный master, Bearer token
+панели и настроенная логическая VPN-нода.
 
-## Тесты
+При разработке API использует `http://localhost:8000`; `/health` проверяет
+процесс, а `/db-health` требует служебную авторизацию и проверяет PostgreSQL.
+Операционный порядок бэкапа, миграции и деплоя описан в
+[обслуживании](docs/maintenance-scripts.md).
+
+## Документация
+
+Полный каталог, сгруппированный по архитектуре, эксплуатации, API и клиентам:
+[docs/README.md](docs/README.md). Начните с [архитектуры](docs/architecture.md).
+Материал в `3x-ui/` относится к API панели; реальная конфигурация нод хранится
+в самих панелях и не заменяется текстом из репозитория.
+
+## Проверка кода
 
 ```bash
 python3.13 -m venv .venv
@@ -359,26 +75,6 @@ python3.13 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-HTTP-вызовы 3x-ui в тестах подменяются. Lifecycle-тесты используют совместимую
-in-memory реализацию и не изменяют развёрнутую панель.
-
-## Безопасность
-
-- Не коммитьте `.env` и API token 3x-ui.
-- Если установленная сборка 3x-ui поддерживает scopes, используйте
-  `node-sync`; иначе обращайтесь с API token как с полным административным
-  секретом.
-- Не отключайте TLS verification вне закрытого тестового стенда.
-- Не публикуйте закрытый base path панели.
-- Полный VLESS URI является секретом.
-- Перед перезапуском API и worker применяйте миграции Alembic.
-
-Операционные инструкции: [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md),
-доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md),
-бизнес-логика: [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md),
-БД: [`docs/database-reference.md`](docs/database-reference.md),
-frontend-структура: [`docs/frontend-site-structure.md`](docs/frontend-site-structure.md),
-план устранения неисправностей:
-[`docs/remediation-plan.md`](docs/remediation-plan.md).
-Документация разработчика бота:
-[`docs/editing-telegram-bot.md`](docs/editing-telegram-bot.md).
+Секреты `.env`, полные VPN URI, ключи Reality и токены 3x-ui в Git не
+попадают. Скрипты и код в репозитории не являются резервной копией SQLite
+child-панелей или PostgreSQL сервиса.
