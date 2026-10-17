@@ -1,0 +1,25 @@
+services:
+  openclaw-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw-freedomvpn
+    restart: unless-stopped
+    init: true
+    command: ["node", "dist/index.js", "gateway", "--bind", "lan"]
+    env_file:
+      - .env
+    volumes:
+      - ./state:/home/node/.openclaw
+      - ./health-mcp.mjs:/opt/freedomvpn/health-mcp.mjs:ro
+      - ./health/health.json:/data/health.json:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    cpus: "2.0"
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

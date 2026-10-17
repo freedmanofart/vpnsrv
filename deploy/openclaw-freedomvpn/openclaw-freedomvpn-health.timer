@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh OpenClaw health snapshot
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=1min
+AccuracySec=10s
+Unit=openclaw-freedomvpn-health.service
+
+[Install]
+WantedBy=timers.target

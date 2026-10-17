@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh sanitized OpenClaw read-only Freedom VPN health snapshot
+After=vpn-tailscale-health.service
+
+[Service]
+Type=oneshot
+User=root
+UMask=0022
+ExecStart=/usr/bin/python3 /opt/openclaw-freedomvpn/update-health.py
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/opt/openclaw-freedomvpn/health
