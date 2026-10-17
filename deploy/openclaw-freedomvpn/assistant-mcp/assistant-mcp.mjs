@@ -11,27 +11,27 @@ const tools = [
   {
     name: "freedomvpn_capabilities",
     title: "Freedom VPN assistant capabilities",
-    description: "List the support and owner-only admin capabilities available to this assistant.",
+    description: "List the support-group administrator read-only and owner-private admin capabilities available to this assistant.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "freedomvpn_lookup_user",
     title: "Look up a Freedom VPN account",
-    description: "Owner-only private lookup by the customer's numeric Telegram ID. Returns only account and latest subscription fields.",
+    description: "Read-only lookup by the customer's numeric Telegram ID. Available to current Telegram administrators in the configured support group and to the owner in private chat. Returns account and latest subscription fields; share only what is needed in group replies.",
     inputSchema: { type: "object", properties: { telegram_id: { type: "integer", minimum: 1 } }, required: ["telegram_id"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
     name: "freedomvpn_lookup_payments",
     title: "Look up payment status",
-    description: "Owner-only private lookup by the customer's numeric Telegram ID. Does not expose provider transaction IDs, receipt contents, or raw payment details.",
+    description: "Read-only lookup by the customer's numeric Telegram ID. Available to current Telegram administrators in the configured support group and to the owner in private chat. Does not expose provider transaction IDs, receipt contents, or raw payment details; share only status, amount, and relevant timestamps in group replies.",
     inputSchema: { type: "object", properties: { telegram_id: { type: "integer", minimum: 1 } }, required: ["telegram_id"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
     name: "freedomvpn_get_system_configuration",
     title: "Get a safe configuration summary",
-    description: "Owner-only summary of enabled features, integration readiness and configured VLESS nodes. It never returns secrets, raw node configs, IPs or admin endpoints.",
+    description: "Read-only summary available to current Telegram administrators in the configured support group and to the owner in private chat. Shows enabled features, integration readiness and configured VLESS nodes; never returns secrets, raw node configs, IPs or admin endpoints.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
@@ -116,7 +116,12 @@ const tools = [
 ];
 
 const capabilities = {
-  support_group: ["Ответы по базе знаний и общим вопросам поддержки", "Проверка очищенного health-снимка через отдельный MCP-инструмент"],
+  support_group: [
+    "Ответы по базе знаний и общим вопросам поддержки",
+    "Проверка очищенного health-снимка",
+    "Read-only проверка аккаунтов, платежей, сводки конфигурации, тарифов, VPN-нод и ожидающих операций доступна только текущим администраторам группы",
+    "Результаты ответов помощника публикуются в группе",
+  ],
   owner_private_chat: [
     "Поиск аккаунта и статуса подписки по Telegram ID",
     "Поиск последних платежей по Telegram ID без реквизитов и чеков",
@@ -126,7 +131,7 @@ const capabilities = {
     "Проверка возможности возврата Platega, предварительный расчёт и отправка после точного подтверждения",
   ],
   restrictions: [
-    "Админские инструменты должны быть недоступны из групповых чатов",
+    "Инструменты подготовки и подтверждения изменений недоступны в групповых чатах",
     "Каждое изменение имеет предпросмотр, одноразовое подтверждение и срок действия 10 минут",
     "Возвраты для провайдеров кроме Platega не автоматизированы",
     "Никакого shell, SQL, Docker socket, произвольных URL или чтения конфигурационных секретов",

@@ -6,6 +6,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
@@ -27,6 +28,20 @@ TOOLS = [
     "freedomvpn_prepare_node_update",
     "freedomvpn_approve_action",
 ]
+SUPPORT_GROUP_READ_TOOLS = [
+    "freedomvpn-health__freedomvpn_health",
+    "freedomvpn-admin__freedomvpn_capabilities",
+    "freedomvpn-admin__freedomvpn_lookup_user",
+    "freedomvpn-admin__freedomvpn_lookup_payments",
+    "freedomvpn-admin__freedomvpn_get_system_configuration",
+    "freedomvpn-admin__freedomvpn_list_plans",
+    "freedomvpn-admin__freedomvpn_list_nodes",
+    "freedomvpn-admin__freedomvpn_list_pending_actions",
+]
+SUPPORT_GROUP_WRITE_DENY = [
+    "freedomvpn-admin__freedomvpn_prepare_*",
+    "freedomvpn-admin__freedomvpn_approve_action",
+]
 
 
 def read_env() -> dict[str, str]:
@@ -40,14 +55,66 @@ def read_env() -> dict[str, str]:
     return values
 
 
+def telegram_group_admin_ids(token: str) -> tuple[list[str], int]:
+    request = Request(
+        f"https://api.telegram.org/bot{token}/getChatAdministrators",
+        data=json.dumps(
+            {"chat_id": int(SUPPORT_GROUP_ID), "return_bots": True}
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            result = json.load(response)
+    except Exception:
+        raise SystemExit(
+            "Could not retrieve Telegram group administrators; config was not changed"
+        ) from None
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise SystemExit("Telegram did not return the support group administrator list; config was not changed")
+
+    administrators = [
+        item
+        for item in result.get("result", [])
+        if isinstance(item, dict)
+        and item.get("status") in {"creator", "administrator"}
+        and isinstance(item.get("user"), dict)
+        and re.fullmatch(r"[0-9]{4,15}", str(item["user"].get("id", "")))
+    ]
+    admin_ids = sorted({str(item["user"]["id"]) for item in administrators})
+    if not admin_ids:
+        raise SystemExit("No Telegram group administrators were returned; config was not changed")
+    bot_admin_count = sum(1 for item in administrators if item["user"].get("is_bot") is True)
+    return admin_ids, bot_admin_count
+
+
+def strip_admin_tool_grants(policy: dict) -> None:
+    for field in ("allow", "alsoAllow"):
+        grants = policy.get(field)
+        if isinstance(grants, list):
+            filtered = [
+                item for item in grants
+                if not isinstance(item, str) or not item.startswith("freedomvpn-admin__")
+            ]
+            if filtered:
+                policy[field] = filtered
+            else:
+                policy.pop(field, None)
+
+
 def main() -> None:
     env = read_env()
     owner_id = env.get("OPENCLAW_OWNER_TELEGRAM_ID", "")
     mcp_token = env.get("OPENCLAW_ADMIN_MCP_TOKEN", "")
     if not re.fullmatch(r"[0-9]{4,15}", owner_id):
         raise SystemExit("OPENCLAW_OWNER_TELEGRAM_ID must be a numeric Telegram user ID")
+    telegram_token = env.get("TELEGRAM_BOT_TOKEN", "")
+    if not telegram_token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN must be set to retrieve current group administrators")
     if not re.fullmatch(r"[A-Za-z0-9_-]{40,}", mcp_token):
         raise SystemExit("OPENCLAW_ADMIN_MCP_TOKEN must be set to a separate random token")
+    support_admin_ids, bot_admin_count = telegram_group_admin_ids(telegram_token)
     config = json.loads(CONFIG.read_text(encoding="utf-8"))
 
     tools = config.setdefault("tools", {})
@@ -81,7 +148,25 @@ def main() -> None:
         deny = group_policy.setdefault("deny", [])
         if not isinstance(deny, list):
             raise SystemExit(f"OpenClaw Telegram group tools.deny is invalid for {group_id}")
-        if "freedomvpn-admin__*" not in deny:
+        if group_id == SUPPORT_GROUP_ID:
+            strip_admin_tool_grants(group_policy)
+            group_policy.pop("allow", None)
+            if "freedomvpn-admin__*" not in deny:
+                deny.append("freedomvpn-admin__*")
+            for tool in SUPPORT_GROUP_WRITE_DENY:
+                if tool not in group_policy["deny"]:
+                    group_policy["deny"].append(tool)
+
+            existing_sender_policies = group.get("toolsBySender", {})
+            if not isinstance(existing_sender_policies, dict):
+                raise SystemExit("OpenClaw support group toolsBySender must be an object")
+            sender_policies = {}
+            for telegram_id in support_admin_ids:
+                sender_policies[f"id:{telegram_id}"] = {
+                    "allow": list(SUPPORT_GROUP_READ_TOOLS)
+                }
+            group["toolsBySender"] = sender_policies
+        elif "freedomvpn-admin__*" not in deny:
             deny.append("freedomvpn-admin__*")
 
     servers = config.setdefault("mcp", {}).setdefault("servers", {})
@@ -114,7 +199,12 @@ def main() -> None:
             os.unlink(temp_name)
         except FileNotFoundError:
             pass
-    print("Owner-only Freedom VPN assistant tools configured; original config backed up.")
+    print(
+        "Read-only Freedom VPN tools configured for "
+        f"{len(support_admin_ids)} current Telegram group administrators "
+        f"({bot_admin_count} bot administrators; owner is admin: "
+        f"{'yes' if owner_id in support_admin_ids else 'no'}); original config backed up."
+    )
 
 
 if __name__ == "__main__":
