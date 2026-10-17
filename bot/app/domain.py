@@ -199,19 +199,19 @@ def subscription_import_actions(config: dict | None) -> list[tuple[str, str]]:
     values = config or {}
     candidates = [
         (
-            "📲 Импортировать конфигурацию в Freedom VPN",
+            "📲 Импорт в Freedom VPN",
             values.get("freevpn_telegram_import_url") or values.get("freevpn_import_url"),
         ),
         (
-            "📲 Импортировать конфигурацию в Incy",
+            "📲 Импорт в INCY",
             values.get("incy_telegram_import_url") or values.get("incy_import_url"),
         ),
         (
-            "📲 Импортировать конфигурацию в Amnezia VPN",
+            "📲 Импорт в Amnezia VPN",
             values.get("amnezia_import_url"),
         ),
         (
-            "📲 Импортировать конфигурацию в V2rayTUN",
+            "📲 Импорт в V2rayTUN",
             values.get("v2raytun_import_url"),
         ),
     ]
