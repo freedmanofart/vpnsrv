@@ -112,25 +112,6 @@ async def notify_health_transitions(db: AsyncSession, checks: list[dict]) -> Non
         await db.commit()
 
 
-def _is_routine_lifecycle_event(row: AuditLog) -> bool:
-    if row.action != "lifecycle.cycle" or row.result != "success":
-        return False
-    details = row.details or {}
-    keys = (
-        "expired_subscriptions",
-        "revoked_clients",
-        "expired_debug_sessions",
-        "subscription_expiring_emails",
-        "subscription_expired_emails",
-        "subscription_email_failures",
-        "subscription_email_skipped",
-        "xray_restored",
-        "xray_removed",
-        "xray_errors",
-    )
-    return not any(int(details.get(key) or 0) for key in keys)
-
-
 def _audit_event_line(row: AuditLog) -> str:
     created = row.created_at
     if created.tzinfo is None:
@@ -178,8 +159,7 @@ async def notify_audit_events(db: AsyncSession) -> int:
     if not rows:
         return 0
 
-    pending = [row for row in rows if not _is_routine_lifecycle_event(row)]
-    lines = [_audit_event_line(row) for row in pending]
+    lines = [_audit_event_line(row) for row in rows]
     messages = _split_message("📋 Freedom VPN: события сервиса", lines, max_chars=3900)
     if messages:
         for message in messages:
@@ -190,7 +170,7 @@ async def notify_audit_events(db: AsyncSession) -> int:
     latest_id = rows[-1].id
     await _save_setting(db, AUDIT_CURSOR_KEY, str(latest_id))
     await db.commit()
-    return len(pending)
+    return len(rows)
 
 
 async def run_once() -> bool:
