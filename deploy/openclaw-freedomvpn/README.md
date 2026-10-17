@@ -34,6 +34,10 @@
 5. Из `/opt/openclaw-freedomvpn` выполните `python3 configure-assistant.py`, затем `docker compose up -d --build`. Скрипт сохраняет резервную копию `state/openclaw.json`, получает актуальный список администраторов Freedom VPN Admin через Telegram Bot API и разрешает только им точный набор инструментов поддержки. Для любого другого отправителя группа запрещает admin MCP.
 6. Проверьте MCP через `docker compose logs --tail=50 openclaw-assistant-mcp` и `docker compose ps`. После добавления бота отключите Privacy Mode в BotFather и заново добавьте бота в группу.
 
+## Control UI
+
+Control UI доступен только через loopback сервера. Для подключения с Mac откройте SSH-туннель `ssh -N -L 18789:127.0.0.1:18789 root@freedomvpn`, затем откройте `http://127.0.0.1:18789/`. Для входа выполните на сервере `docker exec openclaw-freedomvpn openclaw dashboard` и используйте выданную ссылку; не пересылайте её, так как в ней находится gateway token.
+
 Не добавляйте `.env`, `state/`, OAuth-креды и рабочие health-файлы в git. Не подключайте OpenClaw gateway напрямую к `vpn-backend`: к этой сети присоединяется только ограниченный MCP sidecar, который принимает соединения с отдельным MCP bearer-токеном.
 
 ## Telegram и права
