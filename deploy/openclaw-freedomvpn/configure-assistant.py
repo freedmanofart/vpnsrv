@@ -19,6 +19,7 @@ TOOLS = [
     "freedomvpn_capabilities",
     "freedomvpn_lookup_user",
     "freedomvpn_lookup_payments",
+    "freedomvpn_send_support_reply",
     "freedomvpn_get_system_configuration",
     "freedomvpn_list_plans",
     "freedomvpn_list_nodes",
@@ -29,11 +30,12 @@ TOOLS = [
     "freedomvpn_prepare_node_update",
     "freedomvpn_approve_action",
 ]
-SUPPORT_GROUP_READ_TOOLS = [
+SUPPORT_GROUP_ADMIN_TOOLS = [
     "freedomvpn-health__freedomvpn_health",
     "freedomvpn-admin__freedomvpn_capabilities",
     "freedomvpn-admin__freedomvpn_lookup_user",
     "freedomvpn-admin__freedomvpn_lookup_payments",
+    "freedomvpn-admin__freedomvpn_send_support_reply",
     "freedomvpn-admin__freedomvpn_get_system_configuration",
     "freedomvpn-admin__freedomvpn_list_plans",
     "freedomvpn-admin__freedomvpn_list_nodes",
@@ -169,7 +171,7 @@ def main() -> None:
             sender_policies = {}
             for telegram_id in support_admin_ids:
                 sender_policies[f"id:{telegram_id}"] = {
-                    "allow": list(SUPPORT_GROUP_READ_TOOLS)
+                    "allow": list(SUPPORT_GROUP_ADMIN_TOOLS)
                 }
             group["toolsBySender"] = sender_policies
         elif "freedomvpn-admin__*" not in deny:

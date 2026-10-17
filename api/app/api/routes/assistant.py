@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal, Union
@@ -109,6 +110,11 @@ PrepareData = Annotated[
 
 class ActionApproval(StrictModel):
     confirm_text: str = Field(min_length=1, max_length=100)
+
+
+class SupportReply(StrictModel):
+    telegram_id: int = Field(gt=0)
+    text: str = Field(min_length=1, max_length=4000)
 
 
 def _json_value(value):
@@ -313,6 +319,99 @@ async def lookup_payments(
             for payment, plan_name in rows
         ],
     }
+
+
+@router.post("/support/reply")
+async def send_support_reply(
+    data: SupportReply,
+    principal: AssistantAuth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Send an assistant-authored support response through the customer-facing bot."""
+    if not settings.bot_token:
+        raise HTTPException(status_code=503, detail="Support bot is not configured")
+
+    user = await db.scalar(select(User).where(User.telegram_id == data.telegram_id))
+    if user is None:
+        raise HTTPException(status_code=404, detail="Freedom VPN user not found")
+
+    text = f"💬 Ответ поддержки Freedom VPN:\n\n{data.text.strip()}"
+    if len(text) > 4096:
+        raise HTTPException(status_code=422, detail="Support reply is too long")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{settings.bot_token}/sendMessage",
+                json={"chat_id": data.telegram_id, "text": text},
+            )
+    except httpx.HTTPError as exc:
+        await write_audit(
+            db,
+            action="assistant.support.reply.send",
+            result="failed",
+            actor_type="openclaw-assistant",
+            resource_type="user",
+            resource_id=user.id,
+            details={
+                "telegram_id": data.telegram_id,
+                "text_length": len(data.text),
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Telegram is temporarily unavailable; the reply was not delivered",
+        ) from exc
+
+    try:
+        result = response.json()
+    except ValueError:
+        result = {}
+    if not response.is_success or not isinstance(result, dict) or result.get("ok") is not True:
+        description = str(result.get("description", "")).lower() if isinstance(result, dict) else ""
+        await write_audit(
+            db,
+            action="assistant.support.reply.send",
+            result="failed",
+            actor_type="openclaw-assistant",
+            resource_type="user",
+            resource_id=user.id,
+            details={
+                "telegram_id": data.telegram_id,
+                "text_length": len(data.text),
+                "telegram_status": response.status_code,
+                "telegram_error_code": result.get("error_code") if isinstance(result, dict) else None,
+            },
+        )
+        if response.status_code == 403 or "blocked" in description:
+            detail = "Telegram did not deliver the reply; the client may have blocked the support bot"
+        elif "chat not found" in description:
+            detail = "Telegram could not open this client chat; ask the client to start the Freedom VPN bot"
+        else:
+            detail = "Telegram rejected the support reply; it was not delivered"
+        raise HTTPException(status_code=502, detail=detail)
+
+    telegram_result = result.get("result")
+    telegram_message_id = telegram_result.get("message_id") if isinstance(telegram_result, dict) else None
+    try:
+        await write_audit(
+            db,
+            action="assistant.support.reply.send",
+            result="success",
+            actor_type="openclaw-assistant",
+            resource_type="user",
+            resource_id=user.id,
+            details={
+                "telegram_id": data.telegram_id,
+                "text_length": len(data.text),
+                "telegram_message_id": telegram_message_id,
+            },
+        )
+    except Exception:
+        # Telegram has already accepted the message; do not report a false delivery failure.
+        logging.exception("assistant_support_reply_audit_failed")
+    return {"delivered": True, "telegram_id": data.telegram_id, "message_id": telegram_message_id}
 
 
 @router.get("/plans")

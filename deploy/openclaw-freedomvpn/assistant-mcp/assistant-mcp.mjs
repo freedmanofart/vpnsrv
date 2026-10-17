@@ -29,6 +29,21 @@ const tools = [
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   {
+    name: "freedomvpn_send_support_reply",
+    title: "Send a support reply to a Freedom VPN customer",
+    description: "Send the prepared support response through the customer-facing Freedom VPN bot. Use the Telegram ID shown in the current support ticket. Call only when an administrator asks you to answer the ticket or the ticket can be answered accurately; do not send a draft as a group message or claim delivery unless this tool succeeds.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        telegram_id: { type: "integer", minimum: 1 },
+        text: { type: "string", minLength: 1, maxLength: 4000 },
+      },
+      required: ["telegram_id", "text"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+  },
+  {
     name: "freedomvpn_get_system_configuration",
     title: "Get a safe configuration summary",
     description: "Read-only summary available to current Telegram administrators in the configured support group and to the owner in private chat. Shows enabled features, integration readiness and configured VLESS nodes; never returns secrets, raw node configs, IPs or admin endpoints.",
@@ -118,6 +133,7 @@ const tools = [
 const capabilities = {
   support_group: [
     "Ответы по базе знаний и общим вопросам поддержки",
+    "Отправка ответа клиенту через Freedom VPN бот для обращений с указанным Telegram ID",
     "Проверка очищенного health-снимка",
     "Read-only проверка аккаунтов, платежей, сводки конфигурации, тарифов, VPN-нод и ожидающих операций доступна только текущим администраторам группы",
     "Результаты ответов помощника публикуются в группе",
@@ -164,6 +180,12 @@ async function callTool(name, args) {
   if (name === "freedomvpn_capabilities" && empty) return capabilities;
   if (name === "freedomvpn_lookup_user") return apiCall(`/assistant/users/${encodeURIComponent(args.telegram_id)}`);
   if (name === "freedomvpn_lookup_payments") return apiCall(`/assistant/payments?telegram_id=${encodeURIComponent(args.telegram_id)}`);
+  if (name === "freedomvpn_send_support_reply") {
+    return apiCall("/assistant/support/reply", {
+      method: "POST",
+      body: { telegram_id: args.telegram_id, text: args.text },
+    });
+  }
   if (name === "freedomvpn_get_system_configuration" && empty) return apiCall("/assistant/configuration");
   if (name === "freedomvpn_list_plans" && empty) return apiCall("/assistant/plans");
   if (name === "freedomvpn_list_nodes" && empty) return apiCall("/assistant/nodes");
