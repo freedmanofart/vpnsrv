@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import getpass
 import json
+import shlex
 import subprocess
 import sys
 from urllib.error import HTTPError, URLError
@@ -62,8 +63,9 @@ if not payload.get("ok") or payload.get("result", {}).get("username") != EXPECTE
     raise SystemExit(1)
 print("Токен принят Telegram для ожидаемого бота. Обновляю серверную конфигурацию.")
 try:
+    remote_command = "python3 -c " + shlex.quote(REMOTE)
     result = subprocess.run(
-        ["ssh", "root@freedomvpn", "python3", "-c", REMOTE],
+        ["ssh", "root@freedomvpn", remote_command],
         input=token + "\n", capture_output=True, text=True, timeout=300,
     )
 except (subprocess.SubprocessError, OSError):
@@ -72,5 +74,6 @@ except (subprocess.SubprocessError, OSError):
 if result.returncode:
     print("Сервер не подтвердил обновление (код "+str(result.returncode)+").")
     if result.stdout.strip(): print(result.stdout.strip())
+    if result.stderr.strip(): print(result.stderr.strip())
     raise SystemExit(result.returncode)
 print(result.stdout.strip() or "Обновление завершено.")
