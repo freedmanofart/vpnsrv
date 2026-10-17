@@ -4,7 +4,6 @@ services:
     container_name: openclaw-freedomvpn
     restart: unless-stopped
     init: true
-    command: ["node", "dist/index.js", "gateway", "--bind", "lan"]
     env_file:
       - .env
     volumes:
