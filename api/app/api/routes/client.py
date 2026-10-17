@@ -97,6 +97,15 @@ def incy_support_url() -> str:
 # while 3X-UI KIT exports VMess as legacy base64 JSON. Passing that entry makes
 # the client reject the complete provider response as unsupported_service_config.
 _FREEDOM_PROFILE_SCHEMES = {"vless", "trojan"}
+_INCY_EXCLUDED_SCHEMES = {"wireguard", "amneziawg", "awg", "vpn"}
+_INCY_RU_PROFILE_VARIANTS = {
+    "Reality",
+    "Hysteria2",
+    "xHTTP",
+    "VLESS WebSocket",
+    "Trojan gRPC",
+    "VMess WebSocket",
+}
 _AWG_OPTION_NAMES = {
     "jc": "Jc",
     "jmin": "Jmin",
@@ -199,6 +208,18 @@ def localized_profile_name(node: VPNNode, uri: str, index: int) -> str:
     if variant.upper().startswith("VLESS ") and "reality" in uri.lower():
         variant = "Reality"
     return f"{flag} {country} ({variant})"
+
+
+def incy_profile_allowed(uri: str, region: str | None, name: str | None = None) -> bool:
+    scheme = urlsplit(uri).scheme.lower()
+    if scheme in _INCY_EXCLUDED_SCHEMES:
+        return False
+    region_code = (region or "").split("|", 1)[0].strip().upper()
+    if region_code != "RU":
+        return True
+    label = name or profile_display_name(uri, 0)
+    variant = label.rsplit("(", 1)[-1].removesuffix(")").strip()
+    return variant in _INCY_RU_PROFILE_VARIANTS
 
 
 def _safe_profile_scalar(value: object) -> str:
@@ -376,17 +397,7 @@ async def alternate_client_profiles(
     for node, node_config in result.all():
         link_host = str(node_config.config.get("share_address") or "").lower().strip()
         link_variants = {
-            ("vless", 8443, "tcp"): "Reality",
-            ("vless", 9443, "xhttp"): "xHTTP",
-            ("hysteria2", 8443, ""): "Hysteria2",
             ("tuic", 443, ""): "TUIC",
-            ("vless", 443, "tcp"): "Reality",
-            ("vless", 23691, "tcp"): "Reality 2",
-            ("vless", 8443, "xhttp"): "xHTTP",
-            ("vless", 2081, "ws"): "VLESS WebSocket",
-            ("trojan", 2083, "grpc"): "Trojan gRPC",
-            ("vmess", 2087, "ws"): "VMess WebSocket",
-            ("hysteria2", 443, ""): "Hysteria2",
             ("tuic", 8444, ""): "TUIC",
             ("wireguard", 51820, ""): "WireGuard",
         }
@@ -412,9 +423,24 @@ async def alternate_client_profiles(
                             continue
                     if (link_hostname or "").lower() != link_host:
                         continue
-                    variant = link_variants.get(
-                        (parsed.scheme.lower(), link_port, transport)
-                    )
+                    scheme = parsed.scheme.lower()
+                    security = parse_qs(parsed.query).get("security", [""])[0].lower()
+                    link_name = clean_profile_name(unquote(parsed.fragment)).upper()
+                    variant = None
+                    if scheme == "vless" and transport == "tcp" and security == "reality":
+                        variant = "Reality 2" if "REALITY-2" in link_name else "Reality"
+                    elif scheme == "vless" and transport in {"xhttp", "splithttp"}:
+                        variant = "xHTTP"
+                    elif scheme == "vless" and transport == "ws":
+                        variant = "VLESS WebSocket"
+                    elif scheme == "trojan" and transport == "grpc":
+                        variant = "Trojan gRPC"
+                    elif scheme == "vmess" and transport == "ws":
+                        variant = "VMess WebSocket"
+                    elif scheme in {"hysteria2", "hy2"}:
+                        variant = "Hysteria2"
+                    if variant is None:
+                        variant = link_variants.get((scheme, link_port, transport))
                     if variant:
                         selected.append((link, variant))
             except (ThreeXUIError, TypeError, ValueError):
@@ -1135,30 +1161,32 @@ async def incy_subscription(
             # never report a fabricated amount of consumed traffic.
             pass
     if kit_subscription:
+        incy_uris = [
+            profile_uri
+            for profile_uri in kit_subscription["uris"]
+            if incy_profile_allowed(
+                profile_uri,
+                node.region,
+                localized_profile_name(node, profile_uri, 0),
+            )
+        ]
+        if not incy_uris:
+            incy_uris = [uri]
         app_uris = [
             normalized_profile_uri(
                 profile_uri,
                 index,
                 localized_profile_name(node, profile_uri, index),
             )
-            for index, profile_uri in enumerate(kit_subscription["uris"])
+            for index, profile_uri in enumerate(incy_uris)
         ]
         offset = len(app_uris)
         app_uris.extend(
             normalized_profile_uri(profile["config"], offset + index)
             for index, profile in enumerate(alternate_profiles)
-        )
-        awg_profiles = await kit_amnezia_profiles_for_client(client, node, node_config)
-        app_uris.extend(
-            normalized_profile_uri(
-                profile["incy_config"],
-                offset + len(alternate_profiles) + index,
-                localized_profile_name(
-                    node, profile.get("config") or profile["incy_config"], index
-                ),
+            if incy_profile_allowed(
+                profile["config"], profile.get("region"), profile.get("name")
             )
-            for index, profile in enumerate(awg_profiles)
-            if profile.get("incy_config")
         )
         body = "\n".join(app_uris) + "\n"
     else:
@@ -1167,6 +1195,9 @@ async def incy_subscription(
         app_uris.extend(
             normalized_profile_uri(profile["config"], offset + index)
             for index, profile in enumerate(alternate_profiles)
+            if incy_profile_allowed(
+                profile["config"], profile.get("region"), profile.get("name")
+            )
         )
         body = "\n".join(
             [

@@ -72,8 +72,48 @@ web-админку.
   `vpn-tailscale-cert-health.timer` каждые 5 минут записывает результат в
   `/var/backups/vpn-service/tailscale-cert-health.json`, который доступен
   API-контейнеру через существующий bind mount;
+- отдельные host-проверки Tailscale: `tailscaled`, Funnel service и watchdog,
+  backend и self node, online ingress peers, UDP/DERP,
+  Funnel-конфигурация, локальный API, ответы публичных DNS-резолверов, TLS и
+  маршруты `/`, `/cabinet`, `/admin`, `/plans`, `/payment-methods` через каждый
+  публичный Funnel relay. Для закрытых операторских маршрутов ожидается HTTP
+  401. REALITY-ноды проверяются по доступности TCP listener, поскольку их SNI
+  не использует обычную проверку PKI-сертификата. Результаты
+  `vpn-tailscale-health.timer` обновляет каждые 2 минуты в
+  `/var/backups/vpn-service/tailscale-health.json`;
 - SMTP-логина для писем web-кабинета;
 - каждой активной VPN-ноды через её `api_address` master 3x-ui.
+
+`vpn-admin-health-alerts.timer` каждые 2 минуты вызывает все проверки
+операторского Health-dashboard. Telegram-группа из `admin_contacts` получает
+сообщение при изменении статуса любой проверки, включая восстановление. Там же
+появляются новые записи audit log. Детали audit-записей и IP-адреса в группу не
+передаются; успешные пустые циклы worker сворачиваются, чтобы не засорять чат.
+При недоступности API хостовый runner отправляет отдельное уведомление и
+сообщает о восстановлении.
+
+Git-коммиты отправляются post-commit hook в `.githooks`. Чтобы включить его в
+другом clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Коммит содержит ветку, SHA, автора и subject. Сообщение Codex можно отправить в
+эту же группу через `scripts/notify_admin_event.py assistant`, передав текст в
+stdin. Автоматической подписки на сообщения интерфейса Codex у backend-сервиса
+нет, поэтому сообщения отправляются этим явным вызовом.
+
+На master новые systemd units устанавливаются так:
+
+```bash
+install -m 0644 deploy/systemd/vpn-tailscale-health.service /etc/systemd/system/
+install -m 0644 deploy/systemd/vpn-tailscale-health.timer /etc/systemd/system/
+install -m 0644 deploy/systemd/vpn-admin-health-alerts.service /etc/systemd/system/
+install -m 0644 deploy/systemd/vpn-admin-health-alerts.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now vpn-tailscale-health.timer vpn-admin-health-alerts.timer
+```
 
 Если 3x-ui открыт только через SSH proxy, адрес в разделе `Инфраструктура`
 помечается как внутренний/proxy SSH адрес. Для ноды важен именно `api_address`

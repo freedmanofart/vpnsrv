@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically collect Freedom VPN Tailscale health
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=2min
+AccuracySec=10s
+Unit=vpn-tailscale-health.service
+
+[Install]
+WantedBy=timers.target

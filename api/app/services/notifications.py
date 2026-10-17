@@ -207,6 +207,30 @@ async def _send_telegram_message(
                 )
 
 
+async def send_admin_telegram_message(db: AsyncSession, text: str) -> bool:
+    """Send an operator alert only to the configured admin group."""
+    contacts = await get_admin_contacts(db)
+    if not settings.bot_token or not contacts.bot_admin_chat_id:
+        logger.error("admin_telegram_alert_not_configured")
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{settings.bot_token}/sendMessage",
+                json={"chat_id": contacts.bot_admin_chat_id, "text": text[:4096]},
+            )
+            response.raise_for_status()
+        return True
+    except httpx.HTTPError as exc:
+        error_type, status_code, _ = _telegram_error_details(exc)
+        logger.warning(
+            "admin_telegram_alert_failed error=%s status=%s",
+            error_type,
+            status_code,
+        )
+        return False
+
+
 async def _send_telegram_receipt(
     db: AsyncSession,
     text: str,

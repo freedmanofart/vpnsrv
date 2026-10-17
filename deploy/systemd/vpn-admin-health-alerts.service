@@ -1,0 +1,9 @@
+[Unit]
+Description=Deliver Freedom VPN health transitions and audit alerts to Telegram
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/freedman/vpn-service/scripts/run_admin_health_alerts.sh
+TimeoutStartSec=300

@@ -3,6 +3,7 @@ Description=Publish Freedom VPN web app through Tailscale Funnel
 After=network-online.target tailscaled.service docker.service
 Wants=network-online.target tailscaled.service
 Requires=tailscaled.service
+PartOf=tailscaled.service
 
 [Service]
 Type=oneshot

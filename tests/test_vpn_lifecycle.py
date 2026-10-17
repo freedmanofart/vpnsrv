@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -502,14 +504,19 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 "share_address": "ru.example.test",
                 "alternate_profile_links": True,
             }
+            vmess_link = "vmess://" + base64.b64encode(
+                json.dumps(
+                    {"add": "ru.example.test", "port": 443, "net": "ws"}
+                ).encode()
+            ).decode().rstrip("=")
             links = [
                 "vless://key@ru.example.test:443?type=tcp&security=reality#reality",
-                "vless://key@ru.example.test:23691?type=tcp&security=reality#reality2",
+                "vless://key@ru.example.test:443?type=tcp&security=reality#REALITY-2",
                 "hysteria2://key@ru.example.test:443?sni=example.test#hy2-current",
-                "vless://key@ru.example.test:8443?type=xhttp&security=reality#xhttp-current",
-                "vless://key@ru.example.test:2081?type=ws&security=tls#ws",
-                "trojan://key@ru.example.test:2083?type=grpc&security=tls#grpc",
-                "vmess://eyJhZGQiOiJydS5leGFtcGxlLnRlc3QiLCJwb3J0IjoyMDg3LCJuZXQiOiJ3cyJ9",
+                "vless://key@ru.example.test:443?type=xhttp&security=reality#xhttp-current",
+                "vless://key@ru.example.test:443?type=ws&security=tls#ws",
+                "trojan://key@ru.example.test:443?type=grpc&security=tls#grpc",
+                vmess_link,
                 "tuic://key:secret@ru.example.test:8444?sni=example.test#tuic-current",
                 "wireguard://key@ru.example.test:51820#wireguard",
                 "vless://key@other.example.test:443?type=tcp#unrelated",

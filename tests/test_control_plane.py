@@ -25,6 +25,7 @@ os.environ.setdefault("SERVICE_API_TOKEN", "test-service-token")
 import app.main as main_module
 from app.api.routes import admin as admin_routes
 from app.api.routes.client import (
+    incy_profile_allowed,
     kit_amnezia_profiles,
     kit_subscription_for_client,
     kit_subscription_uris,
@@ -54,6 +55,27 @@ from app.db.session import get_db
 
 
 class ControlPlaneTests(IsolatedAsyncioTestCase):
+    async def test_incy_russian_profiles_are_limited_to_six_supported_variants(self) -> None:
+        profiles = [
+            ("vless://key@ru.example.test:443#reality", "🇷🇺 Россия (Reality)"),
+            ("vless://key@ru.example.test:443#reality-2", "🇷🇺 Россия (Reality 2)"),
+            ("hysteria2://key@ru.example.test:443#hy2", "🇷🇺 Россия (Hysteria2)"),
+            ("vless://key@ru.example.test:443?type=xhttp#xhttp", "🇷🇺 Россия (xHTTP)"),
+            ("vless://key@ru.example.test:443?type=ws#ws", "🇷🇺 Россия (VLESS WebSocket)"),
+            ("trojan://key@ru.example.test:443?type=grpc#grpc", "🇷🇺 Россия (Trojan gRPC)"),
+            ("vmess://encoded#vmess", "🇷🇺 Россия (VMess WebSocket)"),
+            ("tuic://key@ru.example.test:443#tuic", "🇷🇺 Россия (TUIC)"),
+            ("wireguard://key@ru.example.test:443#wg", "🇷🇺 Россия (WireGuard)"),
+        ]
+
+        self.assertEqual(
+            ["🇷🇺 Россия (Reality)", "🇷🇺 Россия (Hysteria2)", "🇷🇺 Россия (xHTTP)",
+             "🇷🇺 Россия (VLESS WebSocket)", "🇷🇺 Россия (Trojan gRPC)",
+             "🇷🇺 Россия (VMess WebSocket)"],
+            [name for uri, name in profiles if incy_profile_allowed(uri, "RU|Россия", name)],
+        )
+        self.assertTrue(incy_profile_allowed("tuic://key@se.example.test:443#tuic", "SE|Швеция"))
+
     async def test_kit_subscription_requires_explicit_client_and_trusted_node_url(self) -> None:
         client = SimpleNamespace(id=137, protocol="vless")
         node = SimpleNamespace(ip_address="203.0.113.20", hostname="vpn.example.test")
@@ -498,6 +520,28 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual("online", result["status"])
         self.assertIn("timer active", result["details"])
 
+    async def test_tailscale_health_reads_each_host_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            health_file = Path(temporary_directory) / "tailscale-health.json"
+            health_file.write_text(
+                json.dumps(
+                    {
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "checks": [
+                            {"id": "tailscale:backend", "name": "Tailscale backend", "status": "online", "details": "Running"},
+                            {"id": "tailscale:funnel", "name": "Funnel configuration", "status": "offline", "details": "HTTPS disabled"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(admin_routes, "TAILSCALE_HEALTH_FILE", health_file):
+                result = admin_routes._check_tailscale_host_health()
+
+        self.assertEqual(["online", "offline"], [item["status"] for item in result])
+        self.assertEqual("tailscale:backend", result[0]["id"])
+        self.assertEqual("Funnel configuration", result[1]["name"])
+
     async def test_web_registration_emails_one_time_code_and_opens_cabinet(self) -> None:
         with patch("app.api.routes.web.send_cabinet_code", new=AsyncMock()) as send:
             registered = await self.client.post(
@@ -557,6 +601,12 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             json={"email": "web.user@example.com", "password": "wrong-password"},
         )
         self.assertEqual(401, rejected.status_code)
+
+    async def test_guest_cabinet_login_page_uses_success_status(self) -> None:
+        response = await self.client.get("/cabinet")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn("Вход в аккаунт", response.text)
 
     async def test_web_cabinet_creates_payment_and_uploads_receipt(self) -> None:
         from app.db.models import CabinetAccessToken, PaymentMethod
@@ -1903,7 +1953,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         lines = response.text.splitlines()
-        self.assertEqual(9, len(lines))
+        self.assertEqual(8, len(lines))
         names = []
         for uri in lines:
             if uri.startswith("vmess://"):
@@ -1917,7 +1967,6 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
                 "🇩🇪 de (xHTTP)", "🇩🇪 de (VLESS WebSocket)",
                 "🇩🇪 de (Trojan gRPC)", "🇩🇪 de (VMess WebSocket)",
                 "🇩🇪 de (TUIC)", "🇩🇪 de (Shadowsocks)",
-                "🇩🇪 de (AmneziaWG)",
             ],
             names,
         )
