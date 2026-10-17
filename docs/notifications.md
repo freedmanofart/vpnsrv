@@ -220,3 +220,6 @@ Email-уведомления по окончанию подписок защищ
 - `email.subscription_expired.skip`
 - `payment_paid_notification`
 - `lifecycle.cycle`
+
+Периодическая Telegram-сводка служебных событий не отправляет `lifecycle.cycle`:
+эти записи остаются в аудите, но не засоряют чат повторяющимися циклами worker.

@@ -4,8 +4,9 @@ services:
     container_name: openclaw-freedomvpn
     restart: unless-stopped
     init: true
-    env_file:
-      - .env
+    environment:
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN in .env}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
     volumes:
       - ./state:/home/node/.openclaw
       - ./health-mcp.mjs:/opt/freedomvpn/health-mcp.mjs:ro
@@ -22,3 +23,41 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  openclaw-assistant-mcp:
+    build:
+      context: ./assistant-mcp
+      dockerfile: Dockerfile
+    container_name: freedomvpn-openclaw-assistant-mcp
+    restart: unless-stopped
+    init: true
+    environment:
+      FREEDOMVPN_ASSISTANT_API_URL: http://vpn-api:8000
+      OPENCLAW_ASSISTANT_TOKEN: ${OPENCLAW_ASSISTANT_TOKEN:?Set OPENCLAW_ASSISTANT_TOKEN in .env}
+      OPENCLAW_ADMIN_MCP_TOKEN: ${OPENCLAW_ADMIN_MCP_TOKEN:?Set OPENCLAW_ADMIN_MCP_TOKEN in .env}
+      PORT: "8080"
+    expose:
+      - "8080"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    networks:
+      - default
+      - vpn-backend
+
+networks:
+  vpn-backend:
+    name: vpn-backend
+    external: true

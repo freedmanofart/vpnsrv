@@ -19,6 +19,7 @@ from app.db.models.audit import (
 from app.db.models.cabinet_access import CabinetAccessToken
 from app.db.models.cabinet_login_code import CabinetLoginCode
 from app.db.models.admin_setting import AdminSetting
+from app.db.models.assistant_action import AssistantPendingAction
 
 __all__ = [
     "User",
@@ -41,4 +42,5 @@ __all__ = [
     "CabinetAccessToken",
     "CabinetLoginCode",
     "AdminSetting",
+    "AssistantPendingAction",
 ]

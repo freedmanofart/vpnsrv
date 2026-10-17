@@ -20,6 +20,7 @@ from app.api.routes.payments import router as payments_router
 from app.api.routes.client import router as client_router
 from app.api.routes.payment_methods import router as payment_methods_router
 from app.api.routes.web import router as web_router
+from app.api.routes.assistant import router as assistant_router
 
 from app.db.session import get_db, AsyncSessionLocal
 
@@ -185,9 +186,7 @@ async def request_context_and_audit(request: Request, call_next):
                         resource_id=logged_path,
                         ip_address=request.client.host if request.client else None,
                         details={"status_code": status_code, "duration_ms": duration_ms},
-                        sensitive_details={
-                            "authorization": request.headers.get("authorization")
-                        },
+                        sensitive_details={"authorization": "[redacted]"},
                     )
         except Exception:
             logger.exception("request audit failed")
@@ -204,6 +203,7 @@ app.include_router(payments_router)
 app.include_router(client_router)
 app.include_router(payment_methods_router)
 app.include_router(web_router)
+app.include_router(assistant_router)
 
 
 @app.get("/health")

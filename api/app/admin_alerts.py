@@ -23,6 +23,7 @@ HEALTH_KEY_PREFIX = "admin_alert.health."
 AUDIT_CURSOR_KEY = "admin_alert.audit_cursor"
 ADVISORY_LOCK_KEY = 846202607
 MAX_AUDIT_ROWS_PER_PASS = 100
+SUPPRESSED_AUDIT_ACTIONS = frozenset({"lifecycle.cycle"})
 
 
 def _clean(value: object, limit: int = 350) -> str:
@@ -159,9 +160,12 @@ async def notify_audit_events(db: AsyncSession) -> int:
     if not rows:
         return 0
 
-    lines = [_audit_event_line(row) for row in rows]
-    messages = _split_message("📋 Freedom VPN: события сервиса", lines, max_chars=3900)
-    if messages:
+    # Worker lifecycle cycles are frequent operational heartbeats. Keep them
+    # in the audit log, but do not send them to the administrator's Telegram.
+    notification_rows = [row for row in rows if row.action not in SUPPRESSED_AUDIT_ACTIONS]
+    if notification_rows:
+        lines = [_audit_event_line(row) for row in notification_rows]
+        messages = _split_message("📋 Freedom VPN: события сервиса", lines, max_chars=3900)
         for message in messages:
             if not await send_admin_telegram_message(db, message):
                 logger.error("admin_audit_alert_delivery_failed cursor=%s", cursor)
@@ -170,7 +174,7 @@ async def notify_audit_events(db: AsyncSession) -> int:
     latest_id = rows[-1].id
     await _save_setting(db, AUDIT_CURSOR_KEY, str(latest_id))
     await db.commit()
-    return len(rows)
+    return len(notification_rows)
 
 
 async def run_once() -> bool:

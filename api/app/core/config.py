@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "change_me"
     service_api_token: str = "change_me"
+    openclaw_assistant_token: str = ""
+    openclaw_owner_telegram_id: int = 0
     payment_provider: str = "mock"
     payment_webhook_secret: str = "change_me"
     payment_auto_confirm: bool = False

@@ -74,6 +74,22 @@ def _service(credentials: HTTPAuthorizationCredentials | None) -> APIPrincipal |
     return None
 
 
+def _openclaw_assistant(credentials: HTTPAuthorizationCredentials | None) -> APIPrincipal | None:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        return None
+    expected = settings.openclaw_assistant_token
+    if (
+        not expected
+        or not settings.openclaw_owner_telegram_id
+        or not _same(credentials.credentials, expected)
+    ):
+        return None
+    return APIPrincipal(
+        name=f"telegram:{settings.openclaw_owner_telegram_id or 'owner'}",
+        kind="openclaw-assistant",
+    )
+
+
 def require_admin(
     request: Request,
     credentials: HTTPBasicCredentials | None = Depends(basic_security),
@@ -100,6 +116,21 @@ def require_api_access(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="API authentication required",
             headers={"WWW-Authenticate": 'Basic realm="vpn-api", Bearer'},
+        )
+    request.state.principal = principal
+    return principal
+
+
+def require_openclaw_assistant(
+    request: Request,
+    bearer: HTTPAuthorizationCredentials | None = Depends(bearer_security),
+) -> APIPrincipal:
+    principal = _openclaw_assistant(bearer)
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="OpenClaw assistant authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     request.state.principal = principal
     return principal
