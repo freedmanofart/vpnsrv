@@ -7,7 +7,7 @@ set -euo pipefail
 # Оба пути можно переопределить через systemd или при разовом ручном запуске.
 # Метка UTC сохраняет правильную сортировку архивов, созданных на разных узлах.
 project_directory=${VPN_PROJECT_DIR:-/home/freedman/vpn-service}
-backup_directory=${VPN_BACKUP_DIR:-/var/backups/vpn-service}
+backup_directory=${VPN_BACKUP_DIR:-/home/freedman/projects/backup/vpn-service}
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 
 # Копии содержат строки БД, учётные данные и закрытый ключ Reality, поэтому

@@ -8,5 +8,5 @@ Type=oneshot
 User=root
 WorkingDirectory=/home/freedman/vpn-service
 Environment=VPN_PROJECT_DIR=/home/freedman/vpn-service
-Environment=VPN_BACKUP_DIR=/var/backups/vpn-service
+Environment=VPN_BACKUP_DIR=/home/freedman/projects/backup/vpn-service
 ExecStart=/home/freedman/vpn-service/scripts/backup.sh

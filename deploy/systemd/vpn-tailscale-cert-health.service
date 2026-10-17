@@ -6,5 +6,5 @@ After=vpn-tailscale-cert.service
 Type=oneshot
 User=root
 WorkingDirectory=/home/freedman/vpn-service
-Environment=TAILSCALE_CERT_HEALTH_FILE=/var/backups/vpn-service/tailscale-cert-health.json
+Environment=TAILSCALE_CERT_HEALTH_FILE=/home/freedman/projects/backup/vpn-service/tailscale-cert-health.json
 ExecStart=/home/freedman/vpn-service/scripts/check_tailscale_cert_units.sh

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: RESTORE_CONFIRM=I_UNDERSTAND scripts/restore_postgres.sh /var/backups/vpn-service/vpn-db-TIMESTAMP.dump" >&2
+  echo "usage: RESTORE_CONFIRM=I_UNDERSTAND scripts/restore_postgres.sh /home/freedman/projects/backup/vpn-service/vpn-db-TIMESTAMP.dump" >&2
   exit 2
 fi
 

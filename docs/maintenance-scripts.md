@@ -15,6 +15,33 @@ VPN находятся только в отдельной БД `vpn`.
 Актуальная схема таблиц, связи и безопасные команды диагностики описаны в
 [`database-reference.md`](database-reference.md).
 
+## Рабочие каталоги и место для backup
+
+Рабочие файлы сервера собраны под `/home/freedman/projects`:
+
+```text
+/home/freedman/projects/
+├── freedomvpn/
+│   ├── android-client/
+│   │   ├── repo/
+│   │   ├── packages/
+│   │   ├── toolchains/
+│   │   ├── build/
+│   │   └── artifacts/
+│   ├── repos/vpn-service -> /home/freedman/vpn-service
+│   ├── worktrees/vpn-service-incy-deploy -> /home/freedman/vpn-service-incy-deploy
+│   ├── archives/
+│   └── operations/openclaw-freedomvpn -> /opt/openclaw-freedomvpn
+└── backup/                         # отдельный XFS том fedora-vpnclient_build, 70 GiB
+    ├── vpn-service/               # автоматические и ручные backup-файлы
+    └── legacy/                     # ранее собранные снимки и backup-копии
+```
+
+Канонический host-путь для backup — `/home/freedman/projects/backup`.
+70 GiB XFS LV `fedora-vpnclient_build` смонтирован туда через `/etc/fstab`.
+Production-репозиторий и его Docker bind mounts остаются в
+`/home/freedman/vpn-service`.
+
 ## Проверка состояния
 
 ```bash
@@ -67,8 +94,9 @@ web-админку.
 - механизма обновления master-сертификата: `vpn-tailscale-cert.service` и
   `vpn-tailscale-cert.timer`. Host-таймер
   `vpn-tailscale-cert-health.timer` каждые 5 минут записывает результат в
-  `/var/backups/vpn-service/tailscale-cert-health.json`, который доступен
-  API-контейнеру через существующий bind mount;
+  `/home/freedman/projects/backup/vpn-service/tailscale-cert-health.json`;
+  файл доступен API-контейнеру по внутреннему пути
+  `/var/backups/vpn-service/tailscale-cert-health.json` через bind mount;
 - SMTP-логина для писем web-кабинета;
 - каждой активной VPN-ноды через её `api_address` master 3x-ui.
 
@@ -292,7 +320,7 @@ systemctl status vpn-tailscale-cert.service vpn-tailscale-cert.timer --no-pager
 systemctl status vpn-tailscale-cert-health.service vpn-tailscale-cert-health.timer --no-pager
 systemctl list-timers vpn-tailscale-cert.timer --all --no-pager
 journalctl -u vpn-tailscale-cert.service -n 40 --no-pager
-cat /var/backups/vpn-service/tailscale-cert-health.json
+cat /home/freedman/projects/backup/vpn-service/tailscale-cert-health.json
 sudo scripts/renew_master_cert.sh
 ```
 
@@ -430,12 +458,14 @@ python3 scripts/configctl.py apply --services api worker
 В `/admin` → `Скрипты` есть активные кнопки:
 
 - `Создать PostgreSQL backup сейчас` — запускает `pg_dump -Fc` из
-  API-контейнера и кладёт dump в `/var/backups/vpn-service`;
+  API-контейнера и сохраняет dump на host в
+  `/home/freedman/projects/backup/vpn-service`;
 - `Проверить последний PostgreSQL backup` — запускает `pg_restore --list`;
 - `Показать последние PostgreSQL backup-файлы` — выводит список dump-файлов.
 
-Для этого API-контейнер имеет `postgresql-client` и volume
-`/var/backups/vpn-service:/var/backups/vpn-service`.
+Для этого API-контейнер имеет `postgresql-client`. Host-каталог
+`/home/freedman/projects/backup/vpn-service` подключён внутрь контейнера как
+`/var/backups/vpn-service`.
 
 `backup.sh` создаёт два вида backup за один запуск:
 
@@ -443,7 +473,7 @@ python3 scripts/configctl.py apply --services api worker
 - защищённый архив `.env` и `docker-compose.yml`.
 
 ```bash
-sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/var/backups/vpn-service \
+sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/home/freedman/projects/backup/vpn-service \
   scripts/backup.sh
 ```
 
@@ -451,7 +481,7 @@ sudo VPN_PROJECT_DIR="$PWD" VPN_BACKUP_DIR=/var/backups/vpn-service \
 
 ```bash
 sudo scripts/verify_backup.sh \
-  /var/backups/vpn-service/vpn-db-<timestamp>.dump
+  /home/freedman/projects/backup/vpn-service/vpn-db-<timestamp>.dump
 ```
 
 Backup не включает БД 3x-ui. Её резервируйте отдельно.
@@ -459,7 +489,7 @@ Backup не включает БД 3x-ui. Её резервируйте отде�
 Контроль наличия свежих backup-файлов:
 
 ```bash
-ls -lh /var/backups/vpn-service | tail -20
+ls -lh /home/freedman/projects/backup/vpn-service | tail -20
 ```
 
 Перед обновлением, ручными правками БД, сменой нод или массовой правкой
@@ -475,14 +505,14 @@ ls -lh /var/backups/vpn-service | tail -20
 1. Найдите нужный dump:
 
 ```bash
-ls -lh /var/backups/vpn-service/vpn-db-*.dump
+ls -lh /home/freedman/projects/backup/vpn-service/vpn-db-*.dump
 ```
 
 2. Проверьте его во временной БД:
 
 ```bash
 cd /home/freedman/vpn-service
-sudo scripts/verify_backup.sh /var/backups/vpn-service/vpn-db-<timestamp>.dump
+sudo scripts/verify_backup.sh /home/freedman/projects/backup/vpn-service/vpn-db-<timestamp>.dump
 ```
 
 3. Запустите восстановление:
@@ -490,7 +520,7 @@ sudo scripts/verify_backup.sh /var/backups/vpn-service/vpn-db-<timestamp>.dump
 ```bash
 cd /home/freedman/vpn-service
 sudo RESTORE_CONFIRM=I_UNDERSTAND \
-  scripts/restore_postgres.sh /var/backups/vpn-service/vpn-db-<timestamp>.dump
+  scripts/restore_postgres.sh /home/freedman/projects/backup/vpn-service/vpn-db-<timestamp>.dump
 ```
 
 Скрипт:

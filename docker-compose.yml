@@ -63,7 +63,7 @@ services:
       - ./docs:/app/docs:ro
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
-      - /var/backups/vpn-service:/var/backups/vpn-service
+      - /home/freedman/projects/backup/vpn-service:/var/backups/vpn-service
 
     ports:
       - "127.0.0.1:8000:8000"

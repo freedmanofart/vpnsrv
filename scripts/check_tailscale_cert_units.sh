@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Runs on the master host. The API container reads the generated JSON through
-# the existing /var/backups/vpn-service bind mount.
+# the host backup volume; Docker exposes it inside API at /var/backups/vpn-service.
 
-health_file="${TAILSCALE_CERT_HEALTH_FILE:-/var/backups/vpn-service/tailscale-cert-health.json}"
+health_file="${TAILSCALE_CERT_HEALTH_FILE:-/home/freedman/projects/backup/vpn-service/tailscale-cert-health.json}"
 cert_file="${TAILSCALE_CERT_FILE:-/etc/ssl/tailscale/cert.pem}"
 warn_days="${TAILSCALE_CERT_WARN_DAYS:-7}"
 
