@@ -19,7 +19,13 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.routes.client import build_client_uri
+from app.api.routes.client import (
+    alternate_client_profiles,
+    build_client_uri,
+    kit_all_profiles_for_client,
+    localized_profile_name,
+    normalized_profile_uri,
+)
 from app.core.config import settings
 from app.core.cabinet_links import (
     incy_subscription_token,
@@ -895,7 +901,9 @@ async def cabinet(
     found = await _access(cabinet_token, db)
     if found is None:
         body = f'''<div class="login-shell"><header class="l-header"><a class="l-brand" href="/" aria-label="Freedom VPN — главная"><img src="/static/freedom-vpn-mark.webp" srcset="/static/freedom-vpn-mark.webp 1x, /static/freedom-vpn-mark@2x.webp 2x" width="32" height="32" alt=""><span>Freedom <i>VPN</i></span></a><a class="l-cabinet" href="/">На главную</a></header><main class="login-page"><section class="login-card"><h1>Вход в аккаунт</h1><p class="muted">Рады видеть вас снова.</p><label for="login-email">Email</label><input id="login-email" type="email" autocomplete="email" placeholder="you@example.com"><div class="login-tabs"><button class="active" type="button" data-login-mode="email">Код из письма</button><button type="button" data-login-mode="password">Пароль</button></div><div class="login-mode" data-mode-panel="email"><p class="muted" style="margin-top:22px">Пришлём шестизначный одноразовый код — пароль не нужен.</p><button class="button gradient" type="button" onclick="requestLogin()">Получить код на email</button><label for="login-code">Код из письма</label><input id="login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{{6}}" placeholder="000000"><button class="button gradient" type="button" onclick="codeLogin()">Войти по коду</button></div><div class="login-mode" data-mode-panel="password" hidden><div class="password-heading"><label for="login-password">Пароль</label><button type="button" onclick="requestPasswordReset()">Получить код</button></div><input id="login-password" type="password" autocomplete="current-password" minlength="8" placeholder="••••••••"><button class="button gradient" type="button" onclick="passwordLogin()">Войти</button></div><p id="login-result"></p>{_temporary_registration_button()}</section></main></div><script>const params=new URLSearchParams(location.search);const telegramLinkToken=params.get('tg')||'';const paymentReturn=params.get('payment');const paymentReturnToken=sessionStorage.getItem('freedom_payment_return_token');if(paymentReturn&&paymentReturnToken){{sessionStorage.removeItem('freedom_payment_return_token');location.replace('/cabinet/payment-return?payment='+encodeURIComponent(paymentReturn)+'&token='+encodeURIComponent(paymentReturnToken))}}const tabs=document.querySelectorAll('[data-login-mode]');function selectLoginMode(mode){{tabs.forEach(x=>x.classList.toggle('active',x.dataset.loginMode===mode));document.querySelectorAll('[data-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.modePanel!==mode)}}tabs.forEach(tab=>tab.onclick=()=>selectLoginMode(tab.dataset.loginMode));async function requestLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Отправляем код…';const body={{email:document.getElementById('login-email').value}};if(telegramLinkToken)body.telegram_link_token=telegramLinkToken;const r=await fetch('/web/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?d.message:(d.detail||'Ошибка отправки');if(r.ok)document.getElementById('login-code').focus()}}async function requestPasswordReset(){{selectLoginMode('email');await requestLogin()}}async function codeLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем код…';const r=await fetch('/web/code/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,code:document.getElementById('login-code').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}}async function passwordLogin(){{const out=document.getElementById('login-result');out.className='';out.textContent='Проверяем…';const r=await fetch('/web/password/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:document.getElementById('login-email').value,password:document.getElementById('login-password').value}})}});const d=await r.json();if(r.ok){{location.reload();return}}out.className='error';out.textContent=d.detail||'Ошибка входа'}};</script>'''
-        return HTMLResponse(_shell(body, title="Вход — Freedom VPN"), status_code=401, headers=_headers())
+        # The login screen is a public web page. Keep it a normal 200 response so
+        # embedded browsers do not treat the page as an authentication failure.
+        return HTMLResponse(_shell(body, title="Вход — Freedom VPN"), headers=_headers())
     user, access = found
     access.last_used_at = datetime.now(timezone.utc)
     now = datetime.now(timezone.utc)
@@ -903,25 +911,106 @@ async def cabinet(
     plan = await db.get(Plan, subscription.plan_id) if subscription else None
     client = None
     vpn_uri = ""
+    vpn_profiles: list[dict] = []
     incy_import_url = ""
     freevpn_import_url = ""
+    amnezia_import_url = ""
+    v2raytun_import_url = ""
+    subscription_token = ""
     node = None
+    config = None
+    profile_clients: list[VPNClient] = []
     if subscription:
-        client = (await db.execute(select(VPNClient).where(VPNClient.subscription_id == subscription.id, VPNClient.status == "active").order_by(VPNClient.id.desc()))).scalars().first()
-    if client:
-        node = await db.get(VPNNode, client.node_id)
-        config = await db.scalar(select(VPNNodeConfig).where(VPNNodeConfig.node_id == client.node_id, VPNNodeConfig.protocol == client.protocol))
-        if node and config:
-            vpn_uri = client.config_override or build_client_uri(client, node, config.config)
-            subscription_token = incy_subscription_token(client.id, client.expires_at)
-            # Telegram WebView rejects custom schemes in the cabinet page.
-            # Open an HTTPS bridge first; it launches the app through an
-            # Android intent after an explicit user tap.
-            incy_import_url = f"{settings.public_base_url.rstrip('/')}/v1/client/import/{subscription_token}"
-            freevpn_import_url = (
-                f"{settings.public_base_url.rstrip('/')}/v1/client/freevpn-import/"
-                f"{subscription_token}"
+        profile_clients = list(
+            (
+                await db.execute(
+                    select(VPNClient)
+                    .where(
+                        VPNClient.subscription_id == subscription.id,
+                        VPNClient.status == "active",
+                        VPNClient.expires_at > now,
+                    )
+                    .order_by(VPNClient.id)
+                )
+            ).scalars()
+        )
+        if not profile_clients:
+            client = (
+                await db.execute(
+                    select(VPNClient)
+                    .where(
+                        VPNClient.subscription_id == subscription.id,
+                        VPNClient.status == "active",
+                    )
+                    .order_by(VPNClient.id.desc())
+                )
+            ).scalars().first()
+            if client is not None:
+                profile_clients = [client]
+
+    for profile_client in profile_clients:
+        profile_node = await db.get(VPNNode, profile_client.node_id)
+        profile_config = await db.scalar(
+            select(VPNNodeConfig).where(
+                VPNNodeConfig.node_id == profile_client.node_id,
+                VPNNodeConfig.protocol == profile_client.protocol,
             )
+        )
+        if profile_node is None or profile_config is None:
+            continue
+        uri = profile_client.config_override or build_client_uri(
+            profile_client, profile_node, profile_config.config
+        )
+        if not uri:
+            continue
+        if client is None:
+            client, node, config = profile_client, profile_node, profile_config
+        token = incy_subscription_token(profile_client.id, profile_client.expires_at)
+        client_profiles = await kit_all_profiles_for_client(
+            profile_client,
+            profile_node,
+            profile_config,
+            "Freedom VPN cabinet",
+        )
+        if not client_profiles:
+            client_profiles = [{
+                "name": localized_profile_name(profile_node, uri, 0),
+                "protocol": uri.partition("://")[0] or profile_client.protocol,
+                "config": normalized_profile_uri(
+                    uri, 0, localized_profile_name(profile_node, uri, 0)
+                ),
+            }]
+        alternate_profiles = await alternate_client_profiles(
+            db, profile_client, profile_config
+        )
+        client_profiles.extend(alternate_profiles)
+        for profile_index, profile in enumerate(client_profiles):
+            label = profile["name"]
+            profile_node = (
+                await db.get(VPNNode, profile["node_id"])
+                if profile.get("node_id") is not None
+                else await db.get(VPNNode, profile_client.node_id)
+            )
+            profile_flag, profile_server = _server_label(profile_node)
+            vpn_profiles.append(
+                {
+                    **profile,
+                    "name": label,
+                    "token": token,
+                    "profile_index": profile_index,
+                    "server_flag": profile_flag,
+                    "server_name": profile_server,
+                }
+            )
+
+    if vpn_profiles:
+        vpn_uri = client.config_override or build_client_uri(client, node, config.config)
+        subscription_token = vpn_profiles[0]["token"]
+        base = settings.public_base_url.rstrip("/")
+        incy_import_url = f"{base}/v1/client/import/{subscription_token}"
+        freevpn_import_url = f"{base}/v1/client/freevpn-import/{subscription_token}"
+        amnezia_import_url = f"{base}/v1/client/amnezia-import/{subscription_token}"
+        v2raytun_import_url = f"{base}/v1/client/v2raytun-import/{subscription_token}"
     traffic_remaining_bytes = None
     traffic_limit_bytes = None
     traffic_used_bytes = None
@@ -1003,14 +1092,35 @@ async def cabinet(
     tariff_selector = _tier_selector(public_plans, packages)
     key_block = '<p class="muted">Ключ появится после подтверждения оплаты и выдачи подписки.</p>'
     if vpn_uri:
-        scheme = vpn_uri.partition("://")[0] or "vpn"
+        selected_uri = vpn_profiles[0]["config"] if vpn_profiles else vpn_uri
+        scheme = selected_uri.partition("://")[0] or "vpn"
+        profile_options = "".join(
+            f'<option value="{index}" data-config="{html.escape(profile["config"], quote=True)}" '
+            f'data-token="{html.escape(profile["token"], quote=True)}" '
+            f'data-profile-index="{profile["profile_index"]}" '
+            f'data-server-flag="{html.escape(profile["server_flag"], quote=True)}" '
+            f'data-server-name="{html.escape(profile["server_name"], quote=True)}">'
+            f'{html.escape(profile["name"])}</option>'
+            for index, profile in enumerate(vpn_profiles)
+        )
+        profile_selector = (
+            '<label class="profile-label" for="vpn-profile">Конфигурация</label>'
+            f'<select id="vpn-profile" class="profile-select" onchange="selectVpnProfile()">{profile_options}</select>'
+            if len(vpn_profiles) > 1
+            else ""
+        )
+        qr_base = f"/v1/client/qr/{vpn_profiles[0]['token']}"
         key_block = (
+            profile_selector
+            +
             '<div class="key-row">'
-            f'<div class="key"><code id="vpn-key" data-value="{html.escape(vpn_uri, quote=True)}">{html.escape(scheme)}://••••••••••••</code></div>'
+            f'<div class="key"><code id="vpn-key" data-value="{html.escape(selected_uri, quote=True)}" data-index="{vpn_profiles[0]["profile_index"]}" data-qr-base="{html.escape(qr_base, quote=True)}">{html.escape(scheme)}://••••••••••••</code></div>'
             '<button class="button copy-button" type="button" onclick="copyKey(this)" aria-label="Скопировать VPN-ключ"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>Копировать ключ</button>'
-            '</div><div class="import-buttons">'
-            f'<a class="pay-button incy-import-button" href="{html.escape(incy_import_url, quote=True)}">Импортировать<br>в INCY</a>'
-            f'<a class="pay-button freevpn-import-button" href="{html.escape(freevpn_import_url, quote=True)}">Импортировать<br>в Freedom VPN</a>'
+            '</div><button class="button qr-button" type="button" onclick="showVpnQr()">Показать QR</button><div class="import-buttons">'
+            f'<a id="incy-import" class="pay-button incy-import-button" href="{html.escape(incy_import_url, quote=True)}">Импортировать<br>в INCY</a>'
+            f'<a id="freevpn-import" class="pay-button freevpn-import-button" href="{html.escape(freevpn_import_url, quote=True)}">Импортировать<br>в Freedom VPN</a>'
+            f'<a id="amnezia-import" class="pay-button amnezia-import-button" href="{html.escape(amnezia_import_url, quote=True)}">Импортировать<br>в Amnezia VPN</a>'
+            f'<a id="v2raytun-import" class="pay-button v2raytun-import-button" href="{html.escape(v2raytun_import_url, quote=True)}">Импортировать<br>в V2rayTUN</a>'
             '</div>'
         )
     body = f"""
@@ -1023,12 +1133,13 @@ async def cabinet(
 <section class="cabinet-card renew-card" id="payment"><div class="renew-heading"><h2>Продлить подписку</h2><p id="renew-subtitle">Выберите способ оплаты</p><div class="renew-tabs" role="tablist" aria-label="Продление подписки"><span class="tab-indicator" aria-hidden="true"></span><button class="renew-tab active" id="payment-tab" type="button" role="tab" aria-selected="true" aria-controls="payment-panel" onclick="setRenewMode('payment')">Оплата</button><button class="renew-tab" id="tariffs-tab" type="button" role="tab" aria-selected="false" aria-controls="tariffs-panel" onclick="setRenewMode('tariffs')">Изменить тариф</button></div></div><input type="hidden" id="order-plan" value="{initial_plan_id}">
 <div id="payment-panel" role="tabpanel" aria-labelledby="payment-tab" data-renew-panel="payment"><div class="payment-method-control"><button class="payment-picker" id="payment-picker" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="payment-method-menu" onclick="toggleMethodMenu()"><span class="payment-method-icon" id="payment-method-icon" data-kind="qr" aria-hidden="true"><svg class="method-icon icon-qr" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h3v3h-3zM18 14h3v7h-3zM14 18h3v3h-3z"></path><path class="qr-cut" d="M5 5h3v3H5zM16 5h3v3h-3zM5 16h3v3H5z"></path></svg><svg class="method-icon icon-card" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="2.5"></rect><path d="M3 9h18"></path></svg><span class="method-icon icon-crypto">₿</span></span><span class="payment-method-copy"><small>Способ оплаты</small><strong id="payment-method-name">Способ оплаты</strong><span id="payment-method-hint">Нажмите, чтобы выбрать</span></span><span class="payment-check" aria-hidden="true">✓</span><span class="payment-chevron" aria-hidden="true">›</span></button><fieldset class="method-menu" id="payment-method-menu" hidden><legend class="sr-only">Способ оплаты</legend>{method_radios or '<p class="muted">Способы оплаты временно недоступны.</p>'}</fieldset></div><div class="renew-order"><div><small>Тариф</small><strong id="renew-plan-name">—</strong></div><div class="renew-amount"><small>К оплате</small><strong id="renew-amount">—</strong></div></div><button class="pay-button" id="pay-button" type="button" onclick="openPayment()">Оплатить</button></div>
 <div id="tariffs-panel" role="tabpanel" aria-labelledby="tariffs-tab" data-renew-panel="tariffs" hidden><div class="inline-tariffs">{tariff_selector or '<p class="muted">Тарифы временно недоступны.</p>'}</div><p class="tariff-help">Выберите пакет и срок — сумма обновится автоматически.</p></div></section>
-<section class="cabinet-card connection-card"><h2>Подключение</h2>{key_block}<p class="server-line"><span aria-hidden="true">{server_flag}</span> Сервер: {html.escape(server_name)}</p></section>
+<section class="cabinet-card connection-card"><h2>Подключение</h2>{key_block}<p class="server-line"><span id="vpn-server-flag" aria-hidden="true">{server_flag}</span> Сервер: <b id="vpn-server-name">{html.escape(server_name)}</b></p></section>
 <section class="cabinet-card apps-card"><h2>Скачать приложение</h2><div class="app-grid"><a class="app-button" href="https://github.com/INCY-DEV/incy-platforms/releases/latest/download/incy-windows-setup.exe"><svg class="app-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h8v8H3zM13 3h8v9h-8zM3 14h8v7H3zM13 14h8v8h-8z"></path></svg>Windows</a><a class="app-button" href="https://github.com/INCY-DEV/incy-platforms/releases/latest/download/incy-macos-arm64.dmg"><svg class="app-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="12" rx="2"></rect><path d="M2 19h20"></path></svg>macOS</a><a class="app-button" data-native-store href="https://play.google.com/store/apps/details?id=llc.itdev.incy" target="_blank" rel="noopener noreferrer"><svg class="app-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9h10v9H7zM9 5 7 2M15 5l2-3M5 10v6M19 10v6M9 18v4M15 18v4"></path><circle cx="10" cy="8" r=".7"></circle><circle cx="14" cy="8" r=".7"></circle></svg>Android</a><a class="app-button" data-native-store href="https://apps.apple.com/ru/app/incy/id6756943388" target="_blank" rel="noopener noreferrer"><svg class="app-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2.5"></rect><path d="M10 5h4M11 19h2"></path></svg>iOS</a></div></section>
 <section class="cabinet-card payments-card"><h2>Последние платежи</h2><div class="payment-list">{payment_rows}</div></section>
 <section class="cabinet-card password-card"><h2>Пароль для входа</h2><p class="muted">Задайте или смените пароль для входа в кабинет без кода из письма.</p><div class="password-form"><label class="sr-only" for="cabinet-password">Новый пароль</label><input id="cabinet-password" type="password" minlength="8" maxlength="128" autocomplete="new-password" placeholder="Новый пароль — не менее 8 символов"><button class="button primary" type="button" onclick="saveCabinetPassword()">Сохранить пароль</button></div><p id="password-result"></p></section>
 </div></main></div>
 <div class="modal" id="payment-modal"><div class="modal-card payment-modal-card"><h3>Оплата</h3><p class="muted">Проверьте сумму и выбранный способ оплаты перед продолжением.</p><div id="payment-summary-modal" class="payment-summary"></div><div id="order-result"></div><div class="actions"><button class="button" type="button" onclick="closePayment()">Назад</button><button class="button primary" type="button" onclick="confirmPayment()">Продлить</button></div></div></div>
+<div class="modal" id="vpn-qr-modal"><div class="modal-card vpn-qr-card"><h3 id="vpn-qr-title">QR конфигурации</h3><img id="vpn-qr-image" alt="QR-код VPN-конфигурации"><div class="actions"><button class="button primary" type="button" onclick="closeVpnQr()">Закрыть</button></div></div></div>
 <style>
 .cabinet-page{{min-height:100vh;background:radial-gradient(circle at 50% 0,#eaf2ff 0,#f5f8fc 38%,#f1f5fa 100%);padding:0 18px 70px}}.cabinet-header{{width:min(900px,100%);height:84px;margin:0 auto;display:flex;align-items:center;justify-content:space-between}}.cabinet-header .brand{{font-size:24px}}.cabinet-header .brand img{{width:52px;height:52px}}.cabinet-logout{{border:0;background:transparent;color:var(--blue);font:inherit;font-size:17px;font-weight:750;cursor:pointer;padding:10px}}.cabinet-shell{{width:min(900px,100%);margin:0 auto;padding:16px 0 0}}.cabinet-title{{margin:0 4px 24px}}.cabinet-title h1{{font-size:42px;line-height:1.05;letter-spacing:-.05em;margin:0 0 3px}}.cabinet-title p{{margin:0;color:#65728a;font-size:22px;font-weight:650}}.cabinet-stack{{display:grid;gap:18px}}.cabinet-card{{background:#fff;border:1px solid #e3e9f2;border-radius:20px;padding:24px 28px;box-shadow:0 12px 36px #1c4b8d0a;min-width:0}}.cabinet-card h2{{font-size:27px;line-height:1.15;letter-spacing:-.035em;margin:0}}.card-heading{{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}}.current-plan{{color:var(--muted);margin:6px 0 0;font-weight:650}}.status-badge{{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;padding:8px 22px;background:#c9f7df;color:#128246;font-weight:800;white-space:nowrap}}.status-badge.inactive{{background:#fee2e2;color:#c62c2c}}.subscription-stats{{display:grid;grid-template-columns:repeat(3,1fr);margin-top:22px}}.subscription-stats>div{{padding:2px 28px 2px 0;min-width:0}}.subscription-stats>div+div{{border-left:1px solid #dce4ef;padding-left:40px}}.subscription-stats small,.renew-order small{{display:block;color:#68758e;font-size:15px;margin-bottom:2px}}.subscription-stats strong{{display:block;font-size:27px;letter-spacing:-.035em;overflow-wrap:anywhere}}.renew-card{{padding:0 20px 20px;border:3px solid var(--blue);overflow:hidden}}.renew-heading{{margin:0 -20px 12px;padding:22px 28px 18px;background:linear-gradient(110deg,#edf5ff,#fff)}}.renew-heading p{{color:#5f6d87;font-size:17px;margin:4px 0 0}}.payment-picker{{position:relative;display:grid;grid-template-columns:68px minmax(0,1fr) 44px 22px;align-items:center;gap:14px;min-height:112px;border:2px solid var(--blue);border-radius:17px;padding:18px 20px;background:#fff;box-shadow:0 5px 18px #175cff10}}.payment-picker select{{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;z-index:2}}.payment-method-icon{{display:flex;align-items:center;justify-content:center;width:56px;height:56px;border-radius:14px;background:#edf4ff;color:#071534;font-size:35px;font-weight:900}}.payment-method-copy{{display:flex;flex-direction:column;min-width:0}}.payment-method-copy strong{{font-size:23px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.payment-method-copy small{{color:#68758e;font-size:14px}}.payment-check{{display:grid;place-items:center;width:42px;height:42px;border-radius:50%;background:var(--blue);color:#fff;font-size:24px;font-weight:800}}.payment-chevron{{font-size:40px;line-height:1;color:#0a1733}}.renew-order{{display:grid;grid-template-columns:1fr auto;align-items:end;gap:22px;margin-top:18px;padding:16px 20px;border:1px solid #e4eaf3;border-radius:15px;background:#fff}}.renew-order strong{{font-size:20px}}.renew-amount{{text-align:right}}.renew-amount strong{{font-size:26px}}.pay-button{{display:block;width:100%;border:0;border-radius:13px;margin-top:14px;padding:14px 18px;background:var(--blue);color:#fff;font:inherit;font-size:20px;font-weight:750;cursor:pointer;box-shadow:0 10px 24px #175cff26}}.change-plan{{display:block;text-align:center;color:var(--blue);font-size:17px;font-weight:750;margin-top:12px}}.key-row{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;margin-top:18px}}.key-row .key{{min-width:0;background:#f1f5fa;border:0;padding:16px 18px}}.copy-button{{border-color:var(--blue);color:var(--blue);border-radius:12px;white-space:nowrap}}.copy-button span{{font-size:19px;margin-right:7px}}.server-line{{margin:14px 0 0;color:#65728a}}.server-line span{{font-size:21px;margin-right:7px}}.app-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}}.app-button{{display:flex;align-items:center;justify-content:center;gap:11px;border:1px solid #b9c8dd;border-radius:12px;padding:13px 10px;background:#fff;font-weight:650;transition:.2s}}.app-button:hover{{border-color:var(--blue);color:var(--blue)}}.app-button span{{font-size:22px;color:#061541}}.payment-list{{margin-top:12px}}.payment-row{{display:grid;grid-template-columns:90px 1fr 140px 120px;align-items:center;gap:12px;padding:12px 2px;border-bottom:1px solid #dfe6f0}}.payment-row:last-child{{border-bottom:0}}.payment-row time{{color:#66738c;text-align:right}}.payment-state{{justify-self:center;min-width:112px;border-radius:999px;padding:6px 14px;text-align:center;background:#e7edf5;color:#465166}}.payment-state.paid{{background:#c9f7df;color:#128246}}.payment-state.failed{{background:#fee2e2;color:#bd2929}}.payment-empty{{padding:16px 0}}.password-card>.muted{{margin:8px 0 18px}}.password-form{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px}}.password-form input{{margin:0;background:#f6f8fb;border-color:#dfe6ef;padding:14px 16px}}.password-form .button{{border-radius:12px}}.sr-only{{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}}.payment-summary{{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:16px;background:#fff}}.payment-summary h3{{margin:0 0 12px;text-align:center}}.summary-row{{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #e7edf8}}.summary-row:last-child{{border-bottom:0}}.summary-row span{{color:var(--muted)}}.summary-row b{{text-align:right}}.summary-total b{{font-size:20px;color:var(--ink)}}.payment-modal-card{{width:min(620px,100%)}}#order-result img{{display:block;margin:12px 0;border-radius:16px;border:1px solid var(--line)}}#order-result input[type=file]{{margin:12px 0}}
 @media(max-width:700px){{.cabinet-page{{padding:0 12px 44px}}.cabinet-header{{height:68px}}.cabinet-header .brand{{font-size:19px}}.cabinet-header .brand img{{width:40px;height:40px}}.cabinet-shell{{padding-top:14px}}.cabinet-title{{margin-bottom:18px}}.cabinet-title h1{{font-size:34px}}.cabinet-title p{{font-size:17px}}.cabinet-card{{padding:20px}}.cabinet-card h2{{font-size:24px}}.subscription-stats{{grid-template-columns:1fr;gap:14px}}.subscription-stats>div{{padding:0}}.subscription-stats>div+div{{border-left:0;border-top:1px solid #e2e8f1;padding:13px 0 0}}.subscription-stats strong{{font-size:23px}}.renew-card{{padding:0 14px 16px}}.renew-heading{{margin:0 -14px 12px;padding:18px}}.payment-picker{{grid-template-columns:48px minmax(0,1fr) 36px 14px;gap:10px;min-height:92px;padding:14px}}.payment-method-icon{{width:44px;height:44px;font-size:28px}}.payment-method-copy strong{{font-size:19px}}.payment-method-copy small{{font-size:12px}}.payment-check{{width:34px;height:34px;font-size:20px}}.payment-chevron{{font-size:30px}}.renew-order{{padding:14px;gap:10px}}.renew-order strong{{font-size:17px}}.renew-amount strong{{font-size:21px}}.key-row,.password-form{{grid-template-columns:1fr}}.copy-button,.password-form .button{{width:100%}}.app-grid{{grid-template-columns:repeat(2,1fr)}}.payment-row{{grid-template-columns:60px 1fr auto;gap:8px}}.payment-row time{{grid-column:2/4;text-align:left;font-size:13px}}.payment-state{{min-width:0;padding:5px 10px}}}}
@@ -1041,7 +1152,7 @@ async def cabinet(
 .cabinet-title p,.renew-heading p,.payment-method-copy small,.payment-method-copy span{{color:#5f6b82}}.status-badge{{color:#0f6f3d}}
 </style>
 <script>const planData={plan_json};const methodData={method_json};function durationLabel(days){{if(!days)return 'срок не указан';if(days%30===0){{const months=days/30;return months+' мес.'}}return days+' дн.'}}function selectedPlan(){{return planData[String(document.getElementById('order-plan').value)]}}function selectedMethod(){{const select=document.getElementById('order-method');const fallback=select?.selectedOptions?.[0];return methodData[select?.value]||{{name:fallback?.textContent||'Способ оплаты',url:fallback?.dataset?.url||'',manual:true}}}}function planTitle(plan){{if(!plan)return 'Тариф не выбран';return plan.name.toLocaleLowerCase().includes(plan.package.toLocaleLowerCase())?plan.name:`${{plan.package}} · ${{plan.name}}`}}function methodAppearance(method){{const value=`${{document.getElementById('order-method')?.value||''}} ${{method?.name||''}}`.toLocaleLowerCase();if(value.includes('крип')||value.includes('crypto'))return{{icon:'₿',hint:'Оплата криптовалютой'}};if(value.includes('мир')||value.includes('card')||value.includes('карт'))return{{icon:'▰',hint:'Оплата банковской картой'}};return{{icon:'▦',hint:'Оплата через приложение банка'}}}}function renderRenewCard(){{const plan=selectedPlan(),method=selectedMethod(),appearance=methodAppearance(method);document.getElementById('payment-method-name').textContent=method.name||'Способ оплаты';document.getElementById('payment-method-hint').textContent=appearance.hint;document.getElementById('payment-method-icon').textContent=appearance.icon;document.getElementById('renew-plan-name').textContent=planTitle(plan);document.getElementById('renew-amount').textContent=plan?`${{plan.price}} ${{plan.currency}}`:'—';document.getElementById('pay-button').textContent=plan?`Оплатить ${{plan.price}} ${{plan.currency}}`:'Выберите тариф'}}function renderPaymentSummary(targetId='payment-summary-modal'){{const target=document.getElementById(targetId);if(!target)return;const plan=selectedPlan(),method=selectedMethod();if(!plan){{target.innerHTML='<p class="error">Выберите подписку</p>';return}}target.innerHTML=`<h3>К оплате</h3><div class="summary-row"><span>Пакет</span><b>${{plan.package}}</b></div><div class="summary-row"><span>Тариф</span><b>${{plan.name}}</b></div><div class="summary-row"><span>Срок</span><b>${{durationLabel(plan.duration_days)}}</b></div><div class="summary-row summary-total"><span>Сумма</span><b>${{plan.price}} ${{plan.currency}}</b></div><div class="summary-row"><span>Способ оплаты</span><b>${{method.name}}</b></div>`}}document.getElementById('order-method')?.addEventListener('change',renderRenewCard);renderRenewCard();function openPayment(){{const out=document.getElementById('order-result');if(out){{out.className='';out.innerHTML=''}}renderPaymentSummary();if(!selectedPlan())return;document.getElementById('payment-modal').classList.add('open')}}function closePayment(){{document.getElementById('payment-modal').classList.remove('open')}}async function copyKey(button){{const key=document.getElementById('vpn-key')?.textContent||'';try{{await navigator.clipboard.writeText(key);button.textContent='Скопировано ✓'}}catch(error){{const range=document.createRange();range.selectNodeContents(document.getElementById('vpn-key'));const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);button.textContent='Ключ выделен'}}}}async function saveCabinetPassword(){{const out=document.getElementById('password-result'),input=document.getElementById('cabinet-password');out.className='';out.textContent='Сохраняем…';const r=await fetch('/web/password',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{password:input.value}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?'Пароль сохранён. Теперь можно входить по email и паролю.':(d.detail||'Не удалось сохранить пароль');if(r.ok)input.value=''}}async function confirmPayment(){{await createOrder()}}async function createOrder(){{const out=document.getElementById('order-result');out.className='';out.textContent='Создаём платёж…';const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:document.getElementById('order-method').value}})}});const d=await r.json();if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}if(d.redirect){{if(d.payment_return_token)sessionStorage.setItem('freedom_payment_return_token',d.payment_return_token);out.innerHTML='<p>Платёж создан. Открываем страницу оплаты…</p>';location.href=d.redirect;return}}out.className='';out.innerHTML=d.qr_url?`<p>Оплатите <b>${{d.amount}} ${{d.currency}}</b> выбранным способом, затем загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><p><b>Сумма: ${{d.amount}} ${{d.currency}}</b></p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`}}async function uploadReceipt(id){{const file=document.getElementById('receipt').files[0];if(!file)return alert('Выберите файл чека');const data=await new Promise(ok=>{{const reader=new FileReader();reader.onload=()=>ok(reader.result.split(',')[1]);reader.readAsDataURL(file)}});const r=await fetch(`/web/payments/${{id}}/receipt`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{filename:file.name,mime_type:file.type,data_base64:data}})}});const d=await r.json();if(r.ok){{alert('Чек отправлен. Платёж ожидает проверки администратора.');location.reload()}}else alert(d.detail||'Ошибка загрузки')}};if({str(checkout).lower()}){{openPayment()}}</script>"""
-    body += """<style>.import-buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}.import-buttons .pay-button{margin-top:0;text-align:center;white-space:normal;font-size:clamp(10px,2.7vw,15px);line-height:1.2;min-height:48px;padding:10px 8px}.incy-import-button,.freevpn-import-button{text-decoration:none}</style>"""
+    body += """<style>.profile-label{display:block;margin:15px 0 6px;color:#64708a;font-size:13px;font-weight:650}.profile-select{width:100%;min-height:44px;padding:10px 12px;border:1px solid #b9c8dd;border-radius:8px;background:#fff;color:#142039;font:inherit}.qr-button{width:100%;margin-top:10px;border-color:#245bff;color:#245bff}.import-buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}.import-buttons .pay-button{margin-top:0;text-align:center;white-space:normal;font-size:clamp(10px,2.7vw,15px);line-height:1.2;min-height:48px;padding:10px 8px}.incy-import-button,.freevpn-import-button,.amnezia-import-button,.v2raytun-import-button{text-decoration:none}.vpn-qr-card{text-align:center;width:min(390px,100%)}.vpn-qr-card img{display:block;width:min(300px,100%);aspect-ratio:1;margin:18px auto;background:#fff}.vpn-qr-card .actions{justify-content:center}</style>"""
     body += """<script>
 const paymentIcons={
   qr:'<svg class="method-icon icon-qr" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h3v3h-3zM18 14h3v7h-3zM14 18h3v3h-3z"></path><path class="qr-cut" d="M5 5h3v3H5zM16 5h3v3h-3zM5 16h3v3H5z"></path></svg>',
@@ -1099,6 +1210,17 @@ document.querySelectorAll('.renew-tab').forEach((tab,index,tabs)=>tab.addEventLi
 document.addEventListener('click',event=>{if(!event.target.closest('.payment-method-control'))toggleMethodMenu(false)});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')toggleMethodMenu(false)});
 function openPayment(){const out=document.getElementById('order-result');if(out){out.className='';out.innerHTML=''}if(!selectedMethodCode()){toggleMethodMenu(true);return}renderPaymentSummary();if(!selectedPlan())return;document.getElementById('payment-modal').classList.add('open')}
+function selectVpnProfile(){
+  const select=document.getElementById('vpn-profile'),key=document.getElementById('vpn-key'),option=select?.selectedOptions?.[0];if(!key||!option)return;
+  const token=option.dataset.token||'';key.dataset.value=option.dataset.config||'';key.dataset.index=option.dataset.profileIndex||'0';key.dataset.qrBase=`/v1/client/qr/${token}`;key.textContent=`${(key.dataset.value.split('://')[0]||'vpn')}://••••••••••••`;
+  document.getElementById('incy-import').href=`/v1/client/import/${token}`;document.getElementById('freevpn-import').href=`/v1/client/freevpn-import/${token}`;document.getElementById('amnezia-import').href=`/v1/client/amnezia-import/${token}`;document.getElementById('v2raytun-import').href=`/v1/client/v2raytun-import/${token}`;
+  document.getElementById('vpn-server-flag').textContent=option.dataset.serverFlag||'🌐';document.getElementById('vpn-server-name').textContent=option.dataset.serverName||'VPN';
+}
+function showVpnQr(){
+  const key=document.getElementById('vpn-key'),modal=document.getElementById('vpn-qr-modal'),image=document.getElementById('vpn-qr-image'),select=document.getElementById('vpn-profile');if(!key||!modal||!image)return;
+  image.src=`${key.dataset.qrBase}/${key.dataset.index||0}`;document.getElementById('vpn-qr-title').textContent=select?.selectedOptions?.[0]?.textContent||'QR конфигурации';modal.classList.add('open');
+}
+function closeVpnQr(){const modal=document.getElementById('vpn-qr-modal'),image=document.getElementById('vpn-qr-image');modal?.classList.remove('open');if(image)image.removeAttribute('src')}
 async function copyKey(button){
   const key=document.getElementById('vpn-key')?.dataset.value||'',original=button.innerHTML;let copied=false;
   try{await navigator.clipboard.writeText(key);copied=true}catch(error){const textarea=document.createElement('textarea');textarea.value=key;textarea.setAttribute('readonly','');textarea.style.position='fixed';textarea.style.opacity='0';document.body.appendChild(textarea);textarea.focus();textarea.select();textarea.setSelectionRange(0,key.length);copied=document.execCommand('copy');textarea.remove()}

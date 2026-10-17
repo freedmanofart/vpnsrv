@@ -10,6 +10,7 @@ from app.db.models.vpn_node import VPNNode
 from app.db.models.vpn_node_config import VPNNodeConfig
 from app.db.models.plan import Plan
 from app.db.models.subscription import Subscription
+from app.services.provisioning import ProvisioningInvalid, _kit_inbound_ids
 from app.services.threexui import (
     ThreeXUIClient,
     ThreeXUIError,
@@ -53,23 +54,53 @@ async def reconcile_node(
     api_address = config.config.get("api_address")
     if not api_address:
         raise ValueError("VPN node has no Xray management address")
+    try:
+        kit_inbound_ids = _kit_inbound_ids(config)
+    except ProvisioningInvalid as exc:
+        raise ValueError(str(exc)) from exc
 
+    shared_configs_result = await db.execute(
+        select(VPNNodeConfig, VPNNode.status)
+        .join(VPNNode, VPNNode.id == VPNNodeConfig.node_id)
+        .where(VPNNodeConfig.protocol == "vless")
+    )
+    shared_node_ids: set[int] = set()
+    alternate_node_ids: set[int] = set()
+    for other_config, status in shared_configs_result.all():
+        other = other_config.config or {}
+        if other_config.node_id == node_id or other.get("api_address") != api_address:
+            continue
+        shared_node_ids.add(other_config.node_id)
+        alternate_ids = other.get("alternate_node_ids", [])
+        try:
+            active_alternate_ids = {int(value) for value in alternate_ids}
+        except (TypeError, ValueError):
+            active_alternate_ids = set()
+        if status in ("active", "draining") and node_id in active_alternate_ids:
+            alternate_node_ids.add(other_config.node_id)
+
+    managed_node_ids = {node_id, *shared_node_ids}
     client_result = await db.execute(
         select(VPNClient, Plan.code).join(
             Subscription, Subscription.id == VPNClient.subscription_id
         ).join(
             Plan, Plan.id == Subscription.plan_id
         ).where(
-            VPNClient.node_id == node_id,
+            VPNClient.node_id.in_(managed_node_ids),
             VPNClient.protocol == "vless",
             VPNClient.status == "active",
         )
     )
     clients = client_result.all()
-    expected = {
-        f"vpn-{client.id}": (client, plan_code)
-        for client, plan_code in clients
-    }
+    all_shared_clients = {f"vpn-{client.id}": client for client, _ in clients}
+    expected = {}
+    for client, plan_code in clients:
+        if client.node_id == node_id or client.node_id in alternate_node_ids:
+            expected[f"vpn-{client.id}"] = (
+                client,
+                plan_code,
+                client.node_id != node_id,
+            )
     report = ReconciliationReport(node_id=node_id, expected=len(expected))
 
     inbound_tag = config.config.get("inbound_tag", "vless-reality")
@@ -78,8 +109,13 @@ async def reconcile_node(
     actual = {user.email for user in users if user.email}
     report.present = len(set(expected) & actual)
 
-    for email, (client, plan_code) in expected.items():
+    for email, (client, plan_code, is_alternate) in expected.items():
         if email in actual:
+            if kit_inbound_ids:
+                try:
+                    await xray.attach_client(email, kit_inbound_ids)
+                except ThreeXUIError:
+                    report.errors += 1
             if not plan_code.startswith("mobile-trial-"):
                 continue
             try:
@@ -101,15 +137,25 @@ async def reconcile_node(
                 report.errors += 1
             continue
         try:
-            await xray.add_vless_user(
-                inbound_tag=inbound_tag,
-                client_uuid=client.client_uuid,
-                email=email,
-                flow=client.flow,
-                expiry_time=int(client.expires_at.timestamp() * 1000),
-                limit_ip=client.max_connections,
-                total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
-            )
+            if is_alternate:
+                await xray.attach_client(
+                    email,
+                    [ThreeXUIClient._inbound_id(inbound_tag)],
+                )
+                if kit_inbound_ids:
+                    await xray.attach_client(email, kit_inbound_ids)
+            else:
+                await xray.add_vless_user(
+                    inbound_tag=inbound_tag,
+                    client_uuid=client.client_uuid,
+                    email=email,
+                    flow=client.flow,
+                    expiry_time=int(client.expires_at.timestamp() * 1000),
+                    limit_ip=client.max_connections,
+                    total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
+                )
+                if kit_inbound_ids:
+                    await xray.attach_client(email, kit_inbound_ids)
             report.restored += 1
         except ThreeXUIClientAlreadyExists:
             # The panel may not have returned this user in the list because of
@@ -126,6 +172,8 @@ async def reconcile_node(
                     limit_ip=client.max_connections,
                     total_gb=client.traffic_limit_gb * 1024 * 1024 * 1024,
                 )
+                if kit_inbound_ids:
+                    await xray.attach_client(email, kit_inbound_ids)
                 report.present += 1
             except ThreeXUIError:
                 report.errors += 1
@@ -136,7 +184,16 @@ async def reconcile_node(
         if not MANAGED_EMAIL.fullmatch(email) or email in expected:
             continue
         try:
-            await xray.remove_vless_user(inbound_tag=inbound_tag, email=email)
+            if (
+                email in all_shared_clients
+                and all_shared_clients[email].node_id != node_id
+            ):
+                await xray.detach_client(
+                    email,
+                    [ThreeXUIClient._inbound_id(inbound_tag)],
+                )
+            else:
+                await xray.remove_vless_user(inbound_tag=inbound_tag, email=email)
             report.removed += 1
         except ThreeXUIClientNotFound:
             pass

@@ -1,12 +1,19 @@
 import secrets
+import binascii
 import html
-from base64 import b64encode
+import json
+import re
+from base64 import b64decode, b64encode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from urllib.parse import quote
+from io import BytesIO
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 from uuid import UUID, uuid4
 
+import httpx
+import qrcode
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -37,6 +44,11 @@ from app.schemas.client import (
     TrialActivate,
 )
 from app.services.audit import write_audit
+from app.services.kit_subscriptions import (
+    kit_subscription_for_client,
+    kit_subscription_uris,
+    kit_subscription_target,
+)
 from app.services.node_health import node_accepts_clients
 from app.services.provider_codes import issue_provider_code
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
@@ -81,6 +93,377 @@ def incy_support_url() -> str:
     return f"https://t.me/{username}?start=support" if username else ""
 
 
+# Freedom VPN's managed-profile importer supports its URL-style VMess parser,
+# while 3X-UI KIT exports VMess as legacy base64 JSON. Passing that entry makes
+# the client reject the complete provider response as unsupported_service_config.
+_FREEDOM_PROFILE_SCHEMES = {"vless", "trojan"}
+_INCY_EXCLUDED_SCHEMES = {"wireguard", "amneziawg", "awg", "vpn"}
+_AWG_OPTION_NAMES = {
+    "jc": "Jc",
+    "jmin": "Jmin",
+    "jmax": "Jmax",
+    "s1": "S1",
+    "s2": "S2",
+    "s3": "S3",
+    "s4": "S4",
+    "h1": "H1",
+    "h2": "H2",
+    "h3": "H3",
+    "h4": "H4",
+    "i1": "I1",
+    "header-protection-key": "HeaderProtectionKey",
+    "content-padding-addition": "ContentPaddingAddition",
+    "rekey-after-time": "RekeyAfterTime",
+    "rekey-timeout": "RekeyTimeout",
+    "reject-after-time": "RejectAfterTime",
+    "keepalive-timeout": "KeepaliveTimeout",
+    "max-handshake-attempts": "MaxHandshakeAttempts",
+}
+
+
+def clean_profile_name(value: str) -> str:
+    """Remove panel quota counters and internal client IDs from a link name."""
+
+    name = unquote(str(value or "")).split("|", 1)[0].strip()
+    if re.fullmatch(r"vpn-\d+", name):
+        return ""
+    return re.sub(r"-vpn-\d+$", "", name).strip(" -")
+
+
+def normalized_profile_uri(uri: str, index: int, label: str | None = None) -> str:
+    """Return an app-facing URI with a stable, human-readable profile name."""
+
+    parsed = urlsplit(uri)
+    scheme = parsed.scheme.lower()
+    if scheme == "vmess":
+        try:
+            raw = uri.split("://", 1)[1]
+            document = json.loads(b64decode(raw + "=" * (-len(raw) % 4)).decode())
+            document["ps"] = label or clean_profile_name(document.get("ps", "")) or "VMess-WS"
+            encoded = b64encode(
+                json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+            ).decode().rstrip("=")
+            return f"vmess://{encoded}"
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            return uri
+
+    display = label or clean_profile_name(parsed.fragment) or profile_display_name(uri, index)
+    return parsed._replace(fragment=quote(display, safe="")).geturl()
+
+
+def profile_display_name(uri: str, index: int) -> str:
+    parsed = urlsplit(uri)
+    scheme = parsed.scheme.lower() or "vpn"
+    if scheme == "vmess":
+        try:
+            raw = uri.split("://", 1)[1]
+            document = json.loads(b64decode(raw + "=" * (-len(raw) % 4)).decode())
+            name = clean_profile_name(document.get("ps", ""))
+            if name:
+                return name[:80]
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            pass
+    fragment = clean_profile_name(parsed.fragment)
+    if fragment:
+        return fragment[:80]
+    labels = {
+        "vless": "VLESS",
+        "vmess": "VMess",
+        "trojan": "Trojan",
+        "ss": "Shadowsocks",
+        "hysteria2": "Hysteria2",
+        "hy2": "Hysteria2",
+        "tuic": "TUIC",
+        "vpn": "AmneziaWG",
+        "amneziawg": "AmneziaWG",
+    }
+    return f"{labels.get(scheme, scheme.upper())} {index + 1}"
+
+
+def localized_profile_name(node: VPNNode, uri: str, index: int) -> str:
+    raw_region = (node.region or node.name or "VPN").strip()
+    parts = [part.strip() for part in raw_region.split("|", 1)]
+    code = parts[0].upper() if len(parts[0]) == 2 and parts[0].isalpha() else ""
+    countries = {"RU": "Россия", "SE": "Швеция"}
+    country = parts[1] if len(parts) > 1 and parts[1] else countries.get(code, raw_region)
+    flag = "".join(chr(127397 + ord(char)) for char in code) if code else "🌐"
+    variant = profile_display_name(uri, index)
+    variants = {
+        "REALITY": "Reality",
+        "HY2": "Hysteria2",
+        "XHTTP": "xHTTP",
+        "VLESS-WS": "VLESS WebSocket",
+        "VMESS-WS": "VMess WebSocket",
+        "TROJAN-GRPC": "Trojan gRPC",
+    }
+    variant = variants.get(variant.upper(), variant)
+    if variant.upper().startswith("VLESS ") and "reality" in uri.lower():
+        variant = "Reality"
+    return f"{flag} {country} ({variant})"
+
+
+_INCY_RU_PROFILE_VARIANTS = {
+    "Reality", "Hysteria2", "xHTTP", "VLESS WebSocket", "Trojan gRPC",
+    "VMess WebSocket",
+}
+def incy_profile_allowed(uri: str, region: str | None, name: str | None = None) -> bool:
+    scheme = urlsplit(uri).scheme.lower()
+    if scheme in _INCY_EXCLUDED_SCHEMES:
+        return False
+    region_code = (region or "").split("|", 1)[0].strip().upper()
+    if region_code != "RU":
+        return True
+    label = name or profile_display_name(uri, 0)
+    variant = label.rsplit("(", 1)[-1].removesuffix(")").strip()
+    return variant in _INCY_RU_PROFILE_VARIANTS
+
+def _safe_profile_scalar(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or "\n" in text or "\r" in text:
+        return ""
+    return text
+
+
+def _awg_proxy_config(proxy: dict) -> str | None:
+    options = proxy.get("amnezia-wg-option")
+    if proxy.get("type") != "wireguard" or not isinstance(options, dict):
+        return None
+    private_key = _safe_profile_scalar(proxy.get("private-key"))
+    public_key = _safe_profile_scalar(proxy.get("public-key"))
+    server = _safe_profile_scalar(proxy.get("server"))
+    port = _safe_profile_scalar(proxy.get("port"))
+    addresses = proxy.get("ip") or proxy.get("address") or []
+    if isinstance(addresses, str):
+        addresses = [addresses]
+    address = ", ".join(
+        item for item in (_safe_profile_scalar(value) for value in addresses) if item
+    )
+    if not all((private_key, public_key, server, port, address)):
+        return None
+
+    dns_values = proxy.get("dns") or ["1.1.1.1", "1.0.0.1"]
+    if isinstance(dns_values, str):
+        dns_values = [dns_values]
+    dns = ", ".join(
+        item for item in (_safe_profile_scalar(value) for value in dns_values) if item
+    )
+    lines = ["[Interface]", f"PrivateKey = {private_key}", f"Address = {address}"]
+    if dns:
+        lines.append(f"DNS = {dns}")
+    mtu = _safe_profile_scalar(proxy.get("mtu"))
+    if mtu:
+        lines.append(f"MTU = {mtu}")
+    for source, target in _AWG_OPTION_NAMES.items():
+        value = _safe_profile_scalar(options.get(source))
+        if value:
+            lines.append(f"{target} = {value}")
+
+    lines.extend(["", "[Peer]", f"PublicKey = {public_key}"])
+    preshared_key = _safe_profile_scalar(proxy.get("pre-shared-key"))
+    if preshared_key:
+        lines.append(f"PresharedKey = {preshared_key}")
+    lines.extend(
+        [
+            "AllowedIPs = 0.0.0.0/0, ::/0",
+            f"Endpoint = {server}:{port}",
+            "PersistentKeepalive = 25",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def kit_amnezia_profiles(body: bytes) -> list[dict]:
+    try:
+        document = yaml.safe_load(body)
+    except yaml.YAMLError:
+        return []
+    if not isinstance(document, dict) or not isinstance(document.get("proxies"), list):
+        return []
+    profiles = []
+    for proxy in document["proxies"]:
+        if not isinstance(proxy, dict):
+            continue
+        config = _awg_proxy_config(proxy)
+        if not config:
+            continue
+        name = _safe_profile_scalar(proxy.get("name")) or f"AmneziaWG {len(profiles) + 1}"
+        encoded = urlsafe_b64encode(config.encode()).decode().rstrip("=")
+        profiles.append(
+            {
+                "name": name[:80],
+                "protocol": "vpn",
+                "config": f"vpn://{encoded}#{quote(name[:80])}",
+                "incy_config": f"amneziawg://{encoded}#{quote(name[:80])}",
+                "wireguard_config": config,
+            }
+        )
+    return profiles
+
+
+async def kit_amnezia_profiles_for_client(
+    client: VPNClient,
+    node: VPNNode,
+    node_config: VPNNodeConfig,
+) -> list[dict]:
+    try:
+        target = await kit_subscription_target(client, node, node_config)
+        if target is None:
+            return []
+        base, sub_id = target
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as session:
+            response = await session.get(
+                f"{base.rstrip('/')}/{quote(sub_id, safe='._@-')}",
+                headers={"User-Agent": "clash-verge/v2", "Accept": "application/yaml"},
+            )
+        if response.status_code != 200 or len(response.content) > 2 * 1024 * 1024:
+            return []
+        return kit_amnezia_profiles(response.content)
+    except (ThreeXUIError, httpx.HTTPError, KeyError, TypeError, ValueError):
+        return []
+
+
+async def kit_all_profiles_for_client(
+    client: VPNClient,
+    node: VPNNode,
+    node_config: VPNNodeConfig,
+    user_agent: str = "",
+    accept: str = "",
+) -> list[dict]:
+    bundle = await kit_subscription_for_client(client, node, node_config, user_agent, accept)
+    profiles = []
+    for uri in bundle["uris"] if bundle else []:
+        index = len(profiles)
+        name = localized_profile_name(node, uri, index)
+        profiles.append(
+            {
+                "name": name,
+                "protocol": urlsplit(uri).scheme.lower(),
+                "config": normalized_profile_uri(uri, index, name),
+            }
+        )
+    for profile in await kit_amnezia_profiles_for_client(client, node, node_config):
+        name = localized_profile_name(node, profile["config"], len(profiles))
+        profile = {
+            **profile,
+            "name": name,
+            "config": normalized_profile_uri(profile["config"], len(profiles), name),
+            "incy_config": normalized_profile_uri(profile["incy_config"], len(profiles), name),
+        }
+        profiles.append(profile)
+    unique = []
+    seen = set()
+    for profile in profiles:
+        if profile["config"] not in seen:
+            seen.add(profile["config"])
+            unique.append(profile)
+    return unique
+
+
+async def alternate_client_profiles(
+    db: AsyncSession,
+    client: VPNClient,
+    source_config: VPNNodeConfig,
+) -> list[dict]:
+    """Build extra public URIs for the same client identity on configured nodes."""
+    raw_node_ids = source_config.config.get("alternate_node_ids", [])
+    if not isinstance(raw_node_ids, list):
+        return []
+    try:
+        node_ids = sorted({int(value) for value in raw_node_ids})
+    except (TypeError, ValueError):
+        return []
+    node_ids = [value for value in node_ids if value > 0 and value != client.node_id]
+    if source_config.config.get("alternate_profile_links") is True:
+        node_ids.append(client.node_id)
+    if not node_ids:
+        return []
+
+    result = await db.execute(
+        select(VPNNode, VPNNodeConfig)
+        .join(VPNNodeConfig, VPNNodeConfig.node_id == VPNNode.id)
+        .where(
+            VPNNode.id.in_(node_ids),
+            VPNNode.status == "active",
+            VPNNodeConfig.protocol == client.protocol,
+        )
+        .order_by(VPNNode.id)
+    )
+    profiles = []
+    for node, node_config in result.all():
+        link_host = str(node_config.config.get("share_address") or "").lower().strip()
+        link_variants = {
+            ("tuic", 443, ""): "TUIC",
+            ("tuic", 8444, ""): "TUIC",
+            ("wireguard", 51820, ""): "WireGuard",
+        }
+        selected: list[tuple[str, str]] = []
+        if link_host and node_config.config.get("alternate_profile_links") is True:
+            try:
+                panel = ThreeXUIClient(node_config.config.get("api_address"), timeout=8)
+                for link in await panel.get_client_links(f"vpn-{client.id}"):
+                    parsed = urlsplit(link)
+                    link_hostname = parsed.hostname
+                    link_port = parsed.port
+                    transport = parse_qs(parsed.query).get("type", [""])[0].lower()
+                    if parsed.scheme.lower() == "vmess":
+                        try:
+                            raw = link.split("://", 1)[1]
+                            details = json.loads(
+                                b64decode(raw + "=" * (-len(raw) % 4)).decode()
+                            )
+                            link_hostname = str(details.get("add", "")).lower()
+                            link_port = int(details.get("port", 0))
+                            transport = str(details.get("net", "")).lower()
+                        except (binascii.Error, UnicodeDecodeError, TypeError, ValueError):
+                            continue
+                    if (link_hostname or "").lower() != link_host:
+                        continue
+                    scheme = parsed.scheme.lower()
+                    security = parse_qs(parsed.query).get("security", [""])[0].lower()
+                    link_name = clean_profile_name(unquote(parsed.fragment)).upper()
+                    variant = None
+                    if scheme == "vless" and transport == "tcp" and security == "reality":
+                        variant = "Reality 2" if "REALITY-2" in link_name else "Reality"
+                    elif scheme == "vless" and transport in {"xhttp", "splithttp"}:
+                        variant = "xHTTP"
+                    elif scheme == "vless" and transport == "ws":
+                        variant = "VLESS WebSocket"
+                    elif scheme == "trojan" and transport == "grpc":
+                        variant = "Trojan gRPC"
+                    elif scheme == "vmess" and transport == "ws":
+                        variant = "VMess WebSocket"
+                    elif scheme in {"hysteria2", "hy2"}:
+                        variant = "Hysteria2"
+                    if variant is None:
+                        variant = link_variants.get((scheme, link_port, transport))
+                    if variant:
+                        selected.append((link, variant))
+            except (ThreeXUIError, TypeError, ValueError):
+                selected = []
+        if node.id == client.node_id:
+            selected = [(uri, variant) for uri, variant in selected if variant != "Reality"]
+        elif not selected:
+            fallback = build_client_uri(client, node, node_config.config)
+            if fallback:
+                selected = [(fallback, "")]
+        for uri, variant in selected:
+            name = localized_profile_name(node, uri, len(profiles))
+            if variant:
+                name = name.split(" (", 1)[0] + f" ({variant})"
+            profiles.append(
+                {
+                    "name": name,
+                    "protocol": urlsplit(uri).scheme.lower(),
+                    "config": normalized_profile_uri(uri, len(profiles), name),
+                    "node_id": node.id,
+                    "region": node.region,
+                    "available": node_accepts_clients(node, management_mode="threexui"),
+                    "latency_ms": node.latency_ms,
+                }
+            )
+    return profiles
+
+
 async def active_subscription_for_user(
     db: AsyncSession,
     user_id: int,
@@ -96,6 +479,45 @@ async def active_subscription_for_user(
         .order_by(Subscription.expires_at.desc(), Subscription.id.desc())
     )
     return result.scalars().first()
+
+
+async def subscription_client_for_token(
+    token: str,
+    db: AsyncSession,
+) -> tuple[VPNClient, Subscription]:
+    """Resolve an old signed URL to the user's current active VPN client."""
+
+    client_id = verify_incy_subscription_token(token, allow_expired=True)
+    if client_id is None:
+        raise HTTPException(status_code=404, detail="Subscription link is invalid")
+    original = await db.get(VPNClient, client_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail="Subscription client not found")
+
+    now = datetime.now(timezone.utc)
+    subscription = await active_subscription_for_user(db, original.user_id, now)
+    if subscription is None:
+        raise HTTPException(status_code=410, detail="Subscription is no longer active")
+    client = None
+    if (
+        original.subscription_id == subscription.id
+        and original.status == "active"
+        and aware(original.expires_at) > now
+    ):
+        client = original
+    if client is None:
+        client = await db.scalar(
+            select(VPNClient)
+            .where(
+                VPNClient.subscription_id == subscription.id,
+                VPNClient.status == "active",
+                VPNClient.expires_at > now,
+            )
+            .order_by(VPNClient.id.desc())
+        )
+    if client is None:
+        raise HTTPException(status_code=410, detail="Subscription has no active VPN client")
+    return client, subscription
 
 
 async def require_device(
@@ -466,26 +888,8 @@ async def import_subscription_for_device(
     without exposing a service credential.
     """
 
-    client_id = verify_incy_subscription_token(data.token)
-    if client_id is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
-    result = await db.execute(
-        select(VPNClient, Subscription)
-        .join(Subscription, Subscription.id == VPNClient.subscription_id)
-        .where(VPNClient.id == client_id)
-    )
-    row = result.first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Subscription client not found")
-    client, subscription = row
+    client, subscription = await subscription_client_for_token(data.token, db)
     now = datetime.now(timezone.utc)
-    if (
-        subscription.status != "active"
-        or aware(subscription.expires_at) <= now
-        or client.status != "active"
-        or aware(client.expires_at) <= now
-    ):
-        raise HTTPException(status_code=410, detail="Subscription is no longer active")
     device = await db.get(ClientDevice, principal.device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -514,6 +918,7 @@ async def import_subscription_for_device(
 
 @router.get("/profile", response_model=ClientProfileResponse)
 async def client_profile(
+    request: Request,
     principal: DevicePrincipal = Depends(require_device),
     db: AsyncSession = Depends(get_db),
 ):
@@ -545,10 +950,12 @@ async def client_profile(
     configured_client_totals: list[int] = []
     upload_bytes = 0
     download_bytes = 0
+    active_vpn_ids: list[int] = []
     for client, node, node_config in result.all():
         uri = build_client_uri(client, node, node_config.config)
         if not uri:
             continue
+        active_vpn_ids.append(client.id)
         configured_total = max(int(client.traffic_limit_gb or 0), 0) * 1024**3
         if configured_total:
             configured_client_totals.append(configured_total)
@@ -570,23 +977,73 @@ async def client_profile(
                 pass
         upload_bytes += client_upload
         download_bytes += client_download
-        nodes.append(
-            ClientProfileNode(
-                profile_id=f"{node.id}:{client.protocol}",
-                node_id=node.id,
-                name=node.name,
-                region=node.region,
-                available=node_accepts_clients(
-                    node, management_mode="threexui"
-                ),
-                latency_ms=node.latency_ms,
-                protocol=client.protocol,
-                config=uri,
-                upload_bytes=client_upload,
-                download_bytes=client_download,
-            )
+        kit_subscription = await kit_subscription_for_client(
+            client,
+            node,
+            node_config,
+            request.headers.get("user-agent", ""),
+            request.headers.get("accept", ""),
         )
-        sensitive_configs.append({"node_id": node.id, "vpn_uri": uri})
+        profile_uris = (
+            [
+                profile_uri
+                for profile_uri in kit_subscription["uris"]
+                if urlsplit(profile_uri).scheme.lower() in _FREEDOM_PROFILE_SCHEMES
+            ]
+            if kit_subscription
+            else []
+        ) or [uri]
+        available = node_accepts_clients(node, management_mode="threexui")
+        for index, profile_uri in enumerate(profile_uris):
+            scheme = urlsplit(profile_uri).scheme.lower()
+            multi_profile = kit_subscription is not None
+            name = localized_profile_name(node, profile_uri, index)
+            profile_uri = normalized_profile_uri(profile_uri, index, name)
+            nodes.append(
+                ClientProfileNode(
+                    profile_id=(
+                        f"{node.id}:{scheme}:{index}"
+                        if multi_profile
+                        else f"{node.id}:{client.protocol}"
+                    ),
+                    node_id=node.id,
+                    name=name,
+                    region=node.region,
+                    available=available,
+                    latency_ms=node.latency_ms,
+                    protocol=scheme if multi_profile else client.protocol,
+                    config=profile_uri,
+                    upload_bytes=client_upload if index == 0 else 0,
+                    download_bytes=client_download if index == 0 else 0,
+                )
+            )
+            sensitive_configs.append({"node_id": node.id, "vpn_uri": profile_uri})
+        alternate_profiles = await alternate_client_profiles(db, client, node_config)
+        for profile in alternate_profiles:
+            if profile["protocol"] not in _FREEDOM_PROFILE_SCHEMES:
+                continue
+            parsed = urlsplit(profile["config"])
+            transport = parse_qs(parsed.query).get("type", ["tcp"])[0]
+            profile_id = f"{client.id}:{profile['node_id']}:alternate"
+            if (profile["protocol"], parsed.port, transport) != ("vless", 8443, "tcp"):
+                profile_id += f":{profile['protocol']}:{parsed.port}:{transport}"
+            nodes.append(
+                ClientProfileNode(
+                    profile_id=profile_id,
+                    node_id=profile["node_id"],
+                    name=profile["name"],
+                    region=profile["region"],
+                    available=profile["available"],
+                    latency_ms=profile["latency_ms"],
+                    protocol=profile["protocol"],
+                    config=profile["config"],
+                    upload_bytes=0,
+                    download_bytes=0,
+                )
+            )
+            sensitive_configs.append(
+                {"node_id": profile["node_id"], "vpn_uri": profile["config"]}
+            )
     # 3x-ui is authoritative for a paid client's accumulated quota. A
     # renewal can increase the client's totalGB while the original plan and
     # subscription rows still contain the old package limit.
@@ -615,7 +1072,7 @@ async def client_profile(
         ),
         user_id=principal.user_id,
         subscription_id=subscription.id,
-        vpn_id=str(principal.device_id),
+        vpn_id=str(max(active_vpn_ids)) if active_vpn_ids else None,
         expires_at=subscription.expires_at,
         provider=ClientProviderInfo(
             name=settings.client_provider_name.strip() or settings.provider_name,
@@ -646,21 +1103,14 @@ async def client_profile(
 
 
 @router.get("/subscription/{token}")
-async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
+async def incy_subscription(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Return an INCY-compatible subscription for a signed client link."""
 
-    client_id = verify_incy_subscription_token(token)
-    if client_id is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
-
-    client = await db.get(VPNClient, client_id)
-    now = datetime.now(timezone.utc)
-    if (
-        client is None
-        or client.status != "active"
-        or aware(client.expires_at) <= now
-    ):
-        raise HTTPException(status_code=404, detail="Subscription is inactive or expired")
+    client, _subscription = await subscription_client_for_token(token, db)
 
     node = await db.get(VPNNode, client.node_id)
     if node is None:
@@ -675,8 +1125,15 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="VPN node configuration not found")
 
     uri = build_client_uri(client, node, node_config.config)
-    region = (node.region or "Швеция").split("|", 1)[-1]
-    profile_title = f"{settings.provider_name} · {region}"
+    kit_subscription = await kit_subscription_for_client(
+        client,
+        node,
+        node_config,
+        request.headers.get("user-agent", ""),
+        request.headers.get("accept", ""),
+    )
+    alternate_profiles = await alternate_client_profiles(db, client, node_config)
+    profile_title = settings.provider_name.strip() or "Freedom VPN"
     site_url = f"{settings.public_base_url.rstrip('/')}/"
     cabinet_url = (
         settings.provider_cabinet_url.strip()
@@ -698,30 +1155,78 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
             # Keep the quota visible when 3x-ui is temporarily unavailable;
             # never report a fabricated amount of consumed traffic.
             pass
-    body = "\n".join(
-        [
-            f"#profile-title: {profile_title}",
-            f"#support-url: {support_url}",
-            f"#profile-web-page-url: {site_url}",
-            f"#profile-update-interval: 6",
-            uri,
-            "",
+    if kit_subscription:
+        incy_uris = [
+            profile_uri
+            for profile_uri in kit_subscription["uris"]
+            if incy_profile_allowed(
+                profile_uri,
+                node.region,
+                localized_profile_name(node, profile_uri, 0),
+            )
         ]
+        if not incy_uris:
+            incy_uris = [uri]
+        app_uris = [
+            normalized_profile_uri(
+                profile_uri,
+                index,
+                localized_profile_name(node, profile_uri, index),
+            )
+            for index, profile_uri in enumerate(incy_uris)
+        ]
+        offset = len(app_uris)
+        app_uris.extend(
+            normalized_profile_uri(profile["config"], offset + index)
+            for index, profile in enumerate(alternate_profiles)
+            if incy_profile_allowed(
+                profile["config"], profile.get("region"), profile.get("name")
+            )
+        )
+        body = "\n".join(app_uris) + "\n"
+    else:
+        app_uris = [normalized_profile_uri(uri, 0, localized_profile_name(node, uri, 0))]
+        offset = len(app_uris)
+        app_uris.extend(
+            normalized_profile_uri(profile["config"], offset + index)
+            for index, profile in enumerate(alternate_profiles)
+            if incy_profile_allowed(
+                profile["config"], profile.get("region"), profile.get("name")
+            )
+        )
+        body = "\n".join(
+            [
+                f"#profile-title: {profile_title}",
+                f"#support-url: {support_url}",
+                f"#profile-web-page-url: {site_url}",
+                f"#profile-update-interval: 6",
+                *app_uris,
+                "",
+            ]
+        )
+    subscription_userinfo = (
+        kit_subscription["headers"].get("subscription-userinfo")
+        if kit_subscription
+        else None
+    ) or (
+        f"upload={traffic_upload_bytes}; "
+        f"download={traffic_download_bytes}; "
+        f"total={traffic_total_bytes}; expire={expires_at}"
     )
     return Response(
         content=body,
-        media_type="text/plain",
+        media_type=(
+            kit_subscription["content_type"]
+            if kit_subscription
+            else "text/plain"
+        ),
         headers={
             "profile-title": incy_metadata_header(profile_title),
             "profile-update-interval": "6",
             "support-url": support_url,
             "profile-web-page-url": site_url,
             "premium-url": cabinet_url,
-            "subscription-userinfo": (
-                f"upload={traffic_upload_bytes}; "
-                f"download={traffic_download_bytes}; "
-                f"total={traffic_total_bytes}; expire={expires_at}"
-            ),
+            "subscription-userinfo": subscription_userinfo,
             "content-disposition": 'inline; filename="freedom-vpn-incy.txt"',
             "cache-control": "no-store",
         },
@@ -729,7 +1234,11 @@ async def incy_subscription(token: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/import/{token}", include_in_schema=False)
-async def incy_import_redirect(token: str, request: Request):
+async def incy_import_redirect(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Bridge Telegram's HTTPS-only button validation to the INCY deep link.
 
     Telegram's Android WebView renders a 302 to ``incy://`` as
@@ -738,8 +1247,7 @@ async def incy_import_redirect(token: str, request: Request):
     launch the installed app from an explicit user tap.
     """
 
-    if verify_incy_subscription_token(token) is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
+    await subscription_client_for_token(token, db)
 
     subscription_url = (
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
@@ -786,12 +1294,125 @@ async def incy_import_redirect(token: str, request: Request):
     )
 
 
+async def _subscription_client_context(
+    token: str,
+    db: AsyncSession,
+) -> tuple[VPNClient, VPNNode, VPNNodeConfig]:
+    client, _subscription = await subscription_client_for_token(token, db)
+    node = await db.get(VPNNode, client.node_id)
+    node_config = await db.scalar(
+        select(VPNNodeConfig).where(
+            VPNNodeConfig.node_id == client.node_id,
+            VPNNodeConfig.protocol == client.protocol,
+        )
+    )
+    if node is None or node_config is None:
+        raise HTTPException(status_code=404, detail="VPN node configuration not found")
+    return client, node, node_config
+
+
+@router.get("/v2raytun-import/{token}", include_in_schema=False)
+async def v2raytun_import_redirect(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    await _subscription_client_context(token, db)
+    subscription_url = f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/{token}"
+    deep_link = f"v2raytun://import/{quote(subscription_url, safe=':/?@&=,+-._~%')}"
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Импорт в V2rayTUN</title><style>:root{{color-scheme:dark}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#101820;color:#f5f7fb;font:16px system-ui,sans-serif}}main{{width:min(420px,calc(100% - 40px));text-align:center}}p{{color:#b8c4d0;line-height:1.5}}a{{display:block;margin-top:20px;padding:15px 20px;border-radius:8px;background:#2878ff;color:#fff;font-weight:700;text-decoration:none}}</style></head>
+<body><main><h1>Импорт конфигурации</h1><p>Нажмите кнопку, чтобы добавить подписку в V2rayTUN.</p><a href="{html.escape(deep_link, quote=True)}">Открыть в V2rayTUN</a></main></body></html>""",
+        headers={"cache-control": "no-store"},
+    )
+
+
+@router.get("/amnezia-import/{token}", include_in_schema=False)
+async def amnezia_import_redirect(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    client, node, node_config = await _subscription_client_context(token, db)
+    profiles = await kit_amnezia_profiles_for_client(client, node, node_config)
+    if not profiles:
+        raise HTTPException(status_code=404, detail="AmneziaWG profiles are unavailable")
+    buttons = "".join(
+        f'<a href="{html.escape(profile["config"], quote=True)}">Открыть {html.escape(profile["name"])}</a>'
+        for profile in profiles
+    )
+    router_links = "".join(
+        f'<a class="secondary" href="/v1/client/router-awg/{html.escape(token, quote=True)}/{index}">Скачать {html.escape(profile["name"])} для роутера</a>'
+        for index, profile in enumerate(profiles)
+    )
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Импорт в Amnezia VPN</title><style>:root{{color-scheme:dark}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#12171d;color:#f7f8fa;font:16px system-ui,sans-serif}}main{{width:min(460px,calc(100% - 40px));text-align:center;padding:28px 0}}p{{color:#bac3ce;line-height:1.5}}a{{display:block;margin-top:12px;padding:15px 18px;border-radius:8px;background:#ffd43b;color:#141414;font-weight:750;text-decoration:none}}a.secondary{{background:transparent;color:#b9d4ff;border:1px solid #526173;font-weight:600}}</style></head>
+<body><main><h1>Выберите AmneziaWG</h1><p>Обычный профиль совместим с большинством устройств. Версию 3.1 выбирайте, если ее поддерживает приложение.</p>{buttons}<p>Для Podkop или другого роутера:</p>{router_links}</main></body></html>""",
+        headers={"cache-control": "no-store"},
+    )
+
+
+@router.get("/router-awg/{token}/{profile_index}", include_in_schema=False)
+async def router_awg_config(
+    token: str,
+    profile_index: int,
+    db: AsyncSession = Depends(get_db),
+):
+    client, node, node_config = await _subscription_client_context(token, db)
+    profiles = await kit_amnezia_profiles_for_client(client, node, node_config)
+    if profile_index < 0 or profile_index >= len(profiles):
+        raise HTTPException(status_code=404, detail="AmneziaWG profile not found")
+    profile = profiles[profile_index]
+    filename = "amneziawg-3.conf" if "3.1" in profile["name"] else "amneziawg.conf"
+    return Response(
+        content=profile["wireguard_config"],
+        media_type="text/plain",
+        headers={
+            "content-disposition": f'attachment; filename="{filename}"',
+            "cache-control": "no-store",
+        },
+    )
+
+
+@router.get("/qr/{token}/{profile_index}", include_in_schema=False)
+async def client_profile_qr(
+    token: str,
+    profile_index: int,
+    db: AsyncSession = Depends(get_db),
+):
+    client, node, node_config = await _subscription_client_context(token, db)
+    profiles = await kit_all_profiles_for_client(client, node, node_config, "Freedom VPN cabinet")
+    if not profiles:
+        fallback = build_client_uri(client, node, node_config.config)
+        profiles = [
+            {"config": normalized_profile_uri(
+                fallback, 0, localized_profile_name(node, fallback, 0)
+            )}
+        ] if fallback else []
+    profiles.extend(await alternate_client_profiles(db, client, node_config))
+    if profile_index < 0 or profile_index >= len(profiles):
+        raise HTTPException(status_code=404, detail="VPN profile not found")
+    image = qrcode.make(profiles[profile_index]["config"])
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return Response(
+        content=output.getvalue(),
+        media_type="image/png",
+        headers={"cache-control": "no-store"},
+    )
+
+
 @router.get("/freevpn-import/{token}", include_in_schema=False)
-async def freevpn_import_redirect(token: str, request: Request):
+async def freevpn_import_redirect(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Bridge an HTTPS Telegram/site click to the Freedom VPN deep link."""
 
-    if verify_incy_subscription_token(token) is None:
-        raise HTTPException(status_code=404, detail="Subscription link is invalid or expired")
+    await subscription_client_for_token(token, db)
 
     subscription_url = (
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"

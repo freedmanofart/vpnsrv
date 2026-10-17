@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 from uuid import uuid4
 import time
 
@@ -36,6 +37,12 @@ from app.services.vless import build_vless_url
 from app.services.incy import build_incy_import_link
 from app.services.freevpn import build_freevpn_import_link
 from app.core.cabinet_links import incy_subscription_token
+from app.api.routes.client import (
+    alternate_client_profiles,
+    kit_all_profiles_for_client,
+    localized_profile_name,
+    normalized_profile_uri,
+)
 
 router = APIRouter(
     prefix="/vpn",
@@ -778,6 +785,32 @@ async def get_vpn_client_config(
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
         f"{subscription_token}"
     )
+    profiles = await kit_all_profiles_for_client(
+        client,
+        node,
+        node_config,
+        "Freedom VPN bot",
+    )
+    if not profiles:
+        profiles = [
+            {
+                "name": localized_profile_name(node, vless_url, 0),
+                "protocol": urlsplit(vless_url).scheme.lower() or client.protocol,
+                "config": normalized_profile_uri(
+                    vless_url, 0, localized_profile_name(node, vless_url, 0)
+                ),
+            }
+        ]
+    profiles.extend(await alternate_client_profiles(db, client, node_config))
+    response_profiles = [
+        {
+            "index": index,
+            "name": profile["name"],
+            "protocol": profile["protocol"],
+            "config": profile["config"],
+        }
+        for index, profile in enumerate(profiles)
+    ]
 
     return VPNClientConfigResponse(
         client_id=client.id,
@@ -799,4 +832,13 @@ async def get_vpn_client_config(
             f"{settings.public_base_url.rstrip('/')}/v1/client/freevpn-import/"
             f"{subscription_token}"
         ),
+        amnezia_import_url=(
+            f"{settings.public_base_url.rstrip('/')}/v1/client/amnezia-import/"
+            f"{subscription_token}"
+        ),
+        v2raytun_import_url=(
+            f"{settings.public_base_url.rstrip('/')}/v1/client/v2raytun-import/"
+            f"{subscription_token}"
+        ),
+        profiles=response_profiles,
     )

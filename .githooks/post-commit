@@ -1,0 +1,3 @@
+#!/bin/sh
+repo_root="$(git rev-parse --show-toplevel)"
+exec python3 "${repo_root}/scripts/notify_admin_event.py" commit

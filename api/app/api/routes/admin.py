@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
 import html
+import ipaddress
 import json
 import logging
 import os
@@ -136,6 +137,12 @@ TAILSCALE_CERT_HEALTH_FILE = Path(
         str(BACKUP_DIR / "tailscale-cert-health.json"),
     )
 )
+TAILSCALE_HEALTH_FILE = Path(
+    os.getenv(
+        "TAILSCALE_HEALTH_FILE",
+        str(BACKUP_DIR / "tailscale-health.json"),
+    )
+)
 
 
 def _repo_root() -> Path:
@@ -212,15 +219,22 @@ ADMIN_DOCS = [
 
 
 async def _public_probe(path: str = "/", timeout: float = 5.0) -> dict:
-    url = f"{settings.public_base_url.rstrip('/')}{path}"
+    # This function runs inside vpn-api. Tailscale's public DNS can resolve
+    # differently inside Docker, so host-level checks verify the public Funnel
+    # while this probe checks the corresponding live API route locally.
+    url = f"http://127.0.0.1:8000{path}"
     started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.get(url)
+        protected_endpoint = path in {"/admin", "/plans", "/payment-methods"}
+        reachable = response.status_code < 400 or (
+            protected_endpoint and response.status_code == 401
+        )
         return {
-            "name": f"Сайт {path}",
-            "status": "online" if response.status_code < 500 else "degraded",
-            "details": f"HTTP {response.status_code}",
+            "name": f"Локальный route {path}",
+            "status": "online" if reachable else "degraded",
+            "details": f"API HTTP {response.status_code}",
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
     except httpx.HTTPError as exc:
@@ -232,12 +246,18 @@ async def _public_probe(path: str = "/", timeout: float = 5.0) -> dict:
         }
 
 
-def _check_ssl_certificate(name: str, host: str, port: int = 443, timeout: float = 6.0) -> dict:
+def _check_ssl_certificate(
+    name: str,
+    host: str,
+    port: int = 443,
+    timeout: float = 6.0,
+    server_hostname: str | None = None,
+) -> dict:
     started = time.perf_counter()
     try:
         context = ssl.create_default_context()
         with socket.create_connection((host, port), timeout=timeout) as sock:
-            with context.wrap_socket(sock, server_hostname=host) as wrapped:
+            with context.wrap_socket(sock, server_hostname=server_hostname or host) as wrapped:
                 cert = wrapped.getpeercert()
         not_after = cert.get("notAfter")
         expires_at = (
@@ -288,6 +308,37 @@ def _node_ssl_target(node: VPNNode, config: VPNNodeConfig) -> tuple[str, int]:
         return api_target
     return node.ip_address, 443
 
+
+def _node_ssl_server_name(config: VPNNodeConfig) -> str | None:
+    value = str((config.config or {}).get("sni") or "").strip()
+    if not value or any(char.isspace() for char in value) or "/" in value or ":" in value:
+        return None
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return value
+    return None
+
+def _check_reality_listener(name: str, host: str, port: int, timeout: float = 6.0) -> dict:
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return {
+                "name": name,
+                "status": "online",
+                "details": (
+                    f"TCP {host}:{port} доступен; REALITY использует собственную проверку ключа, "
+                    "PKI-сертификат имени SNI не проверяется"
+                ),
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
+    except OSError as exc:
+        return {
+            "name": name,
+            "status": "offline",
+            "details": f"TCP {host}:{port} недоступен: {exc}",
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
 
 def _check_smtp() -> dict:
     host = settings.smtp_host
@@ -360,6 +411,116 @@ def _check_tailscale_cert_units() -> dict:
         }
 
 
+def _check_tailscale_host_health() -> list[dict]:
+    """Read individual daemon/Funnel/network checks produced on the master host."""
+    started = time.perf_counter()
+    try:
+        payload = json.loads(TAILSCALE_HEALTH_FILE.read_text(encoding="utf-8"))
+        generated_at = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        if generated_at.tzinfo is None:
+            generated_at = generated_at.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((datetime.now(timezone.utc) - generated_at).total_seconds()))
+        items = payload.get("checks")
+        if not isinstance(items, list) or not items:
+            return [{
+                "id": "tailscale:host-snapshot",
+                "name": "Tailscale host checks",
+                "status": "degraded",
+                "details": "Host health-файл не содержит отдельных проверок",
+                "generated_at": generated_at,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            }]
+        result = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status", "degraded"))
+            if status not in {"online", "degraded", "offline"}:
+                status = "degraded"
+            details = str(item.get("details") or "Нет подробностей от host health-check")
+            if age_seconds > 360:
+                status = "degraded"
+                details = f"Данные устарели ({age_seconds // 60} мин.). {details}"
+            check = {
+                "id": str(item.get("id") or item.get("name") or "tailscale:host-check"),
+                "name": str(item.get("name") or item.get("id") or "Tailscale host check"),
+                "status": status,
+                "details": details,
+                "generated_at": generated_at,
+            }
+            if item.get("latency_ms") is not None:
+                check["latency_ms"] = item["latency_ms"]
+            result.append(check)
+        return result or [{
+            "id": "tailscale:host-snapshot",
+            "name": "Tailscale host checks",
+            "status": "degraded",
+            "details": "Не удалось разобрать отдельные host проверки",
+            "generated_at": generated_at,
+        }]
+    except FileNotFoundError:
+        return [{
+            "id": "tailscale:host-snapshot",
+            "name": "Tailscale host checks",
+            "status": "degraded",
+            "details": (
+                f"Host health-файл не найден: {TAILSCALE_HEALTH_FILE}. "
+                "Запустите vpn-tailscale-health.timer на master-сервере."
+            ),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }]
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        return [{
+            "id": "tailscale:host-snapshot",
+            "name": "Tailscale host checks",
+            "status": "degraded",
+            "details": f"Не удалось прочитать host health-файл: {exc}",
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }]
+
+
+def _check_tailscale_public_tls() -> dict:
+    """Use host-side SNI probes for the public Funnel certificate."""
+    started = time.perf_counter()
+    try:
+        payload = json.loads(TAILSCALE_HEALTH_FILE.read_text(encoding="utf-8"))
+        generated_at = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        if generated_at.tzinfo is None:
+            generated_at = generated_at.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((datetime.now(timezone.utc) - generated_at).total_seconds()))
+        relay_checks = [
+            item for item in payload.get("checks", [])
+            if isinstance(item, dict)
+            and str(item.get("id", "")).startswith("tailscale:public-relay:")
+        ]
+        if age_seconds > 360:
+            status = "degraded"
+            details = f"Публичная TLS-проверка устарела ({age_seconds // 60} мин.)"
+        elif not relay_checks:
+            status = "degraded"
+            details = "Host snapshot не содержит проверок публичных Funnel relay"
+        else:
+            passed = sum(item.get("status") == "online" for item in relay_checks)
+            status = "online" if passed == len(relay_checks) else "offline"
+            details = f"TLS и HTTPS проверены по SNI на relay: {passed}/{len(relay_checks)}"
+        return {
+            "name": "SSL master/site",
+            "status": status,
+            "details": details,
+            "generated_at": generated_at,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    except FileNotFoundError:
+        status, details = "degraded", f"Host health-файл не найден: {TAILSCALE_HEALTH_FILE}"
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        status, details = "degraded", f"Не удалось прочитать Funnel TLS-проверку: {exc}"
+    return {
+        "name": "SSL master/site",
+        "status": status,
+        "details": details,
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+    }
+
 async def _check_nodes(db: AsyncSession) -> list[dict]:
     result = await db.execute(
         select(VPNNode, VPNNodeConfig)
@@ -403,7 +564,10 @@ async def _check_ssl_targets(db: AsyncSession) -> list[dict]:
     checks = []
     master = _ssl_target_from_url(settings.public_base_url)
     if master:
-        checks.append(await asyncio.to_thread(_check_ssl_certificate, "SSL master/site", master[0], master[1]))
+        if master[0].lower().endswith(".ts.net"):
+            checks.append(await asyncio.to_thread(_check_tailscale_public_tls))
+        else:
+            checks.append(await asyncio.to_thread(_check_ssl_certificate, "SSL master/site", master[0], master[1]))
     result = await db.execute(
         select(VPNNode, VPNNodeConfig)
         .join(VPNNodeConfig, VPNNodeConfig.node_id == VPNNode.id)
@@ -411,12 +575,23 @@ async def _check_ssl_targets(db: AsyncSession) -> list[dict]:
     )
     for node, config in result.all():
         target = _node_ssl_target(node, config)
+        if str((config.config or {}).get("security") or "").lower() == "reality":
+            checks.append(
+                await asyncio.to_thread(
+                    _check_reality_listener,
+                    f"VPN-нода #{node.id} {node.name} REALITY listener",
+                    target[0],
+                    target[1],
+                )
+            )
+            continue
         checks.append(
             await asyncio.to_thread(
                 _check_ssl_certificate,
                 f"SSL VPN-нода #{node.id} {node.name}",
                 target[0],
                 target[1],
+                server_hostname=_node_ssl_server_name(config),
             )
         )
     return checks
@@ -816,7 +991,7 @@ async def overview(db: AsyncSession = Depends(get_db)):
         "login_codes": [{"id": x.id, "user_id": x.user_id, "code": x.plain_code or "legacy_hash_only", "status": "used" if x.used_at else ("expired" if _aware(x.expires_at) <= datetime.now(timezone.utc) else "active"), "attempts": x.attempts, "created_at": x.created_at, "expires_at": x.expires_at, "used_at": x.used_at} for x in login_codes],
         "docs": ADMIN_DOCS,
         "scripts": [
-            {"id": "health_dashboard", "name": "Health-dashboard: API, сайт, почта, SSL master/нод, 3x-ui", "command": "выполняется из админки", "runnable": True},
+            {"id": "health_dashboard", "name": "Health-dashboard: API, сайт, почта, SSL master/нод, Tailscale, 3x-ui", "command": "выполняется из админки", "runnable": True},
             {"id": "smtp_check", "name": "Проверить SMTP-логин и отправку писем", "command": "выполняется из админки", "runnable": True},
             {"id": "online_apis", "name": "Все online-тесты ключевых API", "command": "scripts/check_online_apis.sh", "runnable": True},
             {"id": "platega_check", "name": "Проверить Platega: СБП, МИР, крипта", "command": "scripts/check_platega_payment.py --method all --amount 10 --currency RUB", "runnable": True},
@@ -1053,6 +1228,7 @@ async def health_dashboard(db: AsyncSession = Depends(get_db)):
     checks.extend(public_results)
     checks.extend(await _check_ssl_targets(db))
     checks.append(await asyncio.to_thread(_check_tailscale_cert_units))
+    checks.extend(await asyncio.to_thread(_check_tailscale_host_health))
     checks.append(await asyncio.to_thread(_check_smtp))
     checks.extend(await _check_nodes(db))
     return {

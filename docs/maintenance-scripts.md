@@ -191,6 +191,79 @@ docker compose exec -T api python scripts/check_vpn_traffic.py vpn-80 --json
 email. Если клиент есть в БД, но `panel: not found`, проверьте синхронизацию
 ноды, SSL/API 3x-ui и worker.
 
+## RU-нода: профили и раздельная маршрутизация
+
+На `151.248.113.240` сайт обслуживается Nginx на TCP 80/443.
+Публичный адрес VPN в ссылках панели — `n.trevojnik.online`.
+
+| Профиль | Порт | ID в master 3x-ui | Тег на RU child |
+| --- | --- | --- | --- |
+| Россия (Reality) | TCP 8443 | 10 | `in-8443-tcp` |
+| Россия (xHTTP) | TCP 9443 | 25 | `in-9443-tcp` |
+| Россия (Hysteria2) | UDP 8443 | 26 | `in-8443-udp` |
+| Россия (TUIC) | UDP 443 | 27 | `in-443-udp` |
+
+RU child зарегистрирован в master как node 7; в БД сервиса логическая
+RU-нода имеет ID 4, шведская — ID 3. Эти три пространства ID различаются.
+Входящие и клиенты управляются через master. Шведские входящие сохранены.
+
+У RU `VPNNodeConfig` включены `alternate_profile_links: true`,
+`share_address: n.trevojnik.online`, `kit_inbound_ids: [25, 26, 27]`.
+Шведская конфигурация содержит `alternate_node_ids: [4]` и все четыре RU ID
+в общем наборе `kit_inbound_ids`. Выдача и reconciliation прикрепляют к этим
+входящим существующую личность клиента, не создавая новую подписку.
+Ссылки получает штатный API 3x-ui `GET /panel/api/clients/links/{email}`;
+для RU выдача разрешает только перечисленные адрес/порты/транспорты.
+Подписка содержит девять шведских и четыре российских конфигурации.
+Freedom VPN через `/v1/client/profile` получает только поддерживаемые им
+VLESS/Trojan; общий endpoint подписки и выбор ключа отдают остальные протоколы.
+
+Маршрутизация хранится в `xrayTemplateConfig` самого RU child. Порядок правил
+важен: Xray использует первое совпадение.
+
+1. Служебный API, запрет private IP и BitTorrent.
+2. `ext:geosite_RU.dat:ru-blocked` — в `cascade-sweden`.
+3. `ext:geosite_RU.dat:ru-available-only-inside` и `geosite:category-ru` — в `direct`.
+4. `geoip:ru` — в `direct`.
+5. Остальной трафик четырёх RU-тегов — в `cascade-sweden`.
+
+`domainStrategy` оставлен `AsIs`: доменные правила проверяют переданное или
+распознанное имя, GeoIP — адрес назначения. На входящих включён sniffing
+HTTP/TLS/QUIC с `routeOnly: true`; он помогает выбрать маршрут без подмены
+назначения. Российские ресурсы из этих списков выходят с RU-ноды, зарубежные —
+со шведской `89.127.212.239`.
+
+### Загрузка и обновление списков
+
+Xray читает бинарные `.dat` из каталога assets, в текущем контейнере это
+`/app/bin`. HTTP-адрес списка нельзя вставить непосредственно в `routing`.
+`geosite:category-ru` использует `geosite.dat`, `geoip:ru` — `geoip.dat`;
+префикс `ext:geosite_RU.dat:` явно выбирает дополнительный файл.
+`geoip_RU.dat` содержит списки блокировок, а не замену страновой категории RU.
+
+Источник дополнительных российских списков:
+[runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat).
+Ветка `release` публикует актуальный `geosite.dat`; в 3x-ui он устанавливается
+под именем `geosite_RU.dat`. Файл уже присутствует на RU child, категории
+проверены API панели. Новый отдельный cron для скачивания не добавлялся.
+
+При обновлении сначала сохраните действующие `.dat` и конфигурацию, затем
+обновите нужный Geo-файл средствами 3x-ui. Проверьте категории через
+`POST /panel/api/xray/geodata/validate`, конфигурацию через
+`xray run -test -format json -config ...` и перезагрузите ядро для перечитывания
+файлов. После обновления используйте `POST /panel/api/xray/routeTest`
+(form-поля `domain` или `ip`, `inboundTag`, `port`, `network`):
+`yandex.ru`, `gosuslugi.ru`, `77.88.8.8` должны выбрать `direct`,
+`youtube.com`, `8.8.8.8` — `cascade-sweden` для каждого RU-тега.
+Проверка маршрута не заменяет тест реального трафика.
+
+Hysteria2 и TUIC используют сертификат `imba.shop`. Hook
+[`sync-ru-xui-cert.sh`](../scripts/sync-ru-xui-cert.sh) установлен на RU-хосте
+как `/etc/letsencrypt/renewal-hooks/deploy/3xui-cert.sh`; он копирует продлённые
+cert/key в закрытый каталог `/opt/imba-3x-ui/data/certs/imba.shop` и перезапускает
+VPN-контейнер только при изменении файлов. Это вызывает короткий перерыв RU VPN
+при продлении сертификата. Nginx использует свой исходный каталог сертификатов.
+
 ## Обновление SSL-сертификатов master и 3x-ui нод
 
 В `/admin` → `Скрипты` есть:
@@ -472,3 +545,10 @@ docker compose exec bot python -m app.backfill_receipt \
 запуском сверьте `PAYMENT_ID` и `USER_ID`: API отклоняет чек, если платёж
 принадлежит другому пользователю. Повторный запуск перезаписывает сохранённый
 binary-чек этой записи платежа.
+
+
+### Дополнение: проверки публичных Funnel-маршрутов
+
+Каждый публичный Funnel relay проверяется с TLS/SNI по `/health` и по маршрутам `/`, `/cabinet`, `/admin`, `/plans`, `/payment-methods`. Для открытых страниц ожидается HTTP 200, для закрытых операторских маршрутов — HTTP 401. Проверки обновляются каждые 2 минуты; REALITY-ноды проверяются по доступности TCP listener, потому что их маскирующий SNI не предназначен для проверки обычного PKI-сертификата.
+
+`vpn-admin-health-alerts.timer` раз в 2 минуты отправляет в настроенную операторскую группу переходы health-check, восстановления и новые audit-события. Git-коммиты доставляет `.githooks/post-commit`; сообщение ассистента можно передать через `scripts/notify_admin_event.py assistant` со stdin.

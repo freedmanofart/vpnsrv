@@ -1,4 +1,6 @@
+import base64
 import json
+import secrets
 from types import SimpleNamespace
 from urllib.parse import quote
 
@@ -82,6 +84,11 @@ class ThreeXUIClient:
                     "client": {
                         "email": email,
                         "id": client_uuid,
+                        # A 16-byte base64 key is accepted by the shared
+                        # password-based inbounds and is required by
+                        # Shadowsocks 2022 AES-128 when the client is attached
+                        # to the KIT profile set later in provisioning.
+                        "password": base64.b64encode(secrets.token_bytes(16)).decode("ascii"),
                         "flow": flow,
                         "enable": True,
                         "totalGB": total_gb,
@@ -109,6 +116,36 @@ class ThreeXUIClient:
             if "not found" in str(exc).lower() or "does not exist" in str(exc).lower():
                 raise ThreeXUIClientNotFound(f"3x-ui client {email} is already absent") from exc
             raise
+
+    async def attach_client(self, email: str, inbound_ids: list[int]) -> None:
+        """Attach an existing client to additional explicitly configured inbounds."""
+
+        requested = sorted({self._inbound_id(str(value)) for value in inbound_ids})
+        if not requested:
+            return
+        current = await self.get_client_subscription_info(email)
+        missing = [value for value in requested if value not in current["inbound_ids"]]
+        if missing:
+            await self._request(
+                "POST",
+                f"clients/{quote(email, safe='')}/attach",
+                json={"inboundIds": missing},
+            )
+
+    async def detach_client(self, email: str, inbound_ids: list[int]) -> None:
+        """Detach a client from selected inbounds without deleting its identity."""
+
+        requested = sorted({self._inbound_id(str(value)) for value in inbound_ids})
+        if not requested:
+            return
+        current = await self.get_client_subscription_info(email)
+        attached = [value for value in requested if value in current["inbound_ids"]]
+        if attached:
+            await self._request(
+                "POST",
+                f"clients/{quote(email, safe='')}/detach",
+                json={"inboundIds": attached},
+            )
 
     async def update_vless_user(
         self,
@@ -173,6 +210,47 @@ class ThreeXUIClient:
             for item in clients
             if isinstance(item, dict)
         ]
+
+    async def get_client_subscription_info(self, email: str) -> dict:
+        """Return the panel subId and inbound IDs for one client without exposing its key."""
+        rows = await self._request("GET", "inbounds/list")
+        if not isinstance(rows, list):
+            raise ThreeXUIError("3x-ui returned an invalid inbound list")
+
+        sub_ids: set[str] = set()
+        inbound_ids: set[int] = set()
+        for inbound in rows:
+            if not isinstance(inbound, dict):
+                continue
+            raw_settings = inbound.get("settings") or {}
+            if isinstance(raw_settings, str):
+                try:
+                    raw_settings = json.loads(raw_settings)
+                except ValueError as exc:
+                    raise ThreeXUIError("3x-ui returned invalid inbound settings") from exc
+            clients = raw_settings.get("clients", []) if isinstance(raw_settings, dict) else []
+            for item in clients:
+                if not isinstance(item, dict) or item.get("email") != email:
+                    continue
+                try:
+                    inbound_ids.add(int(inbound["id"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if item.get("subId"):
+                    sub_ids.add(str(item["subId"]))
+
+        if len(sub_ids) > 1:
+            raise ThreeXUIError("3x-ui returned conflicting subscription IDs for a client")
+        return {
+            "sub_id": next(iter(sub_ids), ""),
+            "inbound_ids": sorted(inbound_ids),
+        }
+
+    async def get_client_links(self, email: str) -> list[str]:
+        links = await self._request("GET", f"clients/links/{quote(email, safe='')}")
+        if not isinstance(links, list) or any(not isinstance(link, str) for link in links):
+            raise ThreeXUIError("3x-ui returned invalid client links")
+        return links
 
     async def get_client_traffic(self, email: str) -> dict:
         rows = await self._request("GET", "inbounds/list")

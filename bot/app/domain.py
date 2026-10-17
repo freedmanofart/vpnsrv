@@ -192,3 +192,27 @@ def vpn_key_copy_message(value: str) -> str:
         "Нажмите на блок с ключом или удерживайте его, затем выберите «Скопировать».\n\n"
         f"<pre>{html.escape(value)}</pre>"
     )
+
+
+def subscription_import_actions(config: dict | None) -> list[tuple[str, str]]:
+    """Return app import actions in the order shown to a subscriber."""
+    values = config or {}
+    candidates = [
+        (
+            "📲 Импортировать конфигурацию в Freedom VPN",
+            values.get("freevpn_telegram_import_url") or values.get("freevpn_import_url"),
+        ),
+        (
+            "📲 Импортировать конфигурацию в Incy",
+            values.get("incy_telegram_import_url") or values.get("incy_import_url"),
+        ),
+        (
+            "📲 Импортировать конфигурацию в Amnezia VPN",
+            values.get("amnezia_import_url"),
+        ),
+        (
+            "📲 Импортировать конфигурацию в V2rayTUN",
+            values.get("v2raytun_import_url"),
+        ),
+    ]
+    return [(label, str(url)) for label, url in candidates if url]

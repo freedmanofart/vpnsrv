@@ -30,6 +30,7 @@ from app.services.provisioning import (
     ProvisioningThreeXUIError,
     commit_provisioning,
     provision_subscription,
+    renew_paid_subscription,
 )
 
 from app.schemas.subscription import (
@@ -528,278 +529,57 @@ async def renew_subscription(
     subscription_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Продлевает существующую подписку.
-
-    Важный принцип:
-
-        subscription
-            |
-            +-- old client -> revoked
-            |
-            +-- new client -> active
-
-    Старый VPNClient НЕ переиспользуется.
-
-    Для нового клиента всегда создаётся новый UUID.
-
-    Если подписка ещё active:
-
-        base_date = subscription.expires_at
-
-    Если подписка уже expired:
-
-        base_date = now
-
-    Поэтому:
-
-        active  + renew
-            -> продлеваем от текущего expires_at
-
-        expired + renew
-            -> начинаем новый период с now
-    """
-
-    now = datetime.now(timezone.utc)
-
-    # =====================================================
-    # Subscription
-    # =====================================================
-
+    """Extend a subscription while preserving its VPN ID, UUID and links."""
     result = await db.execute(
-        select(Subscription).where(
-            Subscription.id == subscription_id
-        ).with_for_update()
-    )
-
-    subscription = result.scalar_one_or_none()
-
-    if not subscription:
-        raise HTTPException(
-            status_code=404,
-            detail="Subscription not found",
-        )
-
-    # =====================================================
-    # Plan
-    # =====================================================
-
-    plan = await get_plan(
-        db=db,
-        plan_id=subscription.plan_id,
-    )
-
-    # =====================================================
-    # User
-    # =====================================================
-
-    user = await get_user(
-        db=db,
-        user_id=subscription.user_id,
-    )
-
-    # =====================================================
-    # Previous VPN client
-    # =====================================================
-
-    result = await db.execute(
-        select(VPNClient)
-        .where(
-            VPNClient.subscription_id == subscription.id
-        )
-        .order_by(
-            VPNClient.id.desc()
-        )
+        select(Subscription)
+        .where(Subscription.id == subscription_id)
         .with_for_update()
     )
+    subscription = result.scalar_one_or_none()
+    if not subscription:
+        raise HTTPException(status_code=404, detail="Subscription not found")
 
+    plan = await get_plan(db=db, plan_id=subscription.plan_id)
+    result = await db.execute(
+        select(VPNClient)
+        .where(VPNClient.subscription_id == subscription.id)
+        .order_by(VPNClient.id.desc())
+        .with_for_update()
+    )
     previous_client = result.scalars().first()
-
-    # =====================================================
-    # Determine node/protocol
-    # =====================================================
-
-    if previous_client:
-        protocol = previous_client.protocol
+    if previous_client is not None:
         node_id = previous_client.node_id
-
-        node, node_config = await get_node_for_client(
-            db=db,
-            node_id=node_id,
-            protocol=protocol,
-        )
-
+        client_type = previous_client.client_type
+        flow = previous_client.flow
+        fingerprint = previous_client.fingerprint
     else:
-        # -------------------------------------------------
-        # Это возможно для старых подписок,
-        # созданных до появления VPNClient.
-        # -------------------------------------------------
+        node, _node_config = await get_active_node_and_config(db=db, protocol="vless")
+        node_id = node.id
+        client_type = "universal"
+        flow = ""
+        fingerprint = "firefox"
 
-        protocol = "vless"
-
-        node, node_config = await get_active_node_and_config(
-            db=db,
-            protocol=protocol,
-        )
-
-    # =====================================================
-    # Calculate new expiration
-    # =====================================================
-
-    if (
-        subscription.status == "active"
-        and subscription.expires_at > now
-    ):
-        base_date = subscription.expires_at
-
-    else:
-        base_date = now
-
-    new_expires_at = (
-        base_date
-        + timedelta(days=plan.duration_days)
-    )
-    renewed_traffic_limit_gb = plan.traffic_limit_gb + (
-        previous_client.traffic_limit_gb if previous_client else 0
-    )
-
-    # =====================================================
-    # Create new VPN client
-    # =====================================================
-
-    new_uuid = str(uuid4())
-
-    new_client = VPNClient(
-        user_id=user.id,
-        subscription_id=subscription.id,
-        node_id=node.id,
-        protocol=protocol,
-        client_type=(previous_client.client_type if previous_client else "universal"),
-        flow=(previous_client.flow if previous_client else ""),
-        fingerprint=(previous_client.fingerprint if previous_client else "firefox"),
-        max_connections=plan.max_connections,
-        traffic_limit_gb=renewed_traffic_limit_gb,
-        client_uuid=new_uuid,
-        status="provisioning",
-        expires_at=new_expires_at,
-    )
-
-    db.add(new_client)
-
-    await db.flush()
-
-    # =====================================================
-    # Xray
-    # =====================================================
-
-    inbound_tag = node_config.config.get(
-        "inbound_tag",
-        "vless-reality",
-    )
-
-    # =====================================================
-    # Step 1: Add NEW client to Xray
-    # =====================================================
-
-    xray = None
-    xray = ThreeXUIClient(address=node_config.config.get("api_address"))
     try:
-        await xray.add_vless_user(
-            inbound_tag=inbound_tag,
-            client_uuid=new_client.client_uuid,
-            email=f"vpn-{new_client.id}",
-            flow=new_client.flow,
-            expiry_time=int(new_expires_at.timestamp() * 1000),
-            telegram_id=user.telegram_id,
-            limit_ip=new_client.max_connections,
-            total_gb=new_client.traffic_limit_gb * 1024 * 1024 * 1024,
+        provisioning = await renew_paid_subscription(
+            db,
+            subscription=subscription,
+            plan=plan,
+            node_id=node_id,
+            client_type=client_type,
+            flow=flow,
+            fingerprint=fingerprint,
+            panel_factory=ThreeXUIClient,
         )
+        await commit_provisioning(db, provisioning)
+    except ProvisioningNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProvisioningInvalid as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ProvisioningThreeXUIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    except ThreeXUIError as exc:
-        await db.rollback()
-
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to add renewed VPN client to 3x-ui: {exc}",
-        )
-
-    # =====================================================
-    # Step 2: Remove OLD client from Xray
-    # =====================================================
-
-    if previous_client:
-        old_was_active = (
-            previous_client.status == "active"
-        )
-
-        if old_was_active and xray is not None:
-            try:
-                await xray.remove_vless_user(
-                    inbound_tag=inbound_tag,
-                    email=f"vpn-{previous_client.id}",
-                )
-
-            except ThreeXUIClientNotFound:
-                # Старого клиента уже нет.
-                # Это безопасное конечное состояние.
-                pass
-
-            except ThreeXUIError as exc:
-                # -------------------------------------------------
-                # Компенсация:
-                #
-                # Новый клиент уже был добавлен в Xray.
-                # Старого удалить не смогли.
-                #
-                # Удаляем новый, чтобы не оставить два
-                # действующих клиента.
-                # -------------------------------------------------
-
-                try:
-                    await xray.remove_vless_user(
-                        inbound_tag=inbound_tag,
-                        email=f"vpn-{new_client.id}",
-                    )
-
-                except (
-                    ThreeXUIError,
-                    ThreeXUIClientNotFound,
-                ):
-                    pass
-
-                await db.rollback()
-
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "Failed to remove old VPN client "
-                        f"from Xray: {exc}"
-                    ),
-                )
-
-    # =====================================================
-    # Step 3: Update DB state
-    # =====================================================
-
-    if previous_client:
-        previous_client.status = "revoked"
-        previous_client.revoked_at = now
-
-    new_client.status = "active"
-    new_client.expires_at = new_expires_at
-
-    subscription.status = "active"
-    subscription.starts_at = now
-    subscription.expires_at = new_expires_at
-
-    # =====================================================
-    # Commit
-    # =====================================================
-
-    await db.commit()
-    await db.refresh(subscription)
-
-    return subscription
+    await db.refresh(provisioning.subscription)
+    return provisioning.subscription
 
 
 @router.post("/{subscription_id}/rotate", response_model=VPNClientResponse)

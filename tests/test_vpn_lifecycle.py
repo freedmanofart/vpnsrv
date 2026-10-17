@@ -55,6 +55,7 @@ class FakePanel:
     users: dict[str, dict[str, SimpleNamespace]] = {}
     fail_add = False
     fail_remove: set[str] = set()
+    fail_update: set[str] = set()
 
     def __init__(self, address: str | None = None, timeout: float = 3.0):
         self.address = address or "fallback:10085"
@@ -66,6 +67,7 @@ class FakePanel:
         cls.users = {}
         cls.fail_add = False
         cls.fail_remove = set()
+        cls.fail_update = set()
 
     async def add_vless_user(
         self,
@@ -121,6 +123,9 @@ class FakePanel:
         total_gb: int = 0,
     ) -> None:
         del inbound_tag, level
+        if email in self.fail_update:
+            self.fail_update.remove(email)
+            raise ThreeXUIError("simulated update failure")
         users = self.users[self.address]
         if email not in users:
             raise ThreeXUIClientNotFound(email)
@@ -306,6 +311,7 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                     )
                 )
             ).scalar_one()
+            initial_client_id = initial_client.id
             old_expiry = initial.expires_at
             second_payment = await create_payment(
                 db, self.payment_data("web:renew-active"), provider="manual_bank"
@@ -332,10 +338,10 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                     .order_by(VPNClient.id)
                 )
             ).scalars().all()
-            self.assertEqual(["revoked", "active"], [item.status for item in clients])
-            self.assertEqual(500, clients[-1].traffic_limit_gb)
-            self.assertEqual(250, initial_client.traffic_limit_gb)
-            self.assertIn(f"vpn-{clients[1].id}", FakePanel.users["https://master.example/base"])
+            self.assertEqual(["active"], [item.status for item in clients])
+            self.assertEqual(initial_client_id, clients[0].id)
+            self.assertEqual(500, clients[0].traffic_limit_gb)
+            self.assertIn(f"vpn-{initial_client_id}", FakePanel.users["https://master.example/base"])
             payments = (
                 await db.execute(
                     select(Payment)
@@ -382,7 +388,40 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                     .order_by(VPNClient.id)
                 )
             ).scalars().all()
-            self.assertEqual(["revoked", "active"], [item.status for item in clients])
+            self.assertEqual(["active"], [item.status for item in clients])
+            self.assertEqual(initial.client.id, clients[0].id)
+
+    async def test_paid_order_revives_expired_subscription_without_new_vpn_id(self) -> None:
+        async with self.session_factory() as db:
+            initial = await self.provision(db)
+            subscription_id = initial.subscription.id
+            client_id = initial.client.id
+            expired_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+            initial.subscription.expires_at = expired_at
+            initial.client.expires_at = expired_at
+            await db.commit()
+            self.assertEqual(1, await expire_subscriptions(db, panel_factory=FakePanel))
+
+            payment = await create_payment(
+                db,
+                self.payment_data("web:revive-expired"),
+                provider="manual_bank",
+            )
+            paid = await process_payment_event(
+                db,
+                provider="manual_bank",
+                event_id="web-revive-expired-paid",
+                provider_payment_id=payment.provider_payment_id,
+                target_status="paid",
+                payload={"details": {"source": "web_cabinet"}},
+                panel_factory=FakePanel,
+            )
+
+            self.assertEqual(subscription_id, paid.subscription_id)
+            client = await db.get(VPNClient, client_id)
+            self.assertEqual("active", client.status)
+            self.assertIsNone(client.revoked_at)
+            self.assertIn(f"vpn-{client_id}", FakePanel.users["https://master.example/base"])
 
     async def test_renew_commit_failure_restores_previous_panel_client(self) -> None:
         async with self.session_factory() as db:
@@ -407,7 +446,8 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
 
             panel_users = FakePanel.users["https://master.example/base"]
             self.assertIn(previous_email, panel_users)
-            self.assertNotIn(new_email, panel_users)
+            self.assertEqual(previous_email, new_email)
+            self.assertEqual(250 * 1024**3, panel_users[previous_email].total_gb)
 
     async def test_payment_state_machine_rejects_terminal_transition(self) -> None:
         async with self.session_factory() as db:
@@ -527,10 +567,11 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                 await db.scalar(select(func.count()).select_from(PaymentEvent)),
             )
 
-    async def test_renew_replaces_client_and_extends_from_current_expiry(self) -> None:
+    async def test_renew_preserves_client_and_extends_from_current_expiry(self) -> None:
         async with self.session_factory() as db:
             initial = await self.provision(db)
             old_client_id = initial.client.id
+            old_client_uuid = initial.client.client_uuid
             old_expiry = initial.subscription.expires_at
 
             with patch("app.api.routes.subscriptions.ThreeXUIClient", FakePanel):
@@ -543,23 +584,24 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
                     .order_by(VPNClient.id)
                 )
             ).scalars().all()
-            self.assertEqual(2, len(clients))
-            self.assertEqual("revoked", clients[0].status)
-            self.assertEqual("active", clients[1].status)
+            self.assertEqual(1, len(clients))
+            self.assertEqual(old_client_id, clients[0].id)
+            self.assertEqual(old_client_uuid, clients[0].client_uuid)
+            self.assertEqual("active", clients[0].status)
             self.assertEqual(
                 (old_expiry + timedelta(days=30)).replace(tzinfo=None),
                 renewed.expires_at.replace(tzinfo=None),
             )
             users = FakePanel.users["https://master.example/base"]
-            self.assertNotIn(f"vpn-{old_client_id}", users)
-            self.assertIn(f"vpn-{clients[1].id}", users)
+            self.assertIn(f"vpn-{old_client_id}", users)
 
-    async def test_renew_compensates_when_old_panel_client_cannot_be_removed(self) -> None:
+    async def test_renew_restores_old_panel_client_when_update_fails(self) -> None:
         async with self.session_factory() as db:
             initial = await self.provision(db)
             subscription_id = initial.subscription.id
             old_email = f"vpn-{initial.client.id}"
-            FakePanel.fail_remove.add(old_email)
+            old_expiry = initial.subscription.expires_at
+            FakePanel.fail_update.add(old_email)
 
             with patch("app.api.routes.subscriptions.ThreeXUIClient", FakePanel):
                 with self.assertRaises(HTTPException) as raised:
@@ -575,6 +617,10 @@ class VPNLifecycleTests(IsolatedAsyncioTestCase):
             ).scalars().all()
             self.assertEqual(1, len(clients))
             self.assertEqual("active", clients[0].status)
+            self.assertEqual(
+                old_expiry.replace(tzinfo=None),
+                clients[0].expires_at.replace(tzinfo=None),
+            )
             self.assertEqual({old_email}, set(FakePanel.users["https://master.example/base"]))
 
     async def test_expiration_revokes_panel_and_database_client(self) -> None:
