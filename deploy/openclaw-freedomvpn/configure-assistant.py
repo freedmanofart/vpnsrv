@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parent
 ENV_FILE = ROOT / ".env"
 CONFIG = ROOT / "state" / "openclaw.json"
 SERVER_NAME = "freedomvpn-admin"
-SUPPORT_GROUP_ID = "-5543652367"
+SUPPORT_GROUP_ID = "-1004331664224"
+LEGACY_SUPPORT_GROUP_ID = "-5543652367"
 TOOLS = [
     "freedomvpn_capabilities",
     "freedomvpn_lookup_user",
@@ -140,7 +141,12 @@ def main() -> None:
 
     groups = telegram.setdefault("groups", {})
     if SUPPORT_GROUP_ID not in groups:
-        raise SystemExit("Freedom VPN support group is missing from Telegram configuration")
+        legacy_group = groups.pop(LEGACY_SUPPORT_GROUP_ID, None)
+        if legacy_group is None:
+            raise SystemExit("Freedom VPN support group is missing from Telegram configuration")
+        groups[SUPPORT_GROUP_ID] = legacy_group
+    else:
+        groups.pop(LEGACY_SUPPORT_GROUP_ID, None)
     for group_id, group in groups.items():
         if not isinstance(group, dict):
             continue
