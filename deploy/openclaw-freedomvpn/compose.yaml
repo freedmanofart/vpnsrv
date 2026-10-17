@@ -12,7 +12,7 @@ services:
     volumes:
       - ./state:/home/node/.openclaw
       - ./health-mcp.mjs:/opt/freedomvpn/health-mcp.mjs:ro
-      - ./health/health.json:/data/health.json:ro
+      - ./health:/data:ro
     security_opt:
       - no-new-privileges:true
     cap_drop:
