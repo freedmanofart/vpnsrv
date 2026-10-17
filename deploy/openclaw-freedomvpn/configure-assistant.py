@@ -97,13 +97,16 @@ def main() -> None:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = CONFIG.with_name(f"openclaw.json.pre-assistant-{stamp}")
+    state_owner = CONFIG.parent.stat()
     shutil.copy2(CONFIG, backup)
+    os.chown(backup, state_owner.st_uid, state_owner.st_gid)
     os.chmod(backup, 0o600)
     fd, temp_name = tempfile.mkstemp(prefix="openclaw-", suffix=".json", dir=CONFIG.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             json.dump(config, output, ensure_ascii=False, indent=2)
             output.write("\n")
+        os.chown(temp_name, state_owner.st_uid, state_owner.st_gid)
         os.chmod(temp_name, 0o600)
         os.replace(temp_name, CONFIG)
     finally:
