@@ -161,8 +161,9 @@ PostgreSQL, отдаётся боту через защищённый API и п�
 |---|---|
 | `main_menu` | возврат в главное меню и очистка FSM |
 | `devices`, `device:<platform>` | инструкции по устройству |
-| `buy_vpn`, `purchase_device:<platform>` | начало покупки и выбор страны |
-| `purchase_country:<node_id>` | выбор тарифа |
+| `buy_vpn`, `purchase_device:<platform>` | начало покупки; бот назначает первую доступную ноду и показывает пакеты |
+| `purchase_country:<node_id>` | повторный показ пакетов для ноды, в том числе для старых кнопок |
+| `purchase_tier:<tier>:<node_id>` | выбор срока тарифа |
 | `purchase_plan:<plan_id>:<node_id>` | экран оплаты |
 | `payment_qr:<plan_id>:<node_id>` | QR платёжной ссылки |
 | `pay_qr:<plan_id>:<node_id>` | создание/проверка платежа через VPN API |

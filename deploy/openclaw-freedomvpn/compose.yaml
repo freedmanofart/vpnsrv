@@ -7,12 +7,24 @@ services:
     environment:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?Set OPENCLAW_GATEWAY_TOKEN in .env}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN in .env}
+      HTTP_PROXY: http://openclaw-codex-egress:3128
+      HTTPS_PROXY: http://openclaw-codex-egress:3128
+      http_proxy: http://openclaw-codex-egress:3128
+      https_proxy: http://openclaw-codex-egress:3128
+      NO_PROXY: localhost,127.0.0.1,::1,vpn-api,openclaw-assistant-mcp,freedomvpn-openclaw-assistant-mcp
+      no_proxy: localhost,127.0.0.1,::1,vpn-api,openclaw-assistant-mcp,freedomvpn-openclaw-assistant-mcp
+    depends_on:
+      openclaw-codex-egress:
+        condition: service_healthy
     ports:
       - "127.0.0.1:18789:18789"
     volumes:
       - ./state:/home/node/.openclaw
       - ./health-mcp.mjs:/opt/freedomvpn/health-mcp.mjs:ro
       - ./health:/data:ro
+    networks:
+      - default
+      - codex-egress
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -25,6 +37,44 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  openclaw-codex-egress:
+    image: ghcr.io/openclaw/openclaw@sha256:614004ec2cf2e6095124ea544dc8d950c49306aef445a1fc300b88717e24261a
+    container_name: openclaw-codex-egress
+    restart: unless-stopped
+    init: true
+    command: ["node", "/opt/freedomvpn/codex-egress-proxy.mjs"]
+    environment:
+      CODEX_UPSTREAM_PROXY_HOST: 100.117.14.51
+      CODEX_UPSTREAM_PROXY_PORT: "18791"
+      CODEX_UPSTREAM_ROUTE: sweden
+      PORT: "3128"
+    volumes:
+      - ./codex-egress-proxy.mjs:/opt/freedomvpn/codex-egress-proxy.mjs:ro
+    expose:
+      - "3128"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 32
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('node:net').connect(3128,'127.0.0.1',()=>{s.destroy();process.exit(0)});s.setTimeout(2000,()=>process.exit(1));s.on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - codex-egress
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   openclaw-assistant-mcp:
     build:
@@ -60,6 +110,8 @@ services:
       - vpn-backend
 
 networks:
+  codex-egress:
+    name: openclaw-codex-egress
   vpn-backend:
     name: vpn-backend
     external: true

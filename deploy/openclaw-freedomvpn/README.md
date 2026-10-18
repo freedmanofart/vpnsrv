@@ -34,6 +34,12 @@
 5. Из `/opt/openclaw-freedomvpn` выполните `python3 configure-assistant.py`, затем `docker compose up -d --build`. Скрипт сохраняет резервную копию `state/openclaw.json`, получает актуальный список администраторов Freedom VPN Admin через Telegram Bot API и разрешает только им точный набор инструментов поддержки. Для любого другого отправителя группа запрещает admin MCP.
 6. Проверьте MCP через `docker compose logs --tail=50 openclaw-assistant-mcp` и `docker compose ps`. После добавления бота отключите Privacy Mode в BotFather и заново добавьте бота в группу.
 
+## Codex и сетевой маршрут
+
+Gateway использует `HTTP_PROXY` и `HTTPS_PROXY` через sidecar `openclaw-codex-egress`. Он отправляет `chatgpt.com` и `auth.openai.com` через отдельный CONNECT relay на шведской ноде `sw-node2` по Tailscale. Relay слушает только `100.117.14.51:18791`, принимает запросы только от master `100.102.21.123` и разрешает только эти два TLS-хоста. Остальные публичные HTTP/HTTPS назначения sidecar подключает напрямую с master; приватные и локальные адреса блокируются. Telegram Bot API идёт напрямую.
+
+Установите `deploy/openclaw-freedomvpn/codex-upstream-proxy.py` в `/usr/local/libexec/openclaw-codex-upstream.py`, а `deploy/systemd/openclaw-codex-upstream.service` — в `/etc/systemd/system/openclaw-codex-upstream.service` на `sw-node2`; затем выполните `systemctl daemon-reload && systemctl enable --now openclaw-codex-upstream`. Проверьте `systemctl status openclaw-codex-upstream` и `journalctl -u openclaw-codex-upstream`. На master проверьте `docker compose ps` и `docker compose logs --tail=50 openclaw-codex-egress openclaw-gateway`. Не публикуйте порты `18791` и `3128` в публичную сеть и не расширяйте список разрешённых хостов без проверки.
+
 ## Control UI
 
 Control UI доступен только через loopback сервера. Для подключения с Mac откройте SSH-туннель `ssh -N -L 18789:127.0.0.1:18789 root@freedomvpn`, затем откройте `http://127.0.0.1:18789/`. Для входа выполните на сервере `docker exec openclaw-freedomvpn openclaw dashboard` и используйте выданную ссылку; не пересылайте её, так как в ней находится gateway token.

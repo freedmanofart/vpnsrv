@@ -53,6 +53,7 @@ from app.services.notifications import notify_payment_paid
 from app.services.provider_codes import issue_provider_code
 from app.schemas.subscription import VPNClientRotate
 from app.api.routes.subscriptions import rotate_subscription_client
+from app.api.routes.client import client_profile_uri_for_node
 from app.core.config import settings
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -772,9 +773,9 @@ def _aware(value: datetime) -> datetime:
 
 def _client_link(client: VPNClient, node: VPNNode, config: VPNNodeConfig) -> str:
     if client.config_override:
-        return client.config_override
+        return client_profile_uri_for_node(client.config_override, node)
     data = config.config
-    host = data.get("host") or node.hostname or node.ip_address
+    host = node.ip_address
     link_config = dict(data)
     link_config["fp"] = data.get("fp") or client.fingerprint or "firefox"
     if client.flow:

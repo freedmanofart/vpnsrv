@@ -214,8 +214,8 @@ tailscale funnel --bg --yes 8000
 Переменные для текущего мастера:
 
 ```dotenv
-PUBLIC_BASE_URL=https://freedomvpn.taile485ac.ts.net
-WEB_CABINET_URL=https://freedomvpn.taile485ac.ts.net/cabinet
+PUBLIC_BASE_URL=https://176.108.250.142
+WEB_CABINET_URL=https://176.108.250.142/cabinet
 ```
 
 При Serve адрес доступен только устройствам того же tailnet. При Funnel он
@@ -225,6 +225,12 @@ Tailscale-IP мастера — `100.102.21.123`, но TLS-сертификат 
 MagicDNS-имя `freedomvpn.taile485ac.ts.net`. Поэтому в Telegram используется имя:
 оно проходит проверку HTTPS и позволяет открыть кабинет как Web App. Обращение
 к `https://100.102.21.123` приведёт к ошибке соответствия сертификата.
+
+Публичный адрес сайта и кабинета теперь использует постоянный IP российской
+ноды: `https://176.108.250.142/cabinet`. Nginx на ноде проксирует запросы к
+master через его Funnel URL. Для IP используется короткоживущий сертификат
+Let's Encrypt, который `acme.sh` обновляет автоматически; не удаляйте cron
+задачу `acme.sh --cron` и каталог `/root/cert/kit-ip`.
 
 Проверка и отключение только этого listener:
 

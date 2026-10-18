@@ -958,9 +958,7 @@ async def cabinet(
         )
         if profile_node is None or profile_config is None:
             continue
-        uri = profile_client.config_override or build_client_uri(
-            profile_client, profile_node, profile_config.config
-        )
+        uri = build_client_uri(profile_client, profile_node, profile_config.config)
         if not uri:
             continue
         if client is None:
@@ -1004,7 +1002,7 @@ async def cabinet(
             )
 
     if vpn_profiles:
-        vpn_uri = client.config_override or build_client_uri(client, node, config.config)
+        vpn_uri = build_client_uri(client, node, config.config)
         subscription_token = vpn_profiles[0]["token"]
         base = settings.public_base_url.rstrip("/")
         incy_import_url = f"{base}/v1/client/import/{subscription_token}"

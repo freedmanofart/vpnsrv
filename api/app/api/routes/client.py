@@ -3,6 +3,7 @@ import binascii
 import html
 import json
 import re
+from ipaddress import ip_address
 from base64 import b64decode, b64encode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -149,6 +150,55 @@ def normalized_profile_uri(uri: str, index: int, label: str | None = None) -> st
 
     display = label or clean_profile_name(parsed.fragment) or profile_display_name(uri, index)
     return parsed._replace(fragment=quote(display, safe="")).geturl()
+
+
+def client_profile_uri_for_node(uri: str, node: VPNNode) -> str:
+    """Pin a client-facing profile's connection endpoint to its node IP.
+
+    TLS/Reality SNI and transport host headers remain in their URI parameters;
+    only the address the client dials is changed.
+    """
+
+    try:
+        host = str(ip_address(node.ip_address.strip()))
+    except ValueError:
+        return uri
+
+    scheme = urlsplit(uri).scheme.lower()
+    if scheme == "vmess":
+        try:
+            raw = uri.split("://", 1)[1]
+            document = json.loads(b64decode(raw + "=" * (-len(raw) % 4)).decode())
+            if not isinstance(document, dict) or not document.get("add"):
+                return uri
+            document["add"] = host
+            encoded = b64encode(
+                json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+            ).decode().rstrip("=")
+            return f"vmess://{encoded}"
+        except (binascii.Error, UnicodeDecodeError, TypeError, ValueError):
+            return uri
+
+    if scheme not in {
+        "vless", "trojan", "trojan-go", "hysteria", "hysteria2", "hy2",
+        "tuic", "ss", "shadowsocks", "socks", "socks5",
+    }:
+        return uri
+
+    parsed = urlsplit(uri)
+    try:
+        port = parsed.port
+    except ValueError:
+        return uri
+    userinfo, separator, _old_host = parsed.netloc.rpartition("@")
+    if scheme in {"ss", "shadowsocks"} and not separator:
+        # Legacy Shadowsocks links encode their endpoint and credentials as
+        # one base64 authority, so replacing the authority would corrupt it.
+        return uri
+    prefix = f"{userinfo}@" if separator else ""
+    uri_host = f"[{host}]" if ":" in host else host
+    netloc = prefix + uri_host + (f":{port}" if port is not None else "")
+    return parsed._replace(netloc=netloc).geturl()
 
 
 def profile_display_name(uri: str, index: int) -> str:
@@ -332,6 +382,7 @@ async def kit_all_profiles_for_client(
     bundle = await kit_subscription_for_client(client, node, node_config, user_agent, accept)
     profiles = []
     for uri in bundle["uris"] if bundle else []:
+        uri = client_profile_uri_for_node(uri, node)
         index = len(profiles)
         name = localized_profile_name(node, uri, index)
         profiles.append(
@@ -342,12 +393,14 @@ async def kit_all_profiles_for_client(
             }
         )
     for profile in await kit_amnezia_profiles_for_client(client, node, node_config):
-        name = localized_profile_name(node, profile["config"], len(profiles))
+        profile_config = client_profile_uri_for_node(profile["config"], node)
+        incy_config = client_profile_uri_for_node(profile["incy_config"], node)
+        name = localized_profile_name(node, profile_config, len(profiles))
         profile = {
             **profile,
             "name": name,
-            "config": normalized_profile_uri(profile["config"], len(profiles), name),
-            "incy_config": normalized_profile_uri(profile["incy_config"], len(profiles), name),
+            "config": normalized_profile_uri(profile_config, len(profiles), name),
+            "incy_config": normalized_profile_uri(incy_config, len(profiles), name),
         }
         profiles.append(profile)
     unique = []
@@ -447,6 +500,7 @@ async def alternate_client_profiles(
             if fallback:
                 selected = [(fallback, "")]
         for uri, variant in selected:
+            uri = client_profile_uri_for_node(uri, node)
             name = localized_profile_name(node, uri, len(profiles))
             if variant:
                 name = name.split(" (", 1)[0] + f" ({variant})"
@@ -622,10 +676,12 @@ async def activate_device(data: DeviceActivate, db: AsyncSession = Depends(get_d
 
 def build_client_uri(client: VPNClient, node: VPNNode, config: dict) -> str:
     if client.config_override:
-        return client.config_override.strip()
+        return client_profile_uri_for_node(client.config_override.strip(), node)
     if client.protocol != "vless":
-        return str(config.get("client_uri") or "").strip()
-    host = config.get("host") or node.hostname or node.ip_address
+        return client_profile_uri_for_node(
+            str(config.get("client_uri") or "").strip(), node
+        )
+    host = node.ip_address
     link_config = dict(config)
     link_config["fp"] = config.get("fp") or client.fingerprint or "firefox"
     if client.flow:
@@ -995,6 +1051,7 @@ async def client_profile(
         ) or [uri]
         available = node_accepts_clients(node, management_mode="threexui")
         for index, profile_uri in enumerate(profile_uris):
+            profile_uri = client_profile_uri_for_node(profile_uri, node)
             scheme = urlsplit(profile_uri).scheme.lower()
             multi_profile = kit_subscription is not None
             name = localized_profile_name(node, profile_uri, index)
@@ -1157,7 +1214,7 @@ async def incy_subscription(
             pass
     if kit_subscription:
         incy_uris = [
-            profile_uri
+            client_profile_uri_for_node(profile_uri, node)
             for profile_uri in kit_subscription["uris"]
             if incy_profile_allowed(
                 profile_uri,
@@ -1185,6 +1242,7 @@ async def incy_subscription(
         )
         body = "\n".join(app_uris) + "\n"
     else:
+        uri = client_profile_uri_for_node(uri, node)
         app_uris = [normalized_profile_uri(uri, 0, localized_profile_name(node, uri, 0))]
         offset = len(app_uris)
         app_uris.extend(

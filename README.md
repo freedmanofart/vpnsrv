@@ -374,6 +374,7 @@ in-memory реализацию и не изменяют развёрнутую �
 - Перед перезапуском API и worker применяйте миграции Alembic.
 
 Операционные инструкции: [`docs/maintenance-scripts.md`](docs/maintenance-scripts.md),
+схема портов и VLAN коммутатора: [`docs/des-3528-vlan.md`](docs/des-3528-vlan.md),
 доступы: [`docs/access-and-credentials.md`](docs/access-and-credentials.md),
 бизнес-логика: [`docs/vpn-api-lifecycle.md`](docs/vpn-api-lifecycle.md),
 БД: [`docs/database-reference.md`](docs/database-reference.md),

@@ -44,9 +44,10 @@ def build_vless_url(
     query = urlencode(params)
 
     fragment = remark or "VPN"
+    uri_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
 
     return (
-        f"vless://{uuid}@{host}:{port}"
+        f"vless://{uuid}@{uri_host}:{port}"
         f"?{query}"
         f"#{fragment}"
     )

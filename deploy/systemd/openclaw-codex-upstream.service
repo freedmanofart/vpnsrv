@@ -1,0 +1,33 @@
+[Unit]
+Description=OpenClaw Codex CONNECT relay via Tailscale
+Wants=network-online.target
+After=network-online.target tailscaled.service
+Requires=tailscaled.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+Environment=CODEX_PROXY_BIND=100.117.14.51
+Environment=CODEX_PROXY_PORT=18791
+Environment=CODEX_PROXY_CLIENTS=100.102.21.123
+ExecStart=/usr/bin/python3 /usr/local/libexec/openclaw-codex-upstream.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=64M
+CPUQuota=20%
+TasksMax=32
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -39,6 +39,7 @@ from app.services.freevpn import build_freevpn_import_link
 from app.core.cabinet_links import incy_subscription_token
 from app.api.routes.client import (
     alternate_client_profiles,
+    client_profile_uri_for_node,
     kit_all_profiles_for_client,
     localized_profile_name,
     normalized_profile_uri,
@@ -757,11 +758,7 @@ async def get_vpn_client_config(
     # VLESS URL
     # -----------------------------------------------------
 
-    host = (
-        config.get("host")
-        or node.hostname
-        or node.ip_address
-    )
+    host = node.ip_address
 
     port = config.get("port", 443)
 
@@ -770,15 +767,16 @@ async def get_vpn_client_config(
     if client.flow:
         link_config["flow"] = client.flow
 
-    vless_url = client.config_override or (
-        build_vless_url(
+    if client.config_override:
+        vless_url = client_profile_uri_for_node(client.config_override, node)
+    else:
+        vless_url = build_vless_url(
             uuid=client.client_uuid,
             host=host,
             port=port,
             config=link_config,
             remark=f"vpn-{client.id}",
         )
-    )
 
     subscription_token = incy_subscription_token(client.id, client.expires_at)
     subscription_url = (
