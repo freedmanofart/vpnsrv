@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically verify Freedom VPN public Funnel ingress
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=10s
+Unit=freedomvpn-funnel-watch.service
+
+[Install]
+WantedBy=timers.target

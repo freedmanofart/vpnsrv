@@ -23,7 +23,7 @@ docker compose run --rm api alembic current
 docker compose run --rm api alembic upgrade head
 ```
 
-Перед ручными массовыми правками БД делайте backup. Backup/restore описан в
+Перед ручными массовыми правками БД создавайте резервную копию. Резервное копирование и восстановление описаны в
 `docs/maintenance-scripts.md`.
 
 ## Основные связи

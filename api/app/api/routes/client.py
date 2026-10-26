@@ -1,5 +1,6 @@
 import secrets
 import binascii
+import hashlib
 import html
 import json
 import re
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -152,6 +153,49 @@ def normalized_profile_uri(uri: str, index: int, label: str | None = None) -> st
     return parsed._replace(fragment=quote(display, safe="")).geturl()
 
 
+def profile_identity(uri: str) -> str:
+    """Return a stable, non-secret identity for one connection configuration."""
+    parsed = urlsplit(uri)
+    scheme = parsed.scheme.lower()
+    if scheme == "vmess":
+        try:
+            raw = uri.split("://", 1)[1]
+            document = json.loads(b64decode(raw + "=" * (-len(raw) % 4)).decode())
+            if isinstance(document, dict):
+                document.pop("ps", None)
+                payload = json.dumps(document, sort_keys=True, separators=(",", ":"))
+                return hashlib.sha256(f"vmess:{payload}".encode()).hexdigest()[:20]
+        except (AttributeError, binascii.Error, TypeError, UnicodeDecodeError, ValueError, IndexError):
+            pass
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    identity = (
+        scheme,
+        parsed.username,
+        parsed.password,
+        (parsed.hostname or "").lower(),
+        port,
+        parsed.path,
+        tuple(sorted(parse_qsl(parsed.query, keep_blank_values=True))),
+    )
+    serialized = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode()).hexdigest()[:20]
+
+
+def deduplicate_profiles(profiles: list[dict]) -> list[dict]:
+    unique = []
+    seen = set()
+    for profile in profiles:
+        identity = profile_identity(str(profile.get("config") or ""))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(profile)
+    return unique
+
+
 def client_profile_uri_for_node(uri: str, node: VPNNode) -> str:
     """Pin a client-facing profile's connection endpoint to its node IP.
 
@@ -230,14 +274,85 @@ def profile_display_name(uri: str, index: int) -> str:
     return f"{labels.get(scheme, scheme.upper())} {index + 1}"
 
 
+def profile_transport_variant(uri: str, link_name: str = "") -> str:
+    """Describe the actual transport/security combination encoded by a URI."""
+    parsed = urlsplit(uri)
+    scheme = parsed.scheme.lower()
+    query = parse_qs(parsed.query)
+    transport = query.get("type", ["tcp"])[0].lower()
+    if scheme == "vmess":
+        try:
+            raw = uri.split("://", 1)[1]
+            document = json.loads(b64decode(raw + "=" * (-len(raw) % 4)).decode())
+            transport = str(document.get("net", transport)).lower()
+        except (
+            AttributeError,
+            binascii.Error,
+            TypeError,
+            UnicodeDecodeError,
+            ValueError,
+            IndexError,
+        ):
+            pass
+    security = query.get("security", [""])[0].lower()
+    name = clean_profile_name(link_name).upper()
+
+    if scheme == "vless" and transport in {"tcp", "raw"} and security == "reality":
+        return "Reality 2" if "REALITY-2" in name else "Reality"
+    if scheme == "vless" and transport in {"xhttp", "splithttp"}:
+        return "xHTTP"
+    if scheme == "vless" and transport == "grpc":
+        return "gRPC"
+    if scheme == "vless" and transport == "ws":
+        return "VLESS WebSocket"
+    if scheme == "trojan" and transport == "grpc":
+        return "Trojan gRPC"
+    if scheme == "vmess" and transport == "ws":
+        return "VMess WebSocket"
+    if scheme in {"hysteria2", "hy2"}:
+        return "Hysteria2"
+    if scheme == "tuic":
+        return "TUIC"
+    if scheme in {"wireguard", "amneziawg", "awg", "vpn"}:
+        return "WireGuard"
+    return ""
+
+
 def localized_profile_name(node: VPNNode, uri: str, index: int) -> str:
     raw_region = (node.region or node.name or "VPN").strip()
     parts = [part.strip() for part in raw_region.split("|", 1)]
-    code = parts[0].upper() if len(parts[0]) == 2 and parts[0].isalpha() else ""
+    region_code = parts[0].upper() if len(parts[0]) == 2 and parts[0].isalpha() else ""
     countries = {"RU": "Россия", "SE": "Швеция"}
-    country = parts[1] if len(parts) > 1 and parts[1] else countries.get(code, raw_region)
-    flag = "".join(chr(127397 + ord(char)) for char in code) if code else "🌐"
-    variant = profile_display_name(uri, index)
+    country = (
+        parts[1]
+        if len(parts) > 1 and parts[1]
+        else countries.get(region_code, raw_region)
+    )
+    flag = (
+        "".join(chr(127397 + ord(char)) for char in region_code)
+        if region_code
+        else "🌐"
+    )
+    link_name = profile_display_name(uri, index)
+    link_code, separator, _suffix = link_name.partition("-")
+    country_names = {
+        "FI": "Финляндия",
+        "PL": "Польша",
+        "RU": "Россия",
+        "SE": "Швеция",
+        "US": "США",
+    }
+    link_code = link_code.upper()
+    variant = profile_transport_variant(uri, link_name)
+    for country_code, country_name in country_names.items():
+        country_flag = "".join(chr(127397 + ord(char)) for char in country_code)
+        if link_name.startswith(f"{country_flag} {country_name} (") and variant:
+            return f"{country_flag} {country_name} ({variant})"
+    if separator and link_code in country_names and variant:
+        link_flag = "".join(chr(127397 + ord(char)) for char in link_code)
+        return f"{link_flag} {country_names[link_code]} ({variant})"
+    if not variant:
+        variant = link_name
     variants = {
         "REALITY": "Reality",
         "HY2": "Hysteria2",
@@ -247,13 +362,64 @@ def localized_profile_name(node: VPNNode, uri: str, index: int) -> str:
         "TROJAN-GRPC": "Trojan gRPC",
     }
     variant = variants.get(variant.upper(), variant)
+    if variant == "Reality 2":
+        variant = "Reality"
     if variant.upper().startswith("VLESS ") and "reality" in uri.lower():
         variant = "Reality"
     return f"{flag} {country} ({variant})"
 
 
+def alternate_profile_name(
+    node: VPNNode,
+    node_config: VPNNodeConfig,
+    uri: str,
+    index: int,
+    variant: str,
+    port: int | None,
+    link_name: str = "",
+) -> str:
+    """Use configured labels for alternate endpoints that share a node."""
+    config = node_config.config if isinstance(node_config.config, dict) else {}
+    labels = config.get("alternate_profile_labels", {})
+    profile_key = clean_profile_name(link_name).upper()
+    label = labels.get(profile_key) if isinstance(labels, dict) and profile_key else None
+    if not label:
+        label = labels.get(variant) if isinstance(labels, dict) and variant else None
+    if not label and isinstance(labels, dict) and port:
+        label = labels.get(str(port))
+    name = localized_profile_name(node, uri, index)
+    prefix = name.split(" (", 1)[0]
+    display_variant = "Reality" if variant == "Reality 2" else variant
+    if isinstance(label, str) and label.strip():
+        label = label.strip()
+        if not display_variant:
+            return label
+        if " (" in label and label.endswith(")"):
+            label = label.rsplit(" (", 1)[0]
+        return f"{label} ({display_variant})"
+    return f"{prefix} ({display_variant})" if display_variant else name
+
+
+def profile_name_for_node(
+    node: VPNNode,
+    node_config: VPNNodeConfig,
+    uri: str,
+    index: int,
+) -> str:
+    """Apply node-specific labels to a link while preserving its real transport."""
+    link_name = profile_display_name(uri, index)
+    variant = profile_transport_variant(uri, link_name)
+    try:
+        port = urlsplit(uri).port
+    except ValueError:
+        port = None
+    return alternate_profile_name(
+        node, node_config, uri, index, variant, port, link_name
+    )
+
+
 _INCY_RU_PROFILE_VARIANTS = {
-    "Reality", "Hysteria2", "xHTTP", "VLESS WebSocket", "Trojan gRPC",
+    "Reality", "Reality 2", "Hysteria2", "xHTTP", "gRPC", "VLESS WebSocket", "Trojan gRPC",
     "VMess WebSocket",
 }
 def incy_profile_allowed(uri: str, region: str | None, name: str | None = None) -> bool:
@@ -263,8 +429,7 @@ def incy_profile_allowed(uri: str, region: str | None, name: str | None = None) 
     region_code = (region or "").split("|", 1)[0].strip().upper()
     if region_code != "RU":
         return True
-    label = name or profile_display_name(uri, 0)
-    variant = label.rsplit("(", 1)[-1].removesuffix(")").strip()
+    variant = profile_transport_variant(uri, profile_display_name(uri, 0))
     return variant in _INCY_RU_PROFILE_VARIANTS
 
 def _safe_profile_scalar(value: object) -> str:
@@ -384,7 +549,7 @@ async def kit_all_profiles_for_client(
     for uri in bundle["uris"] if bundle else []:
         uri = client_profile_uri_for_node(uri, node)
         index = len(profiles)
-        name = localized_profile_name(node, uri, index)
+        name = profile_name_for_node(node, node_config, uri, index)
         profiles.append(
             {
                 "name": name,
@@ -395,7 +560,7 @@ async def kit_all_profiles_for_client(
     for profile in await kit_amnezia_profiles_for_client(client, node, node_config):
         profile_config = client_profile_uri_for_node(profile["config"], node)
         incy_config = client_profile_uri_for_node(profile["incy_config"], node)
-        name = localized_profile_name(node, profile_config, len(profiles))
+        name = profile_name_for_node(node, node_config, profile_config, len(profiles))
         profile = {
             **profile,
             "name": name,
@@ -403,13 +568,7 @@ async def kit_all_profiles_for_client(
             "incy_config": normalized_profile_uri(incy_config, len(profiles), name),
         }
         profiles.append(profile)
-    unique = []
-    seen = set()
-    for profile in profiles:
-        if profile["config"] not in seen:
-            seen.add(profile["config"])
-            unique.append(profile)
-    return unique
+    return deduplicate_profiles(profiles)
 
 
 async def alternate_client_profiles(
@@ -442,6 +601,7 @@ async def alternate_client_profiles(
         .order_by(VPNNode.id)
     )
     profiles = []
+    seen_links = set()
     for node, node_config in result.all():
         link_host = str(node_config.config.get("share_address") or "").lower().strip()
         link_variants = {
@@ -449,7 +609,7 @@ async def alternate_client_profiles(
             ("tuic", 8444, ""): "TUIC",
             ("wireguard", 51820, ""): "WireGuard",
         }
-        selected: list[tuple[str, str]] = []
+        selected: list[tuple[str, str, int | None, str]] = []
         if link_host and node_config.config.get("alternate_profile_links") is True:
             try:
                 panel = ThreeXUIClient(node_config.config.get("api_address"), timeout=8)
@@ -479,6 +639,8 @@ async def alternate_client_profiles(
                         variant = "Reality 2" if "REALITY-2" in link_name else "Reality"
                     elif scheme == "vless" and transport in {"xhttp", "splithttp"}:
                         variant = "xHTTP"
+                    elif scheme == "vless" and transport == "grpc":
+                        variant = "gRPC"
                     elif scheme == "vless" and transport == "ws":
                         variant = "VLESS WebSocket"
                     elif scheme == "trojan" and transport == "grpc":
@@ -490,20 +652,26 @@ async def alternate_client_profiles(
                     if variant is None:
                         variant = link_variants.get((scheme, link_port, transport))
                     if variant:
-                        selected.append((link, variant))
+                        selected.append((link, variant, link_port, link_name))
             except (ThreeXUIError, TypeError, ValueError):
                 selected = []
         if node.id == client.node_id:
-            selected = [(uri, variant) for uri, variant in selected if variant != "Reality"]
+            selected = [
+                item for item in selected if item[1] != "Reality"
+            ]
         elif not selected:
             fallback = build_client_uri(client, node, node_config.config)
             if fallback:
-                selected = [(fallback, "")]
-        for uri, variant in selected:
+                selected = [(fallback, "", None, "")]
+        for uri, variant, profile_port, link_name in selected:
             uri = client_profile_uri_for_node(uri, node)
-            name = localized_profile_name(node, uri, len(profiles))
-            if variant:
-                name = name.split(" (", 1)[0] + f" ({variant})"
+            identity = profile_identity(uri)
+            if identity in seen_links:
+                continue
+            seen_links.add(identity)
+            name = alternate_profile_name(
+                node, node_config, uri, len(profiles), variant, profile_port, link_name
+            )
             profiles.append(
                 {
                     "name": name,
@@ -1008,6 +1176,7 @@ async def client_profile(
     download_bytes = 0
     active_vpn_ids: list[int] = []
     for client, node, node_config in result.all():
+        seen_profile_ids = set()
         uri = build_client_uri(client, node, node_config.config)
         if not uri:
             continue
@@ -1050,19 +1219,25 @@ async def client_profile(
             else []
         ) or [uri]
         available = node_accepts_clients(node, management_mode="threexui")
+        client_profile_count = 0
         for index, profile_uri in enumerate(profile_uris):
             profile_uri = client_profile_uri_for_node(profile_uri, node)
             scheme = urlsplit(profile_uri).scheme.lower()
             multi_profile = kit_subscription is not None
-            name = localized_profile_name(node, profile_uri, index)
+            name = profile_name_for_node(node, node_config, profile_uri, index)
             profile_uri = normalized_profile_uri(profile_uri, index, name)
+            profile_key = profile_identity(profile_uri)
+            if profile_key in seen_profile_ids:
+                continue
+            seen_profile_ids.add(profile_key)
+            profile_id = (
+                f"{node.id}:{scheme}:{profile_key}"
+                if multi_profile
+                else f"{node.id}:{client.protocol}"
+            )
             nodes.append(
                 ClientProfileNode(
-                    profile_id=(
-                        f"{node.id}:{scheme}:{index}"
-                        if multi_profile
-                        else f"{node.id}:{client.protocol}"
-                    ),
+                    profile_id=profile_id,
                     node_id=node.id,
                     name=name,
                     region=node.region,
@@ -1070,20 +1245,23 @@ async def client_profile(
                     latency_ms=node.latency_ms,
                     protocol=scheme if multi_profile else client.protocol,
                     config=profile_uri,
-                    upload_bytes=client_upload if index == 0 else 0,
-                    download_bytes=client_download if index == 0 else 0,
+                    upload_bytes=client_upload if client_profile_count == 0 else 0,
+                    download_bytes=client_download if client_profile_count == 0 else 0,
                 )
             )
+            client_profile_count += 1
             sensitive_configs.append({"node_id": node.id, "vpn_uri": profile_uri})
         alternate_profiles = await alternate_client_profiles(db, client, node_config)
         for profile in alternate_profiles:
             if profile["protocol"] not in _FREEDOM_PROFILE_SCHEMES:
                 continue
-            parsed = urlsplit(profile["config"])
-            transport = parse_qs(parsed.query).get("type", ["tcp"])[0]
-            profile_id = f"{client.id}:{profile['node_id']}:alternate"
-            if (profile["protocol"], parsed.port, transport) != ("vless", 8443, "tcp"):
-                profile_id += f":{profile['protocol']}:{parsed.port}:{transport}"
+            profile_key = profile_identity(profile["config"])
+            if profile_key in seen_profile_ids:
+                continue
+            seen_profile_ids.add(profile_key)
+            profile_id = (
+                f"{client.id}:{profile['node_id']}:alternate:{profile_key}"
+            )
             nodes.append(
                 ClientProfileNode(
                     profile_id=profile_id,
@@ -1213,45 +1391,59 @@ async def incy_subscription(
             # never report a fabricated amount of consumed traffic.
             pass
     if kit_subscription:
-        incy_uris = [
-            client_profile_uri_for_node(profile_uri, node)
-            for profile_uri in kit_subscription["uris"]
-            if incy_profile_allowed(
-                profile_uri,
-                node.region,
-                localized_profile_name(node, profile_uri, 0),
-            )
-        ]
+        incy_uris = []
+        seen_profile_ids = set()
+        for index, profile_uri in enumerate(kit_subscription["uris"]):
+            name = profile_name_for_node(node, node_config, profile_uri, index)
+            if incy_profile_allowed(profile_uri, node.region, name):
+                profile_uri = client_profile_uri_for_node(profile_uri, node)
+                profile_key = profile_identity(profile_uri)
+                if profile_key not in seen_profile_ids:
+                    seen_profile_ids.add(profile_key)
+                    incy_uris.append((profile_uri, name))
         if not incy_uris:
-            incy_uris = [uri]
+            uri = client_profile_uri_for_node(uri, node)
+            seen_profile_ids.add(profile_identity(uri))
+            incy_uris = [(uri, profile_name_for_node(node, node_config, uri, 0))]
         app_uris = [
-            normalized_profile_uri(
-                profile_uri,
-                index,
-                localized_profile_name(node, profile_uri, index),
-            )
-            for index, profile_uri in enumerate(incy_uris)
+            normalized_profile_uri(profile_uri, index, name)
+            for index, (profile_uri, name) in enumerate(incy_uris)
         ]
-        offset = len(app_uris)
-        app_uris.extend(
-            normalized_profile_uri(profile["config"], offset + index)
-            for index, profile in enumerate(alternate_profiles)
-            if incy_profile_allowed(
+        for profile in alternate_profiles:
+            if not incy_profile_allowed(
                 profile["config"], profile.get("region"), profile.get("name")
+            ):
+                continue
+            profile_key = profile_identity(profile["config"])
+            if profile_key in seen_profile_ids:
+                continue
+            seen_profile_ids.add(profile_key)
+            app_uris.append(
+                normalized_profile_uri(
+                    profile["config"], len(app_uris), profile.get("name")
+                )
             )
-        )
         body = "\n".join(app_uris) + "\n"
     else:
         uri = client_profile_uri_for_node(uri, node)
-        app_uris = [normalized_profile_uri(uri, 0, localized_profile_name(node, uri, 0))]
-        offset = len(app_uris)
-        app_uris.extend(
-            normalized_profile_uri(profile["config"], offset + index)
-            for index, profile in enumerate(alternate_profiles)
-            if incy_profile_allowed(
+        app_uris = [
+            normalized_profile_uri(uri, 0, profile_name_for_node(node, node_config, uri, 0))
+        ]
+        seen_profile_ids = {profile_identity(uri)}
+        for profile in alternate_profiles:
+            if not incy_profile_allowed(
                 profile["config"], profile.get("region"), profile.get("name")
+            ):
+                continue
+            profile_key = profile_identity(profile["config"])
+            if profile_key in seen_profile_ids:
+                continue
+            seen_profile_ids.add(profile_key)
+            app_uris.append(
+                normalized_profile_uri(
+                    profile["config"], len(app_uris), profile.get("name")
+                )
             )
-        )
         body = "\n".join(
             [
                 f"#profile-title: {profile_title}",
@@ -1287,6 +1479,80 @@ async def incy_subscription(
             "subscription-userinfo": subscription_userinfo,
             "content-disposition": 'inline; filename="freedom-vpn-incy.txt"',
             "cache-control": "no-store",
+        },
+    )
+
+
+@router.get("/import-apps/{token}", include_in_schema=False)
+async def client_import_apps_page(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    await subscription_client_for_token(token, db)
+    safe_token = quote(token, safe="")
+    apps = (
+        (
+            "INCY",
+            "Открыть подписку в INCY",
+            f"/v1/client/import/{safe_token}",
+        ),
+        (
+            "Freedom VPN",
+            "Открыть в Freedom VPN",
+            f"/v1/client/freevpn-import/{safe_token}",
+        ),
+        (
+            "Amnezia VPN",
+            "Выбрать конфигурацию Amnezia VPN",
+            f"/v1/client/amnezia-import/{safe_token}",
+        ),
+        (
+            "V2rayTUN",
+            "Открыть подписку в V2rayTUN",
+            f"/v1/client/v2raytun-import/{safe_token}",
+        ),
+    )
+    buttons = "".join(
+        f'<a class="app-option" href="{html.escape(url, quote=True)}">'
+        f'<span><strong>{html.escape(name)}</strong>'
+        f'<small>{html.escape(description)}</small></span>'
+        "<span class=\"arrow\" aria-hidden=\"true\">&#8594;</span></a>"
+        for name, description, url in apps
+    )
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Импорт конфигурации — Freedom VPN</title>
+  <style>
+    :root {{ color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17212b; background: #f3f6f8; }}
+    * {{ box-sizing: border-box; }}
+    body {{ min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px 16px; }}
+    main {{ width: min(100%, 480px); }}
+    h1 {{ margin: 0; font-size: 26px; line-height: 1.2; }}
+    p {{ margin: 9px 0 22px; color: #53616e; line-height: 1.5; }}
+    .app-list {{ display: grid; gap: 9px; }}
+    .app-option {{ min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 16px; border: 1px solid #d6dfe5; border-left: 4px solid #138c82; border-radius: 8px; background: #fff; color: inherit; text-decoration: none; }}
+    .app-option:hover, .app-option:focus-visible {{ border-color: #138c82; outline: none; }}
+    .app-option strong, .app-option small {{ display: block; }}
+    .app-option strong {{ font-size: 16px; }}
+    .app-option small {{ margin-top: 3px; color: #586774; font-size: 13px; }}
+    .arrow {{ color: #087c72; font-size: 22px; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Импорт конфигурации</h1>
+    <p>Выберите приложение, в которое хотите добавить подписку.</p>
+    <nav class="app-list" aria-label="Приложения для импорта">{buttons}</nav>
+  </main>
+</body>
+</html>""",
+        headers={
+            "cache-control": "no-store",
+            "referrer-policy": "no-referrer",
         },
     )
 
@@ -1450,6 +1716,7 @@ async def client_profile_qr(
             )}
         ] if fallback else []
     profiles.extend(await alternate_client_profiles(db, client, node_config))
+    profiles = deduplicate_profiles(profiles)
     if profile_index < 0 or profile_index >= len(profiles):
         raise HTTPException(status_code=404, detail="VPN profile not found")
     image = qrcode.make(profiles[profile_index]["config"])

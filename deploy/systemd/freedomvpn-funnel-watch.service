@@ -1,0 +1,10 @@
+[Unit]
+Description=Check and recover Freedom VPN public Funnel ingress
+After=network-online.target tailscaled.service docker.service
+Wants=network-online.target tailscaled.service docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/freedman/vpn-service
+ExecStart=/home/freedman/vpn-service/scripts/watch_funnel_public.sh
+TimeoutStartSec=240

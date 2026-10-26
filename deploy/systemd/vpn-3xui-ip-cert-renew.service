@@ -3,5 +3,5 @@ Description=Renew 3x-ui short-lived IP certificate
 
 [Service]
 Type=oneshot
-Environment=THREEXUI_IP_CERT_ADDRESS=89.127.212.239
+EnvironmentFile=-/etc/sysconfig/vpn-3xui-ip-cert-renew
 ExecStart=/usr/local/sbin/renew_3xui_ip_cert.sh

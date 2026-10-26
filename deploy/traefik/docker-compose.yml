@@ -1,0 +1,38 @@
+services:
+  traefik:
+    profiles:
+      - public-relay
+    image: traefik:v3.7.15
+    container_name: freedomvpn-traefik
+    restart: unless-stopped
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    command:
+      - --global.checknewversion=false
+      - --global.sendanonymoususage=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=127.0.0.1:8448
+      - --entrypoints.websecure.proxyprotocol.trustedips=127.0.0.1/32,::1/128
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:-}
+      - --certificatesresolvers.le.acme.storage=/data/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --api.dashboard=false
+      - --log.level=INFO
+      - --accesslog=true
+    volumes:
+      - ./dynamic:/etc/traefik/dynamic:ro
+      - ./data:/data

@@ -124,7 +124,7 @@ class ProviderCodeNotificationTests(IsolatedAsyncioTestCase):
 
 
 class PaidNotificationTests(IsolatedAsyncioTestCase):
-    async def test_paid_client_notifications_include_import_links_without_rkn_warning(self) -> None:
+    async def test_paid_client_notifications_include_one_app_picker_link(self) -> None:
         user = SimpleNamespace(
             id=7,
             email="user@example.com",
@@ -163,7 +163,6 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
             patch.object(notifications, "_send_email", new=AsyncMock()),
             patch.object(notifications, "_send_client_telegram_message", new=AsyncMock(return_value=True)) as send_message,
             patch.object(notifications, "_send_client_email_message", new=AsyncMock(return_value=True)) as send_email,
-            patch("app.services.provider_codes.issue_provider_code", new=AsyncMock(side_effect=RuntimeError("skip"))),
             patch.object(notifications, "write_audit", new=AsyncMock()),
         ):
             await notifications.notify_payment_paid(FakeDB(), payment)
@@ -171,12 +170,14 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
         telegram_text = send_message.await_args.args[1]
         email_text = send_email.await_args.args[2]
         for text in (telegram_text, email_text):
-            self.assertIn("/v1/client/import/", text)
-            self.assertIn("Импортировать конфигурацию в INCY", text)
-            self.assertIn("Откройте ссылку на устройстве с установленным INCY", text)
-            self.assertIn("/v1/client/freevpn-import/", text)
-            self.assertIn("Импортировать конфигурацию в Freedom VPN", text)
-            self.assertIn("Откройте ссылку на устройстве с установленным Freedom VPN", text)
+            self.assertEqual(1, text.count("/v1/client/import-apps/"))
+            self.assertIn("Выбрать приложение для импорта:", text)
+            self.assertNotIn("/v1/client/import/", text)
+            self.assertNotIn("/v1/client/freevpn-import/", text)
+            self.assertNotIn("/v1/client/amnezia-import/", text)
+            self.assertNotIn("/v1/client/v2raytun-import/", text)
+            self.assertNotIn("Импортировать конфигурацию в Freedom VPN", text)
+            self.assertNotIn("Подключение приложения", text)
             self.assertNotIn("Из-за блокировок РКН", text)
             self.assertNotIn("Web-кабинет:", text)
             self.assertIn("Продлить подписку:", text)

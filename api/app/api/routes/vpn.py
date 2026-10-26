@@ -40,6 +40,7 @@ from app.core.cabinet_links import incy_subscription_token
 from app.api.routes.client import (
     alternate_client_profiles,
     client_profile_uri_for_node,
+    deduplicate_profiles,
     kit_all_profiles_for_client,
     localized_profile_name,
     normalized_profile_uri,
@@ -800,6 +801,7 @@ async def get_vpn_client_config(
             }
         ]
     profiles.extend(await alternate_client_profiles(db, client, node_config))
+    profiles = deduplicate_profiles(profiles)
     response_profiles = [
         {
             "index": index,

@@ -447,8 +447,12 @@ def _check_tailscale_host_health() -> list[dict]:
                 "name": str(item.get("name") or item.get("id") or "Tailscale host check"),
                 "status": status,
                 "details": details,
-                "generated_at": generated_at,
+                # If the host stopped producing snapshots, each alert-worker
+                # poll is a new observation of stale monitoring data.
+                "generated_at": None if age_seconds > 360 else generated_at,
             }
+            if item.get("alert") is False:
+                check["alert"] = False
             if item.get("latency_ms") is not None:
                 check["latency_ms"] = item["latency_ms"]
             result.append(check)
@@ -502,12 +506,16 @@ def _check_tailscale_public_tls() -> dict:
             details = "Host snapshot не содержит проверок публичных Funnel relay"
         else:
             passed = sum(item.get("status") == "online" for item in relay_checks)
-            status = "online" if passed == len(relay_checks) else "offline"
+            status = "online" if passed == len(relay_checks) else ("degraded" if passed else "offline")
             details = f"TLS и HTTPS проверены по SNI на relay: {passed}/{len(relay_checks)}"
         return {
+            "id": "tailscale:public-tls",
             "name": "SSL master/site",
             "status": status,
             "details": details,
+            # The grouped public-ingress result is the actionable alert; relay
+            # level TLS probes are diagnostic and can be transiently partial.
+            "alert": False,
             "generated_at": generated_at,
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }

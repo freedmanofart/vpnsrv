@@ -5,7 +5,7 @@
 1. создаёт или обновляет child в Nodes master;
 2. выполняет Probe;
 3. создаёт или обновляет логическую ноду VPN Admin;
-4. привязывает её к VLESS Reality xHTTP inbound;
+4. привязывает её к основному VLESS inbound для provisioning;
 5. определяет страну по публичному IP через HTTPS `ipwho.is`;
 6. выполняет health check.
 
@@ -17,8 +17,8 @@
 - сертификат child действителен и соответствует DNS-имени;
 - на child создан токен `node-sync`;
 - на master создан временно используемый административный API token;
-- VLESS Reality xHTTP inbound создан и известен его числовой ID;
-- известны публичные параметры Reality и xHTTP;
+- основной VLESS inbound создан и известен его числовой ID;
+- известны публичные параметры Reality и выбранного транспорта;
 - `SERVICE_API_TOKEN` VPN API доступен оператору.
 
 Порт панели и порт inbound могут отличаться. `THREEXUI_CHILD_PORT` относится к
@@ -52,7 +52,7 @@ VPN_PUBLIC_HOST=node.example.com
 VPN_PUBLIC_PORT=2453
 
 THREEXUI_INBOUND_ID=8
-VPN_TRANSPORT=xhttp
+VPN_TRANSPORT=xhttp # должен совпадать с type основного inbound
 VPN_VLESS_ENCRYPTION=<значение-encryption-из-inbound>
 VPN_REALITY_SNI=example.org
 VPN_REALITY_PUBLIC_KEY=<public-key>
@@ -80,7 +80,13 @@ python3 scripts/register_3xui_node.py
 ```
 
 `--panel-only` регистрирует только child в master. Повторный обычный запуск
-обновляет записи по имени и конфигурацию VLESS.
+обновляет записи по имени и конфигурацию основного VLESS-профиля.
+
+Дополнительные профили каскада не создаются этим скриптом. После создания
+child-assigned inbound'ов на master добавьте их IDs в `kit_inbound_ids` у
+логической ноды, включите KIT-подписку для нужных клиентов и выполните reconcile.
+Они используют ту же запись клиента; схема и rollout описаны в
+[`cascade-profile-routing.md`](cascade-profile-routing.md).
 
 ## Проверка
 
@@ -93,11 +99,12 @@ curl -fsS -H "Authorization: Bearer $SERVICE_API_TOKEN" \
 Новая нода должна иметь `status=active`, `health_status=online` и регион вида
 `SE|Швеция`. Telegram покажет флаг и название страны автоматически.
 
-После этого выпустите тестовый ключ через VPN Admin или Telegram. URI должен
-содержать публичный порт inbound и параметры `encryption`, `extra`, `fp`,
-`host`, `mode`, `path`, `pbk`, `security`, `sid`, `sni`, `spx`, `type` и
-`x_padding_bytes`. Порт панели в URI не включается. Вручную созданный в 3x-ui
-UUID не управляется приложением и не перевыпускается из личного кабинета.
+После этого выпустите тестовый ключ через VPN Admin или Telegram. Базовый URI
+должен соответствовать основному inbound: публичному порту, `type`, Reality
+SNI/key/short ID и параметрам выбранного транспорта. Порт панели в URI не
+включается. KIT-профили проверяются отдельно для каждого inbound. Вручную
+созданный в 3x-ui UUID не управляется приложением и не перевыпускается из
+личного кабинета.
 
 Диагностика:
 

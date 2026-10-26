@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import subprocess
 import tempfile
@@ -21,7 +22,13 @@ HEALTH_FILE = Path(
             "/home/freedman/projects/backup/vpn-service/tailscale-health.json",
     )
 )
-PUBLIC_RESOLVERS = ("1.1.1.1", "8.8.8.8")
+# Tailscale split DNS resolves this name to the master's private tailnet IP,
+# while the public Funnel addresses are returned by a public resolver. Cloudflare
+# DNS is periodically blocked from Russian networks, so use Google DNS and a
+# short cache of previously verified public answers as a fallback.
+DNS_RESOLVERS = (("8.8.8.8", "8.8.8.8"),)
+RELAY_IP_CACHE_FILE = HEALTH_FILE.with_name("tailscale-health-relay-ips.json")
+RELAY_IP_CACHE_MAX_AGE = 900
 PUBLIC_ROUTES = (
     ("/", "200"),
     ("/cabinet", "200"),
@@ -48,10 +55,21 @@ def run(command: list[str], timeout: float = 8) -> tuple[int, str, str, float]:
         return 1, "", str(exc), round((time.monotonic() - started) * 1000, 2)
 
 
-def add(checks: list[dict], check_id: str, name: str, status: str, details: str, latency=None):
+def add(
+    checks: list[dict],
+    check_id: str,
+    name: str,
+    status: str,
+    details: str,
+    latency=None,
+    *,
+    alert: bool = True,
+):
     item = {"id": check_id, "name": name, "status": status, "details": details[:700]}
     if latency is not None:
         item["latency_ms"] = latency
+    if not alert:
+        item["alert"] = False
     checks.append(item)
 
 
@@ -62,6 +80,26 @@ def parse_json_output(output: str):
         raise json.JSONDecodeError("JSON object not found", output, 0)
     payload, _ = json.JSONDecoder().raw_decode(output[start:])
     return payload
+
+
+def cached_relay_ips() -> tuple[set[str], int | None]:
+    try:
+        payload = json.loads(RELAY_IP_CACHE_FILE.read_text(encoding="utf-8"))
+        generated_at = datetime.fromisoformat(str(payload["generated_at"]).replace("Z", "+00:00"))
+        if generated_at.tzinfo is None:
+            generated_at = generated_at.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((datetime.now(timezone.utc) - generated_at).total_seconds()))
+        if age_seconds > RELAY_IP_CACHE_MAX_AGE:
+            return set(), age_seconds
+        addresses = {
+            value for value in payload.get("addresses", [])
+            if isinstance(value, str)
+            and ipaddress.ip_address(value).version == 4
+            and ipaddress.ip_address(value).is_global
+        }
+        return addresses, age_seconds
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return set(), None
 
 
 def service_check(checks: list[dict], unit: str, name: str, check_id: str | None = None):
@@ -207,6 +245,7 @@ def main() -> int:
             status,
             f"UDP={str(udp).lower()}, preferred DERP region={derp or 'none'}",
             latency,
+            alert=status != "degraded",
         )
 
     checks.append(
@@ -219,23 +258,55 @@ def main() -> int:
 
     addresses: set[str] = set()
     resolver_errors = []
-    for resolver in PUBLIC_RESOLVERS:
-        dig_code, dig_out, dig_err, dig_ms = run(
-            ["dig", "+short", "A", HOST, f"@{resolver}", "+time=2", "+tries=1"],
-            timeout=4,
-        )
-        found = {line.strip() for line in dig_out.splitlines() if line.strip()}
+    for resolver_name, resolver_address in DNS_RESOLVERS:
+        command = ["dig", "+short", "+time=2", "+tries=1", HOST, "A"]
+        if resolver_address:
+            command.append(f"@{resolver_address}")
+        dig_code, dig_out, dig_err, dig_ms = run(command, timeout=4)
+        found = set()
+        for line in dig_out.splitlines():
+            value = line.strip()
+            try:
+                address = ipaddress.ip_address(value)
+            except ValueError:
+                continue
+            if address.version == 4 and address.is_global:
+                found.add(value)
         if dig_code == 0 and found:
             addresses.update(found)
-            details = f"{resolver} resolved {len(found)} A record(s)"
+            details = f"{resolver_name} resolved {len(found)} public A record(s)"
             status = "online"
         else:
-            details = f"{resolver} DNS lookup failed: {dig_err or dig_out or 'no A records'}"
+            details = f"{resolver_name} lookup failed: {dig_err or dig_out or 'no public A records'}"
             status = "offline"
-            resolver_errors.append(resolver)
-        add(checks, f"tailscale:dns:{resolver}", f"Public DNS {resolver}", status, details, dig_ms)
+            resolver_errors.append(resolver_name)
+        add(
+            checks,
+            f"tailscale:dns:{resolver_name}",
+            f"Public DNS {resolver_name} for Funnel",
+            status,
+            details,
+            dig_ms,
+            alert=False,
+        )
+
+    using_cached_addresses = False
+    cache_age_seconds = None
+    if addresses:
+        RELAY_IP_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        cache_payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "addresses": sorted(addresses),
+        }
+        cache_temp = RELAY_IP_CACHE_FILE.with_suffix(".tmp")
+        cache_temp.write_text(json.dumps(cache_payload) + "\n", encoding="utf-8")
+        os.replace(cache_temp, RELAY_IP_CACHE_FILE)
+    else:
+        addresses, cache_age_seconds = cached_relay_ips()
+        using_cached_addresses = bool(addresses)
 
     if addresses:
+        address_health = []
         for address in sorted(addresses):
             started = time.monotonic()
             try:
@@ -273,7 +344,9 @@ def main() -> int:
                 status,
                 details,
                 round((time.monotonic() - started) * 1000, 2),
+                alert=False,
             )
+            relay_ok = status == "online"
             for path, expected_code in PUBLIC_ROUTES:
                 started = time.monotonic()
                 try:
@@ -316,14 +389,51 @@ def main() -> int:
                     status,
                     details,
                     round((time.monotonic() - started) * 1000, 2),
+                    alert=False,
                 )
+                relay_ok = relay_ok and status == "online"
+            address_health.append((address, relay_ok))
+        healthy_relays = sum(1 for _, healthy in address_health if healthy)
+        if healthy_relays == len(address_health) and not using_cached_addresses:
+            ingress_status = "online"
+        elif healthy_relays:
+            ingress_status = "degraded"
+        else:
+            ingress_status = "offline"
+        unhealthy_relays = [address for address, healthy in address_health if not healthy]
+        ingress_details = (
+            f"All public routes passed through {healthy_relays}/{len(address_health)} relay IPs"
+        )
+        if unhealthy_relays:
+            ingress_details += f"; failed relay IPs: {', '.join(unhealthy_relays)}"
+        if using_cached_addresses:
+            ingress_details += (
+                f"; resolver failed, probing cached answers ({cache_age_seconds}s old)"
+            )
+        add(
+            checks,
+            "tailscale:public-ingress",
+            "Public Funnel ingress",
+            ingress_status,
+            ingress_details,
+            alert=False,
+        )
     else:
         add(
             checks,
             "tailscale:public-relays",
             "Public Funnel relays",
             "offline",
-            f"No A records resolved via {', '.join(PUBLIC_RESOLVERS)}",
+            "System DNS returned no public A records for the Funnel hostname",
+            alert=False,
+        )
+        add(
+            checks,
+            "tailscale:public-ingress",
+            "Public Funnel ingress",
+            "offline",
+            "Cannot probe public routes because system DNS returned no public A records",
+            alert=False,
         )
 
     payload = {

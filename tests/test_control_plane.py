@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 import httpx
@@ -1576,6 +1577,31 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual("revoked", trial_row["status"])
         self.assertEqual("expired", trial_row["trial_subscription_status"])
 
+    async def test_client_import_apps_page_links_to_supported_clients(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            token = incy_subscription_token(client.id, client.expires_at)
+
+        response = await self.client.get(f"/v1/client/import-apps/{token}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertIn('lang="ru"', response.text)
+        self.assertIn("Импорт конфигурации", response.text)
+        for route in (
+            f"/v1/client/import/{token}",
+            f"/v1/client/freevpn-import/{token}",
+            f"/v1/client/amnezia-import/{token}",
+            f"/v1/client/v2raytun-import/{token}",
+        ):
+            self.assertIn(route, response.text)
+        self.assertEqual("no-store", response.headers["cache-control"])
+        self.assertEqual("no-referrer", response.headers["referrer-policy"])
+
+    async def test_client_import_apps_page_rejects_invalid_token(self) -> None:
+        response = await self.client.get("/v1/client/import-apps/not-a-token")
+
+        self.assertEqual(404, response.status_code)
+
     async def test_incy_telegram_import_bridge_shows_android_launcher(self) -> None:
         async with self.session_factory() as db:
             client = await db.get(VPNClient, self.client_id)
@@ -1652,6 +1678,76 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             response.headers["premium-url"],
         )
         self.assertNotIn("announce", response.headers)
+
+    async def test_incy_subscription_labels_and_deduplicates_cascade_profiles(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            node = await db.get(VPNNode, self.node_id)
+            node.region = "RU|Россия"
+            token = incy_subscription_token(client.id, client.expires_at)
+            await db.commit()
+
+        usa_xhttp = (
+            "vless://uuid@176.108.250.142:443?type=xhttp&security=reality"
+            "&sni=us.example.test#US-XHTTP-vpn-1"
+        )
+        usa_grpc = (
+            "vless://uuid@176.108.250.142:443?type=grpc&security=reality"
+            "&sni=us-grpc.example.test#US-gRPC-vpn-1"
+        )
+        finland_reality = (
+            "vless://uuid@176.108.250.142:443?type=tcp&security=reality"
+            "&sni=fi.example.test#FI-REALITY-vpn-1"
+        )
+        finland_xhttp = (
+            "vless://uuid@176.108.250.142:443?type=xhttp&security=reality"
+            "&sni=fi-xhttp.example.test#FI-XHTTP-vpn-1"
+        )
+        kit_result = {
+            "uris": [usa_xhttp, usa_grpc, finland_reality],
+            "headers": {},
+            "content_type": "text/plain",
+        }
+        alternates = [
+            {
+                "config": usa_grpc.replace(
+                    "176.108.250.142", "203.0.113.20"
+                ).replace("US-gRPC-vpn-1", "🇺🇸 США (gRPC)"),
+                "name": "🇺🇸 США (gRPC)",
+                "region": "RU|Россия",
+            },
+            {
+                "config": finland_xhttp.replace(
+                    "176.108.250.142", "203.0.113.20"
+                ),
+                "name": "🇫🇮 Финляндия (xHTTP)",
+                "region": "RU|Россия",
+            },
+        ]
+        with (
+            patch(
+                "app.api.routes.client.kit_subscription_for_client",
+                new=AsyncMock(return_value=kit_result),
+            ),
+            patch(
+                "app.api.routes.client.alternate_client_profiles",
+                new=AsyncMock(return_value=alternates),
+            ),
+        ):
+            response = await self.client.get(f"/v1/client/subscription/{token}")
+
+        self.assertEqual(200, response.status_code, response.text)
+        entries = [line for line in response.text.splitlines() if line.startswith("vless://")]
+        labels = [unquote(urlsplit(line).fragment) for line in entries]
+        self.assertCountEqual(
+            labels,
+            [
+                "🇺🇸 США (xHTTP)",
+                "🇺🇸 США (gRPC)",
+                "🇫🇮 Финляндия (Reality)",
+                "🇫🇮 Финляндия (xHTTP)",
+            ],
+        )
 
     async def test_incy_subscription_reports_traffic_usage(self) -> None:
         traffic_limit = 250 * 1024**3

@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect detailed Freedom VPN Tailscale and Funnel health
+After=network-online.target tailscaled.service docker.service
+Wants=network-online.target tailscaled.service docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/freedman/vpn-service
+ExecStart=/home/freedman/vpn-service/scripts/check_tailscale_health.py
+TimeoutStartSec=240

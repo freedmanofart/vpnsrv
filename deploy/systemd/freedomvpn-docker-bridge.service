@@ -1,0 +1,13 @@
+[Unit]
+Description=Enable Docker default bridge for local mail relay
+After=docker.service
+Requires=docker.service
+Before=postfix.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ip link set docker0 up
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

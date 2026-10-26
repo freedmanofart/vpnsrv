@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh detailed Freedom VPN public health every three minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=3min
+AccuracySec=10s
+Unit=vpn-tailscale-health.service
+
+[Install]
+WantedBy=timers.target

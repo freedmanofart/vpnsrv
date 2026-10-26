@@ -1,17 +1,18 @@
-# 3x-ui master и child-ноды
+# Главная и дочерние ноды 3x-ui
 
 ## Текущая схема
 
 - основной сервер запускает 3x-ui как master;
 - удалённые 3x-ui подключаются к master как child nodes;
 - VPN API обращается только к REST API master;
-- приложение выдаёт один тип ключа: VLESS Reality xHTTP без flow;
-- Xray, node-agent и Xray gRPC в этом репозитории отсутствуют.
+- VPN API хранит один основной inbound для provisioning клиента;
+- дополнительные протоколы того же клиента подключаются к child inbound'ам через
+  `kit_inbound_ids` и публикуются в KIT-подписке.
 
-В VPN Admin сейчас используется одна тестовая локация — `sweden`, регион
-`SE|Швеция`. Исторические логические ноды отключены: они остаются в PostgreSQL
-для связности старых подписок и аудита, но не возвращаются через `/vpn/nodes` и
-не показываются в Telegram.
+Продукционные страны, каскадные выходы и список профилей меняются вместе с
+состоянием master/child и настройками VPN API. Исторические статусы и старые
+инструкции не подтверждают текущее состояние серверов. Целевая схема RU-входа и
+каскадных профилей описана в [`cascade-profile-routing.md`](cascade-profile-routing.md).
 
 ## Токены
 
@@ -35,7 +36,7 @@ THREEXUI_VERIFY_TLS=true
 полноадминистративными, не публикуйте API панели и ограничьте источник запросов
 сетевыми правилами.
 
-## Адреса панели и inbound
+## Адреса панели и входящие подключения
 
 Не смешивайте два разных соединения:
 
@@ -50,7 +51,7 @@ path панели никогда не включается в VLESS URI. Пор�
 Режим `skip` допустим только для краткой диагностики. Закрытый base path,
 токены и Reality private key не фиксируются в Git.
 
-## Связь master с child
+## Связь главной и дочерней нод
 
 Master подключается к child только по внешнему HTTPS-адресу. Сертификат должен
 быть действителен, его цепочка должна быть доверена master, а DNS-имя —
@@ -68,10 +69,10 @@ curl -vk --max-time 10 https://<child-host>:<panel-port>/<base-path>/panel/api/s
 неверный base path, `EOF` — ошибку listener/reverse proxy, timeout — отсутствие
 внешнего маршрута или недоступный порт.
 
-## SSL на IP child-ноды
+## SSL на IP дочерней ноды
 
-Если child-панель опубликована по IP, 3x-ui использует short-lived
-Let's Encrypt certificate for IP Address. Такой сертификат живёт примерно 6
+Если панель дочерней ноды опубликована по IP, 3x-ui использует короткоживущий
+сертификат Let's Encrypt для IP-адреса. Такой сертификат действует примерно 6
 дней, поэтому его нужно регулярно перевыпускать и переустанавливать в пути
 панели:
 
@@ -87,7 +88,9 @@ openssl x509 -in /root/cert/ip/fullchain.pem -noout -subject -issuer -dates
 systemctl status x-ui --no-pager
 ```
 
-Автоматический renew выполняет node-скрипт:
+Автоматический renew выполняет node-скрипт. На каждой ноде задайте её IP и
+фактический каталог сертификата в `/etc/sysconfig/vpn-3xui-ip-cert-renew`;
+systemd timer запускает принудительное обновление каждые 3 дня:
 
 ```bash
 sudo THREEXUI_IP_CERT_ADDRESS=89.127.212.239 \
@@ -110,6 +113,8 @@ sudo THREEXUI_IP_CERT_ADDRESS=89.127.212.239 \
 install -m 0755 deploy/node/renew_3xui_ip_cert.sh /usr/local/sbin/renew_3xui_ip_cert.sh
 cp deploy/systemd/vpn-3xui-ip-cert-renew.service /etc/systemd/system/
 cp deploy/systemd/vpn-3xui-ip-cert-renew.timer /etc/systemd/system/
+printf '%s\n' 'THREEXUI_IP_CERT_ADDRESS=<node-ip>' 'THREEXUI_IP_CERT_DIR=/root/cert/ip' > /etc/sysconfig/vpn-3xui-ip-cert-renew
+chmod 0600 /etc/sysconfig/vpn-3xui-ip-cert-renew
 systemctl daemon-reload
 systemctl enable --now vpn-3xui-ip-cert-renew.timer
 systemctl list-timers vpn-3xui-ip-cert-renew.timer --all
@@ -126,21 +131,35 @@ systemctl list-timers vpn-3xui-ip-cert-renew.timer --all
 journalctl -u vpn-3xui-ip-cert-renew.service -n 100 --no-pager
 ```
 
-## Inbound и логическая нода
+## Основные и дополнительные входящие подключения
 
-После успешного Probe создайте или импортируйте VLESS Reality xHTTP inbound и
-назначьте его child. Для VPN Admin требуются:
+После успешного Probe создайте или импортируйте основной inbound и назначьте его
+child. Для базового профиля VPN Admin требуются:
 
 - числовой inbound ID;
 - публичные host и port;
 - Reality SNI, public key, short ID и spiderX;
-- VLESS ML-KEM encryption из inbound;
+- VLESS encryption из inbound;
 - xHTTP path, mode, host и диапазон padding.
 
-Регистрация выполняется скриптом из
+Для дополнительных вариантов создаются отдельные child-assigned inbound'ы. Все
+они должны содержать клиента с тем же UUID и email `vpn-<client_id>`. Добавьте их
+числовые IDs в `kit_inbound_ids`, затем выполните reconciliation активных
+клиентов. `kit_subscription_all_clients=true` включает выдачу KIT-подписки всем
+клиентам этой логической ноды; иначе используйте `kit_subscription_client_ids`.
+KIT-ссылка считается доступной только когда панель возвращает минимум два
+inbound'а для клиента.
+
+Профили должны создаваться на master с назначением child. Не редактируйте только
+child config: следующая синхронизация master перезапишет локальное состояние.
+Для нескольких TCP-профилей на одном публичном 443 нужен SNI-мультиплексор на
+child, уникальные SNI и свободные loopback-порты. Публичный адрес и порт должны
+быть одинаково отражены в host groups 3x-ui, подписке и проверках.
+
+Регистрация новой дочерней ноды выполняется скриптом из
 [`add-3x-ui-node.md`](add-3x-ui-node.md).
 
-## Локальный API master
+## Локальный API главной ноды
 
 Если master слушает только loopback, API-контейнер использует локальный proxy
 `vpn-threexui-proxy.service`. Он связывает адрес Docker bridge с loopback-портом
@@ -151,7 +170,7 @@ docker inspect vpn-api --format '{{range .NetworkSettings.Networks}}{{.Gateway}}
 sudo systemctl status vpn-threexui-proxy.service --no-pager
 ```
 
-Proxy работает независимо от процесса x-ui и остаётся на Docker bridge во время
+Прокси работает независимо от процесса x-ui и остаётся на Docker bridge во время
 перезапуска панели. Это важно, потому что команда `x-ui restart` может выполнять
 отдельные stop/start и не перезапускает зависимые systemd units. Если 3x-ui
 online, но создание клиента возвращает `All connection attempts failed`,
@@ -167,7 +186,7 @@ ss -lntp | grep 41026
 порта 3x-ui требует синхронно обновить обе стороны `ExecStart` и `api_address`
 логической ноды.
 
-## SSH proxy для операторского доступа к панели
+## SSH-прокси для доступа оператора к панели
 
 Панель master 3x-ui не должна торчать наружу как публичный HTTP-сервис. Для
 ручной проверки клиентов, inbound и child-нод оператор открывает локальный

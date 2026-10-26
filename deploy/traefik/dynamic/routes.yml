@@ -1,0 +1,39 @@
+http:
+  routers:
+    freedomvpn:
+      rule: >-
+        Host(`site.176.108.250.142.traefik.me`) ||
+        Host(`cabinet.176.108.250.142.traefik.me`) ||
+        Host(`admin.176.108.250.142.traefik.me`)
+      entryPoints:
+        - websecure
+      service: freedomvpn-master
+      middlewares:
+        - security-headers
+        - admin-path
+      tls:
+        certResolver: le
+
+  middlewares:
+    admin-path:
+      redirectRegex:
+        regex: ^https://admin\.176\.108\.250\.142\.traefik\.me/$
+        replacement: https://admin.176.108.250.142.traefik.me/admin
+        permanent: false
+    security-headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: strict-origin-when-cross-origin
+
+  services:
+    freedomvpn-master:
+      loadBalancer:
+        passHostHeader: false
+        serversTransport: master-tls
+        servers:
+          - url: https://freedomvpn.taile485ac.ts.net
+
+  serversTransports:
+    master-tls:
+      serverName: freedomvpn.taile485ac.ts.net

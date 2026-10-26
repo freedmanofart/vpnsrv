@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+ExecStartPre=/home/freedman/vpn-service/scripts/wait_for_tailscale_backend.sh
 Environment=TAILSCALE_CERT_DOMAIN=freedomvpn.taile485ac.ts.net
 Environment=TAILSCALE_CERT_DIR=/etc/ssl/tailscale
 ExecStart=/home/freedman/vpn-service/scripts/renew_tailscale_cert.sh

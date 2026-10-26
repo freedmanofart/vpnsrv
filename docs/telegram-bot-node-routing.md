@@ -61,7 +61,7 @@ ssh root@89.127.212.239 \
 
 Код `302` для корня `https://api.telegram.org` означает, что TLS и HTTP работают.
 
-## Включение маршрута через child
+## Включение маршрута через дочернюю ноду
 
 ### 1. Проверить Tailscale и socat
 
@@ -85,7 +85,7 @@ ss -ltn 'sport = :18443'
 Ожидаемые адреса для текущей конфигурации: `100.117.14.51` на child и
 `172.17.0.1` на master.
 
-### 2. Настроить upstream на child
+### 2. Настроить вышестоящее соединение на дочерней ноде
 
 Создать `/etc/systemd/system/telegram-api-upstream.service`:
 
@@ -119,7 +119,7 @@ systemctl is-enabled telegram-api-upstream.service
 systemctl is-active telegram-api-upstream.service
 ```
 
-### 3. Настроить relay на master
+### 3. Настроить ретранслятор на главной ноде
 
 Создать `/etc/systemd/system/telegram-api-relay.service`:
 
@@ -160,7 +160,7 @@ curl -sS --connect-timeout 8 --max-time 12 \
 
 До изменения контейнеров последняя команда должна вернуть `302`.
 
-### 4. Направить API и бот на локальное реле
+### 4. Направить API и бота на локальный ретранслятор
 
 В `/home/freedman/vpn-service/docker-compose.yml` добавить в сервисы `api` и
 `bot`:

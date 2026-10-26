@@ -1,6 +1,6 @@
 # Интеграция с INCY
 
-Backend выдаёт подписку для INCY по адресу:
+Серверная часть выдаёт подписку для INCY по адресу:
 
 ```text
 /v1/client/subscription/<подписанный-токен>
@@ -20,12 +20,12 @@ Backend выдаёт подписку для INCY по адресу:
 API `/vpn/clients/{client_id}/config` дополнительно возвращает:
 
 - `incy_subscription_url` — URL подписки;
-- `incy_import_url` — готовый deep link `incy://import/...`.
+- `incy_import_url` — готовая ссылка-переход `incy://import/...`.
 - `incy_telegram_import_url` — HTTPS-переходник для кнопки в Telegram. Telegram
   не принимает произвольные custom-scheme URL в `InlineKeyboardButton`, поэтому
   переходник показывает кнопку с Android `intent://` на `incy://import/...`.
 
-Deep link используется в web-кабинете, а HTTPS-переходник — в Telegram-боте. Для приложения
+Ссылка-переход используется в веб-кабинете, а HTTPS-переходник — в Telegram-боте. Для приложения
 добавлены официальные ссылки INCY для iOS, Android, Windows, macOS, Linux,
 Android TV и Apple TV.
 
@@ -40,20 +40,34 @@ Content-Type: application/json
 {"token":"<signed-token>"}
 ```
 
-Backend проверяет токен, перепривязывает текущее устройство к владельцу
+Серверная часть проверяет токен, перепривязывает текущее устройство к владельцу
 подписки и возвращает `device_id`, `subscription_id` и `expires_at`. После этого
 INCY повторяет `GET /v1/client/profile`; успешным импорт считается только после
 получения оплаченного профиля с `trial_id: null`.
 
-## Текущее состояние профилей
+## Профили и допустимые транспорты
 
-В репозитории и в текущей схеме provisioning реально настроен один профиль
-Швеции: VLESS Reality xHTTP. Он выдаётся пользователю и импортируется через
-INCY.
+Подписка может содержать несколько профилей для одного клиента. Это не разные
+пользователи: у профилей один UUID/email `vpn-<client_id>`, но отдельные
+inbound, транспорт, SNI и параметры Reality. Master 3x-ui остаётся источником
+конфигурации; VPN API прикрепляет клиента к дополнительным inbound'ам через
+`kit_inbound_ids`, а существующие записи заполняются reconciliation.
 
-Профили gRPC, VLESS Vision и Hysteria2 нельзя создать только изменением URL:
-для них нужны отдельные рабочие inbounds в 3x-ui, публичные параметры Reality
-или TLS, а для Hysteria2 — серверная авторизация. После создания этих inbounds
-нужно добавить их provisioning в `api/app/services/threexui.py` и
-`api/app/services/provisioning.py`, затем включить ссылки в тело INCY-подписки.
-До этого они намеренно не показываются как рабочие подключения.
+Транспорт определяется по URI, а не по подписи. Для RU-профилей фильтр Incy
+разрешает только реально поддерживаемые VLESS Reality/TCP, VLESS xHTTP Reality,
+VLESS gRPC Reality и уже разрешённые конфигурацией Hysteria2/WebSocket-профили.
+Подмена названия не превращает неподдерживаемый URI в допустимый. Подписи
+строятся по имени inbound'а и должны содержать страну и фактический транспорт,
+например `🇺🇸 США (gRPC)` или `🇫🇮 Финляндия (xHTTP)`.
+
+В каскадной схеме страны обозначают выход, а протокол в скобках — входной
+транспорт клиента. Поэтому Reality, xHTTP и gRPC для одной страны маршрутизируются
+через один и тот же country-specific outbound. Для Финляндии предоставленный
+upstream URI — только xHTTP Reality; его используют как выход для всех трёх
+клиентских входов. Не следует генерировать из него несуществующие upstream
+точки выхода Reality/gRPC.
+
+Профили публикуются только после создания соответствующих child-assigned
+inbound'ов на master, настройки SNI/портов и проверки исходящего маршрута.
+См. [`cascade-profile-routing.md`](cascade-profile-routing.md) и
+[`3x-ui-master.md`](3x-ui-master.md).

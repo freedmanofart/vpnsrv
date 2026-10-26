@@ -56,18 +56,11 @@ def _user_cabinet_url(user: User | None, path: str = "") -> str:
     return f"{base}{route}{separator}tg={telegram_cabinet_link_token(user.id)}{marker}{fragment}"
 
 
-def _incy_import_url(client: VPNClient | None) -> str | None:
+def _client_import_apps_url(client: VPNClient | None) -> str | None:
     if client is None or client.status != "active":
         return None
     token = incy_subscription_token(client.id, client.expires_at)
-    return f"{settings.public_base_url.rstrip('/')}/v1/client/import/{token}"
-
-
-def _freevpn_import_url(client: VPNClient | None) -> str | None:
-    if client is None or client.status != "active":
-        return None
-    token = incy_subscription_token(client.id, client.expires_at)
-    return f"{settings.public_base_url.rstrip('/')}/v1/client/freevpn-import/{token}"
+    return f"{settings.public_base_url.rstrip('/')}/v1/client/import-apps/{token}"
 
 
 async def _telegram_destinations(db: AsyncSession) -> list[int | str]:
@@ -399,8 +392,7 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
                 VPNClient.status == "active",
             )
         )
-    incy_import_url = _incy_import_url(client)
-    freevpn_import_url = _freevpn_import_url(client)
+    import_apps_url = _client_import_apps_url(client)
     card = await _payment_card(db, payment, title="✅ Оплата Freedom VPN подтверждена")
     await _send_telegram_message(db, card)
     await _send_email(db, f"Оплата Freedom VPN подтверждена #{payment.id}", card)
@@ -409,55 +401,19 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
     if user is not None:
         plan_name = plan.name if plan else "Freedom VPN"
         expires = f"\nДействует до: {subscription.expires_at} UTC" if subscription else ""
-        incy_text = ""
-        if incy_import_url:
-            incy_text = (
-                "\n\n📲 Импортировать конфигурацию в INCY:\n"
-                f"{incy_import_url}\n"
-                "Откройте ссылку на устройстве с установленным INCY."
-            )
-        freevpn_text = ""
-        if freevpn_import_url:
-            freevpn_text = (
-                "\n\n📲 Импортировать конфигурацию в Freedom VPN:\n"
-                f"{freevpn_import_url}\n"
-                "Откройте ссылку на устройстве с установленным Freedom VPN."
-            )
-        provider_code_text = ""
-        try:
-            # The paid notification is the primary delivery for a new app device.
-            # Suppress the provider-code service's standalone notification here;
-            # the code is included in both client messages below instead.
-            from app.services.provider_codes import issue_provider_code
-
-            issued_code = await issue_provider_code(
-                db,
-                user,
-                ttl_minutes=settings.cabinet_email_code_ttl_minutes,
-                actor_type="payment",
-                actor_id=str(payment.id),
-                notify=False,
-            )
-            provider_code_text = (
-                "\n\n📱 Подключение приложения\n"
-                f"Код: {issued_code.code}\n"
-                f"Имя устройства: {issued_code.device_name}\n"
-                f"Код действует {settings.cabinet_email_code_ttl_minutes} мин.\n"
-                "В приложении выберите «Добавить» → «Провайдер» и введите оба значения."
-            )
-        except Exception:
-            logger.exception(
-                "provider_code_for_paid_notification_failed",
-                extra={"event_type": "provider_code_for_paid_notification_failed", "payment_id": payment.id},
+        import_apps_text = ""
+        if import_apps_url:
+            import_apps_text = (
+                "\n\n📲 Выбрать приложение для импорта:\n"
+                f"{import_apps_url}\n"
+                "Откройте ссылку на устройстве и выберите приложение."
             )
         client_text = (
             "✅ Оплата Freedom VPN подтверждена.\n\n"
             f"Тариф: {plan_name}\n"
             f"Сумма: {payment.amount:g} {payment.currency}"
             f"{expires}\n\n"
-            f"{provider_code_text}"
-            f"{incy_text}"
-            f"{freevpn_text}"
+            f"{import_apps_text}"
             "\n\n"
             f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}\n\n"
             "VPN-ключ и статус подписки доступны в web-кабинете."

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.admin import health_dashboard
+from app.core.config import settings
 from app.db.models.admin_setting import AdminSetting
 from app.db.models.audit import AuditLog
 from app.db.session import AsyncSessionLocal, engine
@@ -20,10 +22,16 @@ from app.services.notifications import send_admin_telegram_message
 
 logger = logging.getLogger(__name__)
 HEALTH_KEY_PREFIX = "admin_alert.health."
+HEALTH_PENDING_KEY_PREFIX = "admin_alert.health_pending."
 AUDIT_CURSOR_KEY = "admin_alert.audit_cursor"
 ADVISORY_LOCK_KEY = 846202607
 MAX_AUDIT_ROWS_PER_PASS = 100
 SUPPRESSED_AUDIT_ACTIONS = frozenset({"lifecycle.cycle"})
+HEALTH_TRANSITION_CONFIRMATIONS = 2
+
+
+def _admin_dashboard_link() -> str:
+    return f"{settings.public_base_url.rstrip('/')}/admin"
 
 
 def _clean(value: object, limit: int = 350) -> str:
@@ -81,35 +89,108 @@ def _split_message(title: str, lines: list[str], max_chars: int = 3900) -> list[
 
 async def notify_health_transitions(db: AsyncSession, checks: list[dict]) -> None:
     changes: list[tuple[dict, str | None]] = []
-    to_save: list[tuple[str, str]] = []
+    state_updates: dict[str, str] = {}
+    pending_updates: dict[str, str | None] = {}
     for check in checks:
         status = str(check.get("status") or "degraded")
         if status not in {"online", "degraded", "offline"}:
             status = "degraded"
             check = {**check, "status": status}
         key = _health_key(check)
+        pending_key = HEALTH_PENDING_KEY_PREFIX + key.removeprefix(HEALTH_KEY_PREFIX)
         previous = await _setting(db, key)
         old_status = previous.value if previous is not None else None
-        if old_status != status:
-            to_save.append((key, status))
-            if status != "online" or old_status not in {None, "online"}:
-                changes.append((check, old_status))
+        pending = await _setting(db, pending_key)
+
+        # Per-relay and optional diagnostic checks remain visible in the health
+        # dashboard, but their grouped check is the one that drives Telegram.
+        if check.get("alert") is False:
+            if old_status != status:
+                state_updates[key] = status
+            pending_updates[pending_key] = None
+            continue
+
+        if old_status == status:
+            pending_updates[pending_key] = None
+            continue
+
+        pending_count = 0
+        sample_marker = check.get("generated_at")
+        if hasattr(sample_marker, "isoformat"):
+            sample_marker = sample_marker.isoformat()
+        elif sample_marker is not None:
+            sample_marker = str(sample_marker)
+        pending_data = {}
+        if pending is not None:
+            try:
+                pending_data = json.loads(pending.value)
+                if isinstance(pending_data, dict) and pending_data.get("status") == status:
+                    pending_count = max(0, int(pending_data.get("count", 0)))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pending_data = {}
+                pending_count = 0
+        if not (
+            pending_count > 0
+            and sample_marker is not None
+            and pending_data.get("sample_marker") == sample_marker
+        ):
+            pending_count += 1
+
+        # A first online sample establishes the baseline silently. Every
+        # failure, degradation, or recovery transition needs two matching
+        # dashboard samples so a single timeout cannot page the operators.
+        if old_status is None and status == "online":
+            state_updates[key] = status
+            pending_updates[pending_key] = None
+        elif pending_count < HEALTH_TRANSITION_CONFIRMATIONS:
+            pending_updates[pending_key] = json.dumps(
+                {"status": status, "count": pending_count, "sample_marker": sample_marker},
+                separators=(",", ":"),
+            )
+        else:
+            changes.append((check, old_status))
+            state_updates[key] = status
+            pending_updates[pending_key] = None
 
     if changes:
-        alert_keys = {_health_key(check) for check, _ in changes}
         messages = _split_message("🚨 Freedom VPN: изменение health-статуса", _health_alert_lines(changes))
+        if messages:
+            messages[0] += f"\n\nАдминка: {_admin_dashboard_link()}"
         delivered = True
         for message in messages:
             if not await send_admin_telegram_message(db, message):
                 delivered = False
                 break
         if not delivered:
-            # Keep failing transitions pending so the next timer run retries them.
-            to_save = [(key, status) for key, status in to_save if key not in alert_keys]
+            # Keep confirmed transitions pending so the next timer run retries
+            # delivery instead of losing an alert.
+            for check, _ in changes:
+                key = _health_key(check)
+                state_updates.pop(key, None)
+                pending_key = HEALTH_PENDING_KEY_PREFIX + key.removeprefix(HEALTH_KEY_PREFIX)
+                pending_updates[pending_key] = json.dumps(
+                    {
+                        "status": check.get("status") or "degraded",
+                        "count": HEALTH_TRANSITION_CONFIRMATIONS,
+                        "sample_marker": (
+                            check.get("generated_at").isoformat()
+                            if hasattr(check.get("generated_at"), "isoformat")
+                            else check.get("generated_at")
+                        ),
+                    },
+                    separators=(",", ":"),
+                )
 
-    for key, status in to_save:
+    for key, status in state_updates.items():
         await _save_setting(db, key, status)
-    if to_save:
+    for key, value in pending_updates.items():
+        if value is None:
+            item = await _setting(db, key)
+            if item is not None:
+                await db.delete(item)
+        else:
+            await _save_setting(db, key, value)
+    if state_updates or pending_updates:
         await db.commit()
 
 
@@ -166,6 +247,8 @@ async def notify_audit_events(db: AsyncSession) -> int:
     if notification_rows:
         lines = [_audit_event_line(row) for row in notification_rows]
         messages = _split_message("📋 Freedom VPN: события сервиса", lines, max_chars=3900)
+        if messages:
+            messages[0] += f"\n\nАдминка: {_admin_dashboard_link()}"
         for message in messages:
             if not await send_admin_telegram_message(db, message):
                 logger.error("admin_audit_alert_delivery_failed cursor=%s", cursor)

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Freedom VPN and send confirmed operator alerts every two minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=10s
+Unit=vpn-admin-health-alerts.service
+
+[Install]
+WantedBy=timers.target

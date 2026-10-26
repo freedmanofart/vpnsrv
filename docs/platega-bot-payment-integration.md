@@ -1,4 +1,4 @@
-# Подключение Platega: бот и web-кабинет
+# Подключение Platega: бот и веб-кабинет
 
 Актуальные поля БД для Platega-платежей, `payments.details`, `payment_events`,
 `subscriptions` и `vpn_clients` описаны в
@@ -14,7 +14,7 @@
 - создание платежа: https://docs.platega.io/reference/create-transaction
 - H2H QR: https://docs.platega.io/reference/get-h2h-payment-link
 - статус платежа: https://docs.platega.io/reference/get-transaction
-- callback: https://docs.platega.io/reference/callback
+- обратный вызов: https://docs.platega.io/reference/callback
 
 ## Что нужно получить у Platega
 
@@ -28,7 +28,7 @@
 5. Включение H2H, если нужен прямой QR-код в ответе API.
 6. Включение крипто-оплаты в Telegram-боте, если Platega должна отдавать оплату
    без лишней внешней формы.
-7. Callback URL для уведомлений об оплате.
+7. URL обратного вызова для уведомлений об оплате.
 
 Важно: в документации Platega пример СБП использует `paymentMethod: 2` и ответ
 возвращает метод `SBPQR`. Для криптовалюты документация отдельно упоминает
@@ -213,15 +213,15 @@ details.paymentMethod = paymentMethod
 details.payload = payload
 ```
 
-## Callback от Platega
+## Обратный вызов Platega
 
-Callback URL:
+URL обратного вызова:
 
 ```text
 https://freedomvpn.taile485ac.ts.net/payments/webhooks/platega
 ```
 
-Этот адрес нужно указать в личном кабинете Platega в настройках callback URLs.
+Этот адрес нужно указать в личном кабинете Platega в настройках URL обратного вызова.
 
 Требования Platega:
 
@@ -335,7 +335,7 @@ STATUS_CHECK=PENDING
 сервере. Если в ответе админки пришел статус `host_required`, нужно скопировать
 команду из поля `command` и выполнить ее по SSH на сервере.
 
-## UX в Telegram-боте
+## Сценарий оплаты в Telegram-боте
 
 Рекомендуемый путь:
 
@@ -366,7 +366,7 @@ STATUS_CHECK=PENDING
 ✅ Оплата Freedom VPN подтверждена.
 ```
 
-## UX в web-кабинете
+## Сценарий оплаты в веб-кабинете
 
 В web-кабинете методы должны отображаться как обычные способы оплаты:
 

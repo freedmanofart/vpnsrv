@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.routes.client import (
     alternate_client_profiles,
     build_client_uri,
+    deduplicate_profiles,
     kit_all_profiles_for_client,
     localized_profile_name,
     normalized_profile_uri,
@@ -982,6 +983,7 @@ async def cabinet(
             db, profile_client, profile_config
         )
         client_profiles.extend(alternate_profiles)
+        client_profiles = deduplicate_profiles(client_profiles)
         for profile_index, profile in enumerate(client_profiles):
             label = profile["name"]
             profile_node = (

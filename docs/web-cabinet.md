@@ -72,7 +72,7 @@ CABINET_ALLOW_TEMPORARY_REGISTRATION=true
 регистрация может создавать неограниченное число пустых пользователей. После
 настройки SMTP установите `CABINET_ALLOW_TEMPORARY_REGISTRATION=false`.
 
-## Настройка SMTP и внешнего relay
+## Настройка SMTP и внешнего почтового ретранслятора
 
 Добавьте в серверный `.env`:
 
@@ -97,14 +97,14 @@ SMTP_USE_SSL=false
 новый токен. Это предотвращает создание доступа, который пользователь не
 сможет получить. Пароль SMTP хранится только в `.env`, не в Git.
 
-### Вариант 1: API подключается к relay напрямую
+### Вариант 1: API подключается к ретранслятору напрямую
 
 Это самый короткий путь. Укажите выданные почтовым провайдером hostname,
 username и app password в `SMTP_*`, используйте подтверждённый адрес или домен в
 `SMTP_FROM`, затем пересоздайте только API. Не используйте обычный пароль от
 почтового ящика, если провайдер поддерживает отдельные app passwords.
 
-### Вариант 2: API → локальный Postfix → authenticated smarthost
+### Вариант 2: API → локальный Postfix → внешний SMTP-сервер с авторизацией
 
 Этот вариант удобен, когда несколько локальных сервисов должны отправлять через
 один relay. Скрипт `scripts/setup_postfix_relay.sh` настраивает только локальный
@@ -125,8 +125,21 @@ python3 scripts/configctl.py set SMTP_USE_SSL false
 ```
 
 Postfix слушает только loopback и Docker bridge, поэтому не является публичным
-open relay. Затем настройте у Postfix внешний authenticated smarthost. Пример
-для relay с STARTTLS на порту 587:
+open relay. Чтобы Docker bridge был поднят до Postfix после перезагрузки,
+установите unit и drop-in из `deploy/systemd/`:
+
+```bash
+sudo install -m 0644 deploy/systemd/freedomvpn-docker-bridge.service \
+  /etc/systemd/system/freedomvpn-docker-bridge.service
+sudo install -D -m 0644 deploy/systemd/postfix.service.d/10-docker-bridge.conf \
+  /etc/systemd/system/postfix.service.d/10-docker-bridge.conf
+sudo systemctl daemon-reload
+sudo systemctl enable --now freedomvpn-docker-bridge.service
+sudo systemctl restart postfix.service
+```
+
+Затем настройте у Postfix внешний authenticated smarthost. Пример для relay с
+STARTTLS на порту 587:
 
 ```bash
 sudo dnf install -y cyrus-sasl-plain

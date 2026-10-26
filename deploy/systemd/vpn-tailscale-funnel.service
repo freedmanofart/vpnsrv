@@ -3,10 +3,12 @@ Description=Publish Freedom VPN web app through Tailscale Funnel
 After=network-online.target tailscaled.service docker.service
 Wants=network-online.target tailscaled.service
 Requires=tailscaled.service
+PartOf=tailscaled.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=/home/freedman/vpn-service/scripts/wait_for_tailscale_backend.sh
 ExecStart=/usr/bin/tailscale funnel --bg --yes --https=443 http://127.0.0.1:8000
 ExecStop=/usr/bin/tailscale funnel reset
 
