@@ -46,7 +46,22 @@ def commit_event(root: Path) -> dict:
         capture_output=True,
         text=True,
     ).stdout.strip() or "detached"
-    return {"type": "commit", "sha": sha, "branch": branch, "author": author, "subject": subject}
+    files = subprocess.run(
+        ["git", "-C", str(root), "show", "--format=", "--name-only", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    files = [path.strip() for path in files if path.strip()]
+    return {
+        "type": "commit",
+        "sha": sha,
+        "branch": branch,
+        "author": author,
+        "subject": subject,
+        "files": files[:12],
+        "files_total": len(files),
+    }
 
 
 def assistant_event(message: str) -> dict:

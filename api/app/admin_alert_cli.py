@@ -13,13 +13,21 @@ from app.services.notifications import send_admin_telegram_message
 def _message(event: dict) -> str:
     kind = event.get("type")
     if kind == "commit":
-        return (
+        message = (
             "🧩 Git commit Freedom VPN\n"
             f"Ветка: {str(event.get('branch') or 'unknown')[:160]}\n"
             f"Коммит: {str(event.get('sha') or 'unknown')[:64]}\n"
             f"Автор: {str(event.get('author') or 'unknown')[:160]}\n"
             f"Сообщение: {str(event.get('subject') or '(без сообщения)')[:500]}"
         )
+        files = event.get("files")
+        if isinstance(files, list) and files:
+            paths = [str(path).replace("\n", " ")[:120] for path in files[:12]]
+            message += "\nИзменения:\n" + "\n".join(f"• {path}" for path in paths)
+            total = event.get("files_total")
+            if isinstance(total, int) and total > len(paths):
+                message += f"\n• и ещё {total - len(paths)} файлов"
+        return message
     if kind == "assistant_message":
         return "🤖 Codex → Freedom VPN Admin\n\n" + str(event.get("message") or "")
     if kind in {"test_health", "test_audit", "test_commit", "test_assistant"}:
