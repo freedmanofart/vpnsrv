@@ -1635,6 +1635,8 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertNotIn("Швеция (Hysteria2)", response.text)
         self.assertNotIn("Швеция (TUIC)", response.text)
         self.assertIn('data-config="vpn://encoded"', response.text)
+        self.assertNotIn("Открыть ключ", response.text)
+        self.assertNotIn('id="open-amnezia"', response.text)
         self.assertIn(f"/v1/client/amnezia-config/{token}/7", response.text)
         self.assertIn(f"/v1/client/amnezia-config/{token}/8", response.text)
         self.assertEqual("no-store", response.headers["cache-control"])

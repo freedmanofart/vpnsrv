@@ -1625,15 +1625,14 @@ async def client_import_apps_page(
         name = str(profile.get("name") or profile_display_name(config, index))
         options.append(
             f'<option data-config="{html.escape(import_key, quote=True)}" '
-            f'data-download="{html.escape(download, quote=True)}" '
-            f'data-open="{str(scheme == "vpn").lower()}">{html.escape(name)}</option>'
+            f'data-download="{html.escape(download, quote=True)}">'
+            f'{html.escape(name)}</option>'
         )
     amnezia_content = (
         '<label for="amnezia-profile">Профиль</label>'
         f'<select id="amnezia-profile">{"".join(options)}</select>'
         '<div class="profile-actions">'
         '<button id="copy-amnezia" type="button">Скопировать ключ</button>'
-        '<a id="open-amnezia" hidden>Открыть ключ</a>'
         '<a id="download-amnezia" hidden>Скачать .conf</a>'
         '</div><p id="amnezia-result" role="status" aria-live="polite"></p>'
         if options else '<p>Совместимых профилей пока нет.</p>'
@@ -1641,15 +1640,12 @@ async def client_import_apps_page(
     script = """
     const profile = document.getElementById('amnezia-profile');
     const copy = document.getElementById('copy-amnezia');
-    const open = document.getElementById('open-amnezia');
     const download = document.getElementById('download-amnezia');
     function updateProfile() {
       if (!profile) return;
       const item = profile.selectedOptions[0];
       const isFile = item.dataset.config.startsWith('wireguard://');
       copy.hidden = isFile;
-      open.hidden = item.dataset.open !== 'true';
-      if (!open.hidden) open.href = item.dataset.config;
       download.hidden = !item.dataset.download;
       if (!download.hidden) download.href = item.dataset.download;
       document.getElementById('amnezia-result').textContent = '';
