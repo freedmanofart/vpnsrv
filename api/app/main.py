@@ -139,6 +139,27 @@ app.mount(
 )
 
 
+_SECRET_PATH_PREFIXES = (
+    "/cabinet/access/",
+    "/v1/client/subscription/",
+    "/v1/client/import-apps/",
+    "/v1/client/import/",
+    "/v1/client/freevpn-import/",
+    "/v1/client/v2raytun-import/",
+    "/v1/client/amnezia-import/",
+    "/v1/client/amnezia-config/",
+    "/v1/client/router-awg/",
+    "/v1/client/qr/",
+)
+
+
+def redacted_request_path(path: str) -> str:
+    for prefix in _SECRET_PATH_PREFIXES:
+        if path.startswith(prefix):
+            return f"{prefix}[redacted]"
+    return path
+
+
 @app.middleware("http")
 async def request_context_and_audit(request: Request, call_next):
     request_id = request.headers.get("X-Request-Id") or uuid4().hex
@@ -153,9 +174,7 @@ async def request_context_and_audit(request: Request, call_next):
         return response
     finally:
         duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        logged_path = request.url.path
-        if logged_path.startswith("/cabinet/access/"):
-            logged_path = "/cabinet/access/[redacted]"
+        logged_path = redacted_request_path(request.url.path)
         logger.info(
             "http_request",
             extra={

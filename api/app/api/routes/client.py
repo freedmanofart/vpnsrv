@@ -17,7 +17,7 @@ import httpx
 import qrcode
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -313,7 +313,9 @@ def profile_transport_variant(uri: str, link_name: str = "") -> str:
         return "Hysteria2"
     if scheme == "tuic":
         return "TUIC"
-    if scheme in {"wireguard", "amneziawg", "awg", "vpn"}:
+    if scheme in {"amneziawg", "awg", "vpn"}:
+        return "AmneziaWG"
+    if scheme == "wireguard":
         return "WireGuard"
     return ""
 
@@ -431,6 +433,61 @@ def incy_profile_allowed(uri: str, region: str | None, name: str | None = None) 
         return True
     variant = profile_transport_variant(uri, profile_display_name(uri, 0))
     return variant in _INCY_RU_PROFILE_VARIANTS
+
+
+def amnezia_profile_allowed(uri: str) -> bool:
+    """Keep only formats and transports parsed by AmneziaVPN's importer."""
+    parsed = urlsplit(uri)
+    scheme = parsed.scheme.lower()
+    if scheme == "vpn":
+        return True
+    if scheme == "wireguard":
+        return wireguard_uri_config(uri) is not None
+    if scheme == "ss":
+        return "plugin" not in parse_qs(parsed.query)
+    if scheme == "trojan":
+        return True
+    if scheme == "vless":
+        transport = parse_qs(parsed.query).get("type", ["tcp"])[0].lower()
+        return transport in {"tcp", "ws", "grpc"}
+    if scheme == "vmess":
+        try:
+            raw = uri.split("://", 1)[1]
+            document = json.loads(b64decode(raw + "=" * (-len(raw) % 4)).decode())
+            return str(document.get("net", "tcp")).lower() in {"tcp", "ws", "grpc"}
+        except (AttributeError, binascii.Error, TypeError, UnicodeDecodeError, ValueError):
+            return False
+    return False
+
+
+def wireguard_uri_config(uri: str) -> str | None:
+    """Convert the panel's WireGuard URI into an importable .conf file."""
+    parsed = urlsplit(uri)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "wireguard" or not parsed.hostname or not port:
+        return None
+    query = parse_qs(parsed.query)
+    private_key = _safe_profile_scalar(unquote(parsed.username or ""))
+    public_key = _safe_profile_scalar(query.get("publickey", [""])[0])
+    address = _safe_profile_scalar(query.get("address", [""])[0])
+    dns = _safe_profile_scalar(query.get("dns", ["1.1.1.1, 1.0.0.1"])[0])
+    mtu = _safe_profile_scalar(query.get("mtu", [""])[0])
+    if not private_key or not public_key or not address:
+        return None
+    lines = ["[Interface]", f"PrivateKey = {private_key}", f"Address = {address}"]
+    if dns:
+        lines.append(f"DNS = {dns}")
+    if mtu.isdecimal():
+        lines.append(f"MTU = {mtu}")
+    lines.extend([
+        "", "[Peer]", f"PublicKey = {public_key}",
+        "AllowedIPs = 0.0.0.0/0, ::/0",
+        f"Endpoint = {parsed.hostname}:{port}", "PersistentKeepalive = 25",
+    ])
+    return "\n".join(lines) + "\n"
 
 def _safe_profile_scalar(value: object) -> str:
     text = str(value or "").strip()
@@ -568,6 +625,28 @@ async def kit_all_profiles_for_client(
             "incy_config": normalized_profile_uri(incy_config, len(profiles), name),
         }
         profiles.append(profile)
+    return deduplicate_profiles(profiles)
+
+
+async def all_subscription_profiles(
+    db: AsyncSession,
+    client: VPNClient,
+    node: VPNNode,
+    node_config: VPNNodeConfig,
+) -> list[dict]:
+    profiles = await kit_all_profiles_for_client(
+        client, node, node_config, "Freedom VPN cabinet"
+    )
+    if not profiles:
+        fallback = build_client_uri(client, node, node_config.config)
+        if fallback:
+            fallback = client_profile_uri_for_node(fallback, node)
+            name = profile_name_for_node(node, node_config, fallback, 0)
+            profiles = [{
+                "name": name,
+                "config": normalized_profile_uri(fallback, 0, name),
+            }]
+    profiles.extend(await alternate_client_profiles(db, client, node_config))
     return deduplicate_profiles(profiles)
 
 
@@ -1483,34 +1562,45 @@ async def incy_subscription(
     )
 
 
+def direct_import_links(token: str, user_agent: str) -> dict[str, str]:
+    subscription_url = f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/{token}"
+    encoded = quote(subscription_url, safe=":/?@&=,+-._~%")
+    fallback = quote(subscription_url, safe="")
+    if "android" in user_agent.lower():
+        incy = (
+            f"intent://import/{encoded}#Intent;scheme=incy;package=llc.itdev.incy;"
+            "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
+            f"S.browser_fallback_url={fallback};end"
+        )
+        freevpn = (
+            f"intent://import/{encoded}#Intent;scheme=freevpn;package=org.freedomvpn.app;"
+            "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
+            f"S.browser_fallback_url={fallback};end"
+        )
+    else:
+        incy = build_incy_import_link(subscription_url)
+        freevpn = build_freevpn_import_link(subscription_url)
+    return {
+        "incy": incy,
+        "freevpn": freevpn,
+        "v2raytun": f"v2raytun://import/{encoded}",
+    }
+
+
 @router.get("/import-apps/{token}", include_in_schema=False)
 async def client_import_apps_page(
     token: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    await subscription_client_for_token(token, db)
+    client, node, node_config = await _subscription_client_context(token, db)
     safe_token = quote(token, safe="")
+    links = direct_import_links(token, request.headers.get("user-agent", ""))
     apps = (
-        (
-            "INCY",
-            "Открыть подписку в INCY",
-            f"/v1/client/import/{safe_token}",
-        ),
-        (
-            "Freedom VPN",
-            "Открыть в Freedom VPN",
-            f"/v1/client/freevpn-import/{safe_token}",
-        ),
-        (
-            "Amnezia VPN",
-            "Выбрать конфигурацию Amnezia VPN",
-            f"/v1/client/amnezia-import/{safe_token}",
-        ),
-        (
-            "V2rayTUN",
-            "Открыть подписку в V2rayTUN",
-            f"/v1/client/v2raytun-import/{safe_token}",
-        ),
+        ("INCY", "Импортировать подписку", links["incy"]),
+        ("Freedom VPN", "Импортировать подписку", links["freevpn"]),
+        ("V2rayTUN", "Импортировать подписку", links["v2raytun"]),
+        ("Amnezia VPN", "Выбрать профиль ниже", "#amnezia"),
     )
     buttons = "".join(
         f'<a class="app-option" href="{html.escape(url, quote=True)}">'
@@ -1519,6 +1609,73 @@ async def client_import_apps_page(
         "<span class=\"arrow\" aria-hidden=\"true\">&#8594;</span></a>"
         for name, description, url in apps
     )
+    profiles = await all_subscription_profiles(db, client, node, node_config)
+    options = []
+    for index, profile in enumerate(profiles):
+        config = str(profile.get("config") or "")
+        if not amnezia_profile_allowed(config):
+            continue
+        scheme = urlsplit(config).scheme.lower()
+        import_key = urlsplit(config)._replace(fragment="").geturl() if scheme == "vpn" else config
+        download = (
+            f"/v1/client/amnezia-config/{safe_token}/{index}"
+            if scheme == "wireguard" or (scheme == "vpn" and profile.get("wireguard_config"))
+            else ""
+        )
+        name = str(profile.get("name") or profile_display_name(config, index))
+        options.append(
+            f'<option data-config="{html.escape(import_key, quote=True)}" '
+            f'data-download="{html.escape(download, quote=True)}" '
+            f'data-open="{str(scheme == "vpn").lower()}">{html.escape(name)}</option>'
+        )
+    amnezia_content = (
+        '<label for="amnezia-profile">Профиль</label>'
+        f'<select id="amnezia-profile">{"".join(options)}</select>'
+        '<div class="profile-actions">'
+        '<button id="copy-amnezia" type="button">Скопировать ключ</button>'
+        '<a id="open-amnezia" hidden>Открыть ключ</a>'
+        '<a id="download-amnezia" hidden>Скачать .conf</a>'
+        '</div><p id="amnezia-result" role="status" aria-live="polite"></p>'
+        if options else '<p>Совместимых профилей пока нет.</p>'
+    )
+    script = """
+    const profile = document.getElementById('amnezia-profile');
+    const copy = document.getElementById('copy-amnezia');
+    const open = document.getElementById('open-amnezia');
+    const download = document.getElementById('download-amnezia');
+    function updateProfile() {
+      if (!profile) return;
+      const item = profile.selectedOptions[0];
+      const isFile = item.dataset.config.startsWith('wireguard://');
+      copy.hidden = isFile;
+      open.hidden = item.dataset.open !== 'true';
+      if (!open.hidden) open.href = item.dataset.config;
+      download.hidden = !item.dataset.download;
+      if (!download.hidden) download.href = item.dataset.download;
+      document.getElementById('amnezia-result').textContent = '';
+    }
+    profile?.addEventListener('change', updateProfile);
+    copy?.addEventListener('click', async () => {
+      const value = profile.selectedOptions[0].dataset.config;
+      const status = document.getElementById('amnezia-result');
+      try {
+        await navigator.clipboard.writeText(value);
+        status.textContent = 'Ключ скопирован';
+      } catch (_) {
+        const field = document.createElement('textarea');
+        field.value = value;
+        field.setAttribute('readonly', '');
+        field.style.position = 'fixed';
+        field.style.opacity = '0';
+        document.body.appendChild(field);
+        field.select();
+        const copied = document.execCommand('copy');
+        field.remove();
+        status.textContent = copied ? 'Ключ скопирован' : 'Не удалось скопировать ключ';
+      }
+    });
+    updateProfile();
+    """
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru">
@@ -1532,7 +1689,7 @@ async def client_import_apps_page(
     body {{ min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px 16px; }}
     main {{ width: min(100%, 480px); }}
     h1 {{ margin: 0; font-size: 26px; line-height: 1.2; }}
-    p {{ margin: 9px 0 22px; color: #53616e; line-height: 1.5; }}
+    p {{ margin: 9px 0 18px; color: #53616e; line-height: 1.5; }}
     .app-list {{ display: grid; gap: 9px; }}
     .app-option {{ min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 16px; border: 1px solid #d6dfe5; border-left: 4px solid #138c82; border-radius: 8px; background: #fff; color: inherit; text-decoration: none; }}
     .app-option:hover, .app-option:focus-visible {{ border-color: #138c82; outline: none; }}
@@ -1540,14 +1697,25 @@ async def client_import_apps_page(
     .app-option strong {{ font-size: 16px; }}
     .app-option small {{ margin-top: 3px; color: #586774; font-size: 13px; }}
     .arrow {{ color: #087c72; font-size: 22px; }}
+    section {{ margin-top: 26px; border-top: 1px solid #d6dfe5; padding-top: 20px; }}
+    h2 {{ margin: 0 0 12px; font-size: 20px; }}
+    label {{ display: block; margin-bottom: 6px; font-weight: 600; }}
+    select {{ width: 100%; min-height: 46px; padding: 9px; border: 1px solid #aebdc8; border-radius: 6px; background: white; font: inherit; }}
+    .profile-actions {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }}
+    .profile-actions button, .profile-actions a {{ min-height: 44px; display: inline-flex; align-items: center; justify-content: center; padding: 10px 14px; border: 1px solid #087c72; border-radius: 6px; background: #087c72; color: white; font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }}
+    .profile-actions a {{ background: white; color: #087c72; }}
+    [hidden] {{ display: none !important; }}
+    #amnezia-result {{ min-height: 1.5em; margin: 8px 0 0; }}
   </style>
 </head>
 <body>
   <main>
     <h1>Импорт конфигурации</h1>
-    <p>Выберите приложение, в которое хотите добавить подписку.</p>
+    <p>Выберите приложение.</p>
     <nav class="app-list" aria-label="Приложения для импорта">{buttons}</nav>
+    <section id="amnezia"><h2>Amnezia VPN</h2>{amnezia_content}</section>
   </main>
+  <script>{script}</script>
 </body>
 </html>""",
         headers={
@@ -1573,21 +1741,7 @@ async def incy_import_redirect(
 
     await subscription_client_for_token(token, db)
 
-    subscription_url = (
-        f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
-        f"{token}"
-    )
-    encoded_fallback_url = quote(subscription_url, safe="")
-    encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
-    direct_link = build_incy_import_link(subscription_url)
-    android_intent = (
-        f"intent://import/{encoded_subscription_url}"
-        "#Intent;scheme=incy;package=llc.itdev.incy;"
-        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
-        f"S.browser_fallback_url={encoded_fallback_url};end"
-    )
-    user_agent = request.headers.get("user-agent", "").lower()
-    launch_link = android_intent if "android" in user_agent else direct_link
+    launch_link = direct_import_links(token, request.headers.get("user-agent", ""))["incy"]
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru">
@@ -1641,8 +1795,7 @@ async def v2raytun_import_redirect(
     db: AsyncSession = Depends(get_db),
 ):
     await _subscription_client_context(token, db)
-    subscription_url = f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/{token}"
-    deep_link = f"v2raytun://import/{quote(subscription_url, safe=':/?@&=,+-._~%')}"
+    deep_link = direct_import_links(token, "")["v2raytun"]
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1657,24 +1810,45 @@ async def amnezia_import_redirect(
     token: str,
     db: AsyncSession = Depends(get_db),
 ):
+    await subscription_client_for_token(token, db)
+    return RedirectResponse(
+        f"/v1/client/import-apps/{quote(token, safe='')}#amnezia",
+        status_code=302,
+        headers={"cache-control": "no-store", "referrer-policy": "no-referrer"},
+    )
+
+
+@router.get("/amnezia-config/{token}/{profile_index}", include_in_schema=False)
+async def amnezia_profile_config(
+    token: str,
+    profile_index: int,
+    db: AsyncSession = Depends(get_db),
+):
     client, node, node_config = await _subscription_client_context(token, db)
-    profiles = await kit_amnezia_profiles_for_client(client, node, node_config)
-    if not profiles:
-        raise HTTPException(status_code=404, detail="AmneziaWG profiles are unavailable")
-    buttons = "".join(
-        f'<a href="{html.escape(profile["config"], quote=True)}">Открыть {html.escape(profile["name"])}</a>'
-        for profile in profiles
-    )
-    router_links = "".join(
-        f'<a class="secondary" href="/v1/client/router-awg/{html.escape(token, quote=True)}/{index}">Скачать {html.escape(profile["name"])} для роутера</a>'
-        for index, profile in enumerate(profiles)
-    )
-    return HTMLResponse(
-        content=f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Импорт в Amnezia VPN</title><style>:root{{color-scheme:dark}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#12171d;color:#f7f8fa;font:16px system-ui,sans-serif}}main{{width:min(460px,calc(100% - 40px));text-align:center;padding:28px 0}}p{{color:#bac3ce;line-height:1.5}}a{{display:block;margin-top:12px;padding:15px 18px;border-radius:8px;background:#ffd43b;color:#141414;font-weight:750;text-decoration:none}}a.secondary{{background:transparent;color:#b9d4ff;border:1px solid #526173;font-weight:600}}</style></head>
-<body><main><h1>Выберите AmneziaWG</h1><p>Обычный профиль совместим с большинством устройств. Версию 3.1 выбирайте, если ее поддерживает приложение.</p>{buttons}<p>Для Podkop или другого роутера:</p>{router_links}</main></body></html>""",
-        headers={"cache-control": "no-store"},
+    profiles = await all_subscription_profiles(db, client, node, node_config)
+    if profile_index < 0 or profile_index >= len(profiles):
+        raise HTTPException(status_code=404, detail="VPN profile not found")
+    profile = profiles[profile_index]
+    uri = str(profile.get("config") or "")
+    scheme = urlsplit(uri).scheme.lower()
+    if scheme == "vpn":
+        config = profile.get("wireguard_config")
+        filename = "amneziawg.conf"
+    elif scheme == "wireguard":
+        config = wireguard_uri_config(uri)
+        filename = "wireguard.conf"
+    else:
+        config = None
+    if not config:
+        raise HTTPException(status_code=404, detail="Importable configuration not found")
+    return Response(
+        content=config,
+        media_type="text/plain",
+        headers={
+            "content-disposition": f'attachment; filename="{filename}"',
+            "cache-control": "no-store",
+            "referrer-policy": "no-referrer",
+        },
     )
 
 
@@ -1707,16 +1881,7 @@ async def client_profile_qr(
     db: AsyncSession = Depends(get_db),
 ):
     client, node, node_config = await _subscription_client_context(token, db)
-    profiles = await kit_all_profiles_for_client(client, node, node_config, "Freedom VPN cabinet")
-    if not profiles:
-        fallback = build_client_uri(client, node, node_config.config)
-        profiles = [
-            {"config": normalized_profile_uri(
-                fallback, 0, localized_profile_name(node, fallback, 0)
-            )}
-        ] if fallback else []
-    profiles.extend(await alternate_client_profiles(db, client, node_config))
-    profiles = deduplicate_profiles(profiles)
+    profiles = await all_subscription_profiles(db, client, node, node_config)
     if profile_index < 0 or profile_index >= len(profiles):
         raise HTTPException(status_code=404, detail="VPN profile not found")
     image = qrcode.make(profiles[profile_index]["config"])
@@ -1739,21 +1904,7 @@ async def freevpn_import_redirect(
 
     await subscription_client_for_token(token, db)
 
-    subscription_url = (
-        f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
-        f"{token}"
-    )
-    encoded_fallback_url = quote(subscription_url, safe="")
-    encoded_subscription_url = quote(subscription_url, safe=":/?@&=,+-._~%")
-    direct_link = build_freevpn_import_link(subscription_url)
-    android_intent = (
-        f"intent://import/{encoded_subscription_url}"
-        "#Intent;scheme=freevpn;package=org.freedomvpn.app;"
-        "action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;"
-        f"S.browser_fallback_url={encoded_fallback_url};end"
-    )
-    user_agent = request.headers.get("user-agent", "").lower()
-    launch_link = android_intent if "android" in user_agent else direct_link
+    launch_link = direct_import_links(token, request.headers.get("user-agent", ""))["freevpn"]
     return HTMLResponse(
         content=f"""<!doctype html>
 <html lang="ru">

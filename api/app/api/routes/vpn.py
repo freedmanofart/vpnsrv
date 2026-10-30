@@ -833,8 +833,8 @@ async def get_vpn_client_config(
             f"{subscription_token}"
         ),
         amnezia_import_url=(
-            f"{settings.public_base_url.rstrip('/')}/v1/client/amnezia-import/"
-            f"{subscription_token}"
+            f"{settings.public_base_url.rstrip('/')}/v1/client/import-apps/"
+            f"{subscription_token}#amnezia"
         ),
         v2raytun_import_url=(
             f"{settings.public_base_url.rstrip('/')}/v1/client/v2raytun-import/"

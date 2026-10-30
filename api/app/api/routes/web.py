@@ -1009,7 +1009,7 @@ async def cabinet(
         base = settings.public_base_url.rstrip("/")
         incy_import_url = f"{base}/v1/client/import/{subscription_token}"
         freevpn_import_url = f"{base}/v1/client/freevpn-import/{subscription_token}"
-        amnezia_import_url = f"{base}/v1/client/amnezia-import/{subscription_token}"
+        amnezia_import_url = f"{base}/v1/client/import-apps/{subscription_token}#amnezia"
         v2raytun_import_url = f"{base}/v1/client/v2raytun-import/{subscription_token}"
     traffic_remaining_bytes = None
     traffic_limit_bytes = None
@@ -1213,7 +1213,7 @@ function openPayment(){const out=document.getElementById('order-result');if(out)
 function selectVpnProfile(){
   const select=document.getElementById('vpn-profile'),key=document.getElementById('vpn-key'),option=select?.selectedOptions?.[0];if(!key||!option)return;
   const token=option.dataset.token||'';key.dataset.value=option.dataset.config||'';key.dataset.index=option.dataset.profileIndex||'0';key.dataset.qrBase=`/v1/client/qr/${token}`;key.textContent=`${(key.dataset.value.split('://')[0]||'vpn')}://••••••••••••`;
-  document.getElementById('incy-import').href=`/v1/client/import/${token}`;document.getElementById('freevpn-import').href=`/v1/client/freevpn-import/${token}`;document.getElementById('amnezia-import').href=`/v1/client/amnezia-import/${token}`;document.getElementById('v2raytun-import').href=`/v1/client/v2raytun-import/${token}`;
+  document.getElementById('incy-import').href=`/v1/client/import/${token}`;document.getElementById('freevpn-import').href=`/v1/client/freevpn-import/${token}`;document.getElementById('amnezia-import').href=`/v1/client/import-apps/${token}#amnezia`;document.getElementById('v2raytun-import').href=`/v1/client/v2raytun-import/${token}`;
   document.getElementById('vpn-server-flag').textContent=option.dataset.serverFlag||'🌐';document.getElementById('vpn-server-name').textContent=option.dataset.serverName||'VPN';
 }
 function showVpnQr(){

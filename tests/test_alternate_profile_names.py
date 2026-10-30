@@ -1,12 +1,14 @@
 from types import SimpleNamespace
 
 from app.api.routes.client import (
+    amnezia_profile_allowed,
     alternate_profile_name,
     deduplicate_profiles,
     incy_profile_allowed,
     localized_profile_name,
     profile_identity,
     profile_name_for_node,
+    wireguard_uri_config,
 )
 
 
@@ -179,6 +181,38 @@ def test_incy_uses_uri_transport_not_display_label():
     assert incy_profile_allowed(uri, "RU|Россия", "🇺🇸 США (Reality)")
     unsupported = "vless://uuid@176.108.250.142:443?type=tcp&security=none#US-RAW"
     assert not incy_profile_allowed(unsupported, "RU|Россия", "🇺🇸 США (Reality)")
+
+
+def test_amneziawg_and_wireguard_have_distinct_names():
+    node = SimpleNamespace(region="SE|Швеция")
+    assert localized_profile_name(node, "vpn://encoded#vpn-167", 0) == "🇸🇪 Швеция (AmneziaWG)"
+    assert localized_profile_name(node, "wireguard://key@host:51820", 0) == "🇸🇪 Швеция (WireGuard)"
+
+
+def test_amnezia_import_filters_unsupported_transports():
+    assert amnezia_profile_allowed("vless://id@example.com:443?security=reality&type=tcp")
+    assert amnezia_profile_allowed("vless://id@example.com:443?security=tls&type=ws")
+    assert amnezia_profile_allowed("vless://id@example.com:443?security=reality&type=grpc")
+    assert amnezia_profile_allowed("trojan://secret@example.com:443?type=grpc")
+    assert amnezia_profile_allowed("ss://method:secret@example.com:443")
+    assert amnezia_profile_allowed("vpn://encoded")
+    assert amnezia_profile_allowed("wireguard://private@example.com:51820?address=10.8.1.2/32&publickey=server")
+    assert not amnezia_profile_allowed("vless://id@example.com:443?type=xhttp")
+    assert not amnezia_profile_allowed("hysteria2://secret@example.com:443")
+    assert not amnezia_profile_allowed("tuic://id:secret@example.com:443")
+    assert not amnezia_profile_allowed("ss://method:secret@example.com:443?plugin=v2ray-plugin")
+
+
+def test_wireguard_uri_converts_to_amnezia_import_file():
+    config = wireguard_uri_config(
+        "wireguard://private-key@176.108.250.142:51820"
+        "?address=10.8.1.2%2F32&publickey=server-key&mtu=1420"
+    )
+    assert "PrivateKey = private-key\n" in config
+    assert "Address = 10.8.1.2/32\n" in config
+    assert "PublicKey = server-key\n" in config
+    assert "Endpoint = 176.108.250.142:51820\n" in config
+    assert wireguard_uri_config("vless://id@example.com:443") is None
 
 
 def test_profile_deduplication_ignores_label_but_keeps_transport_parameters():

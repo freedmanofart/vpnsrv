@@ -134,8 +134,10 @@ FastAPI, если схема API не должна публиковаться. �
 | `GET` | `/v1/client/profile` | Профили, метаданные провайдера и актуальный трафик |
 | `POST` | `/v1/client/refresh` | Ротация device token и обновление срока устройства |
 | `GET` | `/v1/client/subscription/{token}` | Подписка с конфигурацией и метаданными для приложений |
-| `GET` | `/v1/client/import/{token}` | HTTPS-переходник Telegram для импорта в INCY |
-| `GET` | `/v1/client/freevpn-import/{token}` | HTTPS-переходник Telegram/site для импорта в Freedom VPN |
+| `GET` | `/v1/client/import-apps/{token}` | Общая страница импорта с прямыми кнопками приложений и профилями Amnezia VPN |
+| `GET` | `/v1/client/amnezia-config/{token}/{index}` | Загрузка `.conf` для AmneziaWG или WireGuard |
+| `GET` | `/v1/client/import/{token}` | Совместимый со старыми сообщениями HTTPS-переходник INCY |
+| `GET` | `/v1/client/freevpn-import/{token}` | Совместимый со старыми сообщениями HTTPS-переходник Freedom VPN |
 | `GET` | `/vpn/clients/{client_id}/config` | Сервисные ссылки и конфигурация клиента |
 | `GET` | `/` | Публичный лендинг |
 | `GET` | `/cabinet` | Резервный кабинет по защищённой cookie |
@@ -210,8 +212,9 @@ webhook. Telegram-регистрация `/users` не публична. Мар�
 
 После оплаты backend создаёт подписанный токен для конкретного `VPNClient`.
 Токен содержит ID клиента, срок действия и HMAC-подпись. Он не требует
-авторизации приложения, но перестаёт работать после истечения срока или отзыва
-клиента. Канонический endpoint подписки:
+авторизации приложения, а при продлении старый подписанный URL разрешается в
+текущего активного клиента того же пользователя. При отсутствии активной
+подписки или клиента доступ прекращается. Канонический endpoint подписки:
 
 ```text
 GET /v1/client/subscription/<signed-token>
@@ -228,15 +231,17 @@ GET /v1/client/subscription/<signed-token>
 incy://import/https://<public-host>/v1/client/subscription/<signed-token>
 ```
 
-Для Telegram используется HTTPS-переходник:
+В уведомлениях используется общая HTTPS-страница:
 
 ```text
-GET /v1/client/import/<signed-token>
+GET /v1/client/import-apps/<signed-token>
 ```
 
-Он показывает кнопку `Открыть в INCY` с Android `intent://` и резервной
-обычной ссылкой. Прямой `incy://` в Telegram-кнопку помещать нельзя: Telegram
-WebView может вернуть `ERR_UNKNOWN_URL_SCHEME`.
+На ней кнопка INCY сразу запускает Android `intent://` или прямой `incy://`
+на других платформах. Старый `/v1/client/import/<signed-token>` остаётся
+HTTPS-переходником для ранее отправленных ссылок. Прямой `incy://` в
+Telegram-кнопку помещать нельзя: Telegram WebView может вернуть
+`ERR_UNKNOWN_URL_SCHEME`.
 
 Если INCY был запущен на мобильном trial и пользователь импортирует оплаченную
 ссылку, приложение после успешной загрузки профиля вызывает общий endpoint
@@ -288,16 +293,17 @@ Content-Type: application/json
   `incy_subscription_url`, `incy_import_url`, `incy_telegram_import_url`,
   `freevpn_subscription_url`, `freevpn_import_url` и
   `freevpn_telegram_import_url`.
-- Web-кабинет показывает кнопки импорта в INCY и Freedom VPN рядом с ключом.
-- После подтверждённой покупки Telegram и email уведомления содержат HTTPS
-  ссылки импорта обоих приложений и ссылку `Продлить подписку`.
+- Web-кабинет показывает импорт в INCY, Freedom VPN, Amnezia VPN и V2rayTUN.
+- После подтверждённой покупки Telegram и email уведомления содержат одну
+  общую HTTPS-ссылку для импорта и ссылку `Продлить подписку`.
 - В `ClientProfileResponse.provider` передаются `support_url` и `cabinet_url`,
   а в `links` — канал/бот, поддержка, сайт и личный кабинет. Ссылки строятся из
   `CLIENT_*_URL`, `PROVIDER_*_URL`, `BOT_USERNAME` и `PUBLIC_BASE_URL`.
 
 Подробные контракты: [`docs/mobile-provider-profile.md`](docs/mobile-provider-profile.md),
 [`docs/incy-integration.md`](docs/incy-integration.md) и
-[`docs/freevpn-deeplinks.md`](docs/freevpn-deeplinks.md).
+[`docs/freevpn-deeplinks.md`](docs/freevpn-deeplinks.md). Совместимость
+приложений: [`docs/client-import.md`](docs/client-import.md).
 
 ### Управление мобильным пробным доступом в админке
 

@@ -47,6 +47,23 @@ from app.db.models import (
 from app.db.session import get_db
 
 
+def test_signed_urls_are_redacted_in_request_logs() -> None:
+    for path in (
+        "/v1/client/subscription/secret",
+        "/v1/client/import-apps/secret",
+        "/v1/client/import/secret",
+        "/v1/client/freevpn-import/secret",
+        "/v1/client/v2raytun-import/secret",
+        "/v1/client/amnezia-import/secret",
+        "/v1/client/amnezia-config/secret/2",
+        "/v1/client/router-awg/secret/2",
+        "/v1/client/qr/secret/2",
+        "/cabinet/access/secret",
+    ):
+        assert "secret" not in main_module.redacted_request_path(path)
+    assert main_module.redacted_request_path("/health") == "/health"
+
+
 class ControlPlaneTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -485,7 +502,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.client.cookies.clear()
         response = await self.client.get("/cabinet?payment=success")
 
-        self.assertEqual(401, response.status_code, response.text)
+        self.assertEqual(200, response.status_code, response.text)
         self.assertIn("freedom_payment_return_token", response.text)
         self.assertIn("/cabinet/payment-return", response.text)
         self.assertIn('class="login-shell"', response.text)
@@ -1466,7 +1483,13 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         self.assertEqual(200, profile.status_code, profile.text)
         payload = profile.json()
         self.assertEqual(activation.json()["trial_id"], payload["trial_id"])
-        self.assertEqual(str(activation.json()["device_id"]), payload["vpn_id"])
+        async with self.session_factory() as db:
+            device = await db.get(ClientDevice, activation.json()["device_id"])
+            vpn_client = await db.scalar(
+                select(VPNClient).where(VPNClient.user_id == device.user_id)
+                .order_by(VPNClient.id.desc())
+            )
+        self.assertEqual(str(vpn_client.id), payload["vpn_id"])
         self.assertEqual("Freedom VPN", payload["provider_name"])
         self.assertEqual("Service message", payload["announcement"])
         self.assertEqual(2, len(payload["nodes"]))
@@ -1582,20 +1605,73 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
             client = await db.get(VPNClient, self.client_id)
             token = incy_subscription_token(client.id, client.expires_at)
 
-        response = await self.client.get(f"/v1/client/import-apps/{token}")
+        profiles = [
+            {"name": "Швеция (Reality)", "config": "vless://id@se.example:443?type=tcp&security=reality"},
+            {"name": "Швеция (WebSocket)", "config": "vless://id@se.example:443?type=ws&security=tls"},
+            {"name": "Швеция (gRPC)", "config": "vless://id@se.example:443?type=grpc&security=reality"},
+            {"name": "Швеция (VMess)", "config": "vmess://" + base64.b64encode(json.dumps({"add": "se.example", "port": 443, "net": "ws"}).encode()).decode()},
+            {"name": "Швеция (Trojan)", "config": "trojan://secret@se.example:443?type=grpc"},
+            {"name": "Швеция (Shadowsocks)", "config": "ss://method:secret@se.example:443"},
+            {"name": "Швеция (xHTTP)", "config": "vless://id@se.example:443?type=xhttp&security=reality"},
+            {"name": "Швеция (AmneziaWG)", "config": "vpn://encoded#old-name", "wireguard_config": "[Interface]\nPrivateKey = test\n"},
+            {"name": "Россия (WireGuard)", "config": "wireguard://private@ru.example:51820?address=10.8.1.2/32&publickey=server"},
+            {"name": "Швеция (Hysteria2)", "config": "hysteria2://secret@se.example:443"},
+            {"name": "Швеция (TUIC)", "config": "tuic://id:secret@se.example:8444"},
+        ]
+        with patch("app.api.routes.client.all_subscription_profiles", new=AsyncMock(return_value=profiles)):
+            response = await self.client.get(f"/v1/client/import-apps/{token}")
 
         self.assertEqual(200, response.status_code, response.text)
         self.assertIn('lang="ru"', response.text)
         self.assertIn("Импорт конфигурации", response.text)
-        for route in (
-            f"/v1/client/import/{token}",
-            f"/v1/client/freevpn-import/{token}",
-            f"/v1/client/amnezia-import/{token}",
-            f"/v1/client/v2raytun-import/{token}",
-        ):
-            self.assertIn(route, response.text)
+        for scheme in ("incy://import/", "freevpn://import/", "v2raytun://import/"):
+            self.assertIn(scheme, response.text)
+        self.assertNotIn(f"/v1/client/amnezia-import/{token}", response.text)
+        self.assertIn("Швеция (Reality)", response.text)
+        for name in ("WebSocket", "gRPC", "VMess", "Trojan", "Shadowsocks", "Россия (WireGuard)"):
+            self.assertIn(name, response.text)
+        self.assertIn("Швеция (AmneziaWG)", response.text)
+        self.assertNotIn("Швеция (xHTTP)", response.text)
+        self.assertNotIn("Швеция (Hysteria2)", response.text)
+        self.assertNotIn("Швеция (TUIC)", response.text)
+        self.assertIn('data-config="vpn://encoded"', response.text)
+        self.assertIn(f"/v1/client/amnezia-config/{token}/7", response.text)
+        self.assertIn(f"/v1/client/amnezia-config/{token}/8", response.text)
         self.assertEqual("no-store", response.headers["cache-control"])
         self.assertEqual("no-referrer", response.headers["referrer-policy"])
+
+        with patch("app.api.routes.client.all_subscription_profiles", new=AsyncMock(return_value=profiles)):
+            android = await self.client.get(
+                f"/v1/client/import-apps/{token}",
+                headers={"user-agent": "Mozilla/5.0 (Linux; Android 14)"},
+            )
+        self.assertIn("scheme=incy;package=llc.itdev.incy", android.text)
+        self.assertIn("scheme=freevpn;package=org.freedomvpn.app", android.text)
+
+    async def test_amnezia_download_and_legacy_link(self) -> None:
+        async with self.session_factory() as db:
+            client = await db.get(VPNClient, self.client_id)
+            token = incy_subscription_token(client.id, client.expires_at)
+
+        profiles = [
+            {"name": "AmneziaWG", "config": "vpn://encoded", "wireguard_config": "[Interface]\nPrivateKey = awg\n"},
+            {"name": "WireGuard", "config": "wireguard://private@176.108.250.142:51820?address=10.8.1.2/32&publickey=server"},
+        ]
+        with patch("app.api.routes.client.all_subscription_profiles", new=AsyncMock(return_value=profiles)):
+            awg = await self.client.get(f"/v1/client/amnezia-config/{token}/0")
+            wg = await self.client.get(f"/v1/client/amnezia-config/{token}/1")
+            missing = await self.client.get(f"/v1/client/amnezia-config/{token}/2")
+        self.assertEqual(200, awg.status_code)
+        self.assertIn("PrivateKey = awg", awg.text)
+        self.assertIn('filename="amneziawg.conf"', awg.headers["content-disposition"])
+        self.assertEqual(200, wg.status_code)
+        self.assertIn("Endpoint = 176.108.250.142:51820", wg.text)
+        self.assertIn('filename="wireguard.conf"', wg.headers["content-disposition"])
+        self.assertEqual(404, missing.status_code)
+
+        legacy = await self.client.get(f"/v1/client/amnezia-import/{token}", follow_redirects=False)
+        self.assertEqual(302, legacy.status_code)
+        self.assertEqual(f"/v1/client/import-apps/{token}#amnezia", legacy.headers["location"])
 
     async def test_client_import_apps_page_rejects_invalid_token(self) -> None:
         response = await self.client.get("/v1/client/import-apps/not-a-token")
@@ -1662,7 +1738,7 @@ class ControlPlaneTests(IsolatedAsyncioTestCase):
         response = await self.client.get(f"/v1/client/subscription/{token}")
 
         self.assertEqual(200, response.status_code, response.text)
-        self.assertIn("#profile-title: Freedom VPN · de", response.text)
+        self.assertIn("#profile-title: Freedom VPN\n", response.text)
         self.assertIn("vless://", response.text)
         self.assertTrue(response.headers["profile-title"].startswith("base64:"))
         self.assertNotIn("Из-за блокировок РКН", response.text)
