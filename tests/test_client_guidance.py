@@ -32,5 +32,6 @@ def test_node_ip_certificate_renewal_uses_shortlived_profile() -> None:
     assert "renew_required=1" in script
     assert "-checkend" in script
     assert "current certificate has more than 3 days remaining" in script
+    assert "skipping issuance\"\n  exit 0" in script
     assert "--force" in renew_command
     assert "OnUnitActiveSec=2d" in timer

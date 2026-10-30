@@ -36,6 +36,7 @@ echo "[3xui-ip-cert] renewing certificate for ${ip_address}"
 
 renew_required=1
 if command -v openssl >/dev/null 2>&1 && [[ -s "${cert_dir}/fullchain.pem" ]] && \
+  [[ -s "${cert_dir}/privkey.pem" ]] && \
   openssl x509 -in "${cert_dir}/fullchain.pem" -checkend "$((3 * 24 * 60 * 60))" -noout >/dev/null 2>&1; then
   renew_required=0
 fi
@@ -63,6 +64,7 @@ if [[ "${renew_required}" -eq 1 ]]; then
   fi
 else
   echo "[3xui-ip-cert] current certificate has more than 3 days remaining; skipping issuance"
+  exit 0
 fi
 
 install -d -m 0750 "${cert_dir}"
