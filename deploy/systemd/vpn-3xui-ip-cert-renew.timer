@@ -1,9 +1,9 @@
 [Unit]
-Description=Run 3x-ui IP certificate renew every 3 days
+Description=Check 3x-ui IP certificate renewal every 2 days
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=3d
+OnUnitActiveSec=2d
 Persistent=true
 RandomizedDelaySec=15min
 

@@ -90,24 +90,27 @@ systemctl status x-ui --no-pager
 
 Автоматический renew выполняет node-скрипт. На каждой ноде задайте её IP и
 фактический каталог сертификата в `/etc/sysconfig/vpn-3xui-ip-cert-renew`;
-systemd timer запускает принудительное обновление каждые 3 дня:
+systemd timer проверяет сертификат каждые 2 дня и обновляет его, когда до срока
+ действия остаётся не больше 3 дней:
 
 ```bash
 sudo THREEXUI_IP_CERT_ADDRESS=89.127.212.239 \
   /usr/local/sbin/renew_3xui_ip_cert.sh
 ```
 
-Скрипт делает то же, что успешный пункт меню 3x-ui
-`SSL Certificate` → `Get SSL for IP Address` → `Force Renew`:
+Скрипт проверяет срок сертификата и обновляет его только при остатке не более
+3 дней. Более ранний запуск переустанавливает текущий сертификат и не создаёт
+новый ACME-заказ:
 
-1. вызывает `acme.sh --renew -d <ip> --ecc --force`, а если сертификат ещё не
-   выпускался — делает первичный `--issue --standalone`;
-2. устанавливает cert/key в `/root/cert/ip/`;
-3. перезапускает `x-ui`;
-4. пытается прописать эти пути в настройках панели и subscription-сервера;
-5. печатает `notBefore/notAfter` для быстрой проверки.
+1. использует профиль Let’s Encrypt `shortlived` (обязателен для IP SAN, срок
+   сертификата около 160 часов), а если сертификата ещё нет — выполняет
+   первичный `--issue --standalone`;
+2. устанавливает cert/key в настроенный каталог (по умолчанию `/root/cert/ip/`);
+3. выполняет заданный `THREEXUI_IP_CERT_RELOAD_CMD`, обычно перезапускает
+   `x-ui` и перечитывает Nginx;
+4. печатает `notBefore/notAfter` для быстрой проверки.
 
-Для запуска каждые 5 дней установите скрипт и готовые unit/timer на child-ноду:
+Для проверки каждые 2 дня установите скрипт и готовые unit/timer на child-ноду:
 
 ```bash
 install -m 0755 deploy/node/renew_3xui_ip_cert.sh /usr/local/sbin/renew_3xui_ip_cert.sh

@@ -4,12 +4,12 @@ set -euo pipefail
 # Renew the short-lived Let's Encrypt certificate issued directly for a 3x-ui
 # node public IP and reinstall it into the paths used by the panel.
 #
-# Run on the 3x-ui node as root. Designed for a systemd timer every 5 days.
+# Run on the 3x-ui node as root. IP certificates require the shortlived profile.
 
 ip_address="${THREEXUI_IP_CERT_ADDRESS:-$(curl -fsS --max-time 10 https://api.ipify.org || true)}"
 cert_dir="${THREEXUI_IP_CERT_DIR:-/root/cert/ip}"
 acme_home="${ACME_HOME:-/root/.acme.sh}"
-reload_cmd="${THREEXUI_IP_CERT_RELOAD_CMD:-systemctl restart x-ui}"
+reload_cmd="${THREEXUI_IP_CERT_RELOAD_CMD:-systemctl restart x-ui && systemctl reload nginx}"
 export HOME="${THREEXUI_IP_CERT_HOME:-/root}"
 
 if [[ -z "${ip_address}" ]]; then
@@ -34,21 +34,35 @@ echo "[3xui-ip-cert] renewing certificate for ${ip_address}"
   --set-default-ca \
   --server letsencrypt
 
-if ! "${acme_home}/acme.sh" \
-  --home "${acme_home}" \
-  --renew \
-  -d "${ip_address}" \
-  --ecc \
-  --force; then
-  echo "[3xui-ip-cert] renew failed; trying initial issue for ${ip_address}"
-  "${acme_home}/acme.sh" \
+renew_required=1
+if command -v openssl >/dev/null 2>&1 && [[ -s "${cert_dir}/fullchain.pem" ]] && \
+  openssl x509 -in "${cert_dir}/fullchain.pem" -checkend "$((3 * 24 * 60 * 60))" -noout >/dev/null 2>&1; then
+  renew_required=0
+fi
+
+if [[ "${renew_required}" -eq 1 ]]; then
+  if ! "${acme_home}/acme.sh" \
     --home "${acme_home}" \
-    --issue \
-    --standalone \
-    --server letsencrypt \
-    --keylength ec-256 \
+    --renew \
     -d "${ip_address}" \
-    --force
+    --ecc \
+    --certificate-profile shortlived \
+    --days 3 \
+    --force; then
+    echo "[3xui-ip-cert] renew failed; trying initial issue for ${ip_address}"
+    "${acme_home}/acme.sh" \
+      --home "${acme_home}" \
+      --issue \
+      --standalone \
+      --server letsencrypt \
+      --certificate-profile shortlived \
+      --days 3 \
+      --keylength ec-256 \
+      -d "${ip_address}" \
+      --force
+  fi
+else
+  echo "[3xui-ip-cert] current certificate has more than 3 days remaining; skipping issuance"
 fi
 
 install -d -m 0750 "${cert_dir}"
@@ -65,13 +79,6 @@ install -d -m 0750 "${cert_dir}"
 echo "[3xui-ip-cert] installed:"
 echo "[3xui-ip-cert]   cert: ${cert_dir}/fullchain.pem"
 echo "[3xui-ip-cert]   key:  ${cert_dir}/privkey.pem"
-
-if command -v x-ui >/dev/null 2>&1; then
-  # Keep panel/subscription certificate paths aligned with the menu action:
-  # SSL Certificate -> Get SSL for IP Address -> set certificate for panel.
-  x-ui setting -cert "${cert_dir}/fullchain.pem" -key "${cert_dir}/privkey.pem" >/dev/null 2>&1 || true
-  x-ui setting -subCert "${cert_dir}/fullchain.pem" -subKey "${cert_dir}/privkey.pem" >/dev/null 2>&1 || true
-fi
 
 if command -v openssl >/dev/null 2>&1; then
   openssl x509 -in "${cert_dir}/fullchain.pem" -noout -subject -issuer -dates || true
