@@ -172,6 +172,8 @@ class PaidNotificationTests(IsolatedAsyncioTestCase):
         for text in (telegram_text, email_text):
             self.assertEqual(1, text.count("/v1/client/import-apps/"))
             self.assertIn("Выбрать приложение для импорта:", text)
+            self.assertIn(f"Действует до: {expires_at:%Y-%m-%d %H:%M} UTC", text)
+            self.assertNotIn("+00:00 UTC", text)
             self.assertNotIn("/v1/client/import/", text)
             self.assertNotIn("/v1/client/freevpn-import/", text)
             self.assertNotIn("/v1/client/amnezia-import/", text)

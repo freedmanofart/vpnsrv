@@ -400,24 +400,31 @@ async def notify_payment_paid(db: AsyncSession, payment: Payment) -> None:
     client_notified = False
     if user is not None:
         plan_name = plan.name if plan else "Freedom VPN"
-        expires = f"\nДействует до: {subscription.expires_at} UTC" if subscription else ""
-        import_apps_text = ""
+        lines = [
+            "✅ Оплата Freedom VPN подтверждена.",
+            "",
+            f"Тариф: {plan_name}",
+            f"Сумма: {payment.amount:g} {payment.currency}",
+        ]
+        if subscription:
+            expiry = subscription.expires_at
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            lines.append(f"Действует до: {expiry.astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC")
         if import_apps_url:
-            import_apps_text = (
-                "\n\n📲 Выбрать приложение для импорта:\n"
-                f"{import_apps_url}\n"
-                "Откройте ссылку на устройстве и выберите приложение."
-            )
-        client_text = (
-            "✅ Оплата Freedom VPN подтверждена.\n\n"
-            f"Тариф: {plan_name}\n"
-            f"Сумма: {payment.amount:g} {payment.currency}"
-            f"{expires}\n\n"
-            f"{import_apps_text}"
-            "\n\n"
-            f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}\n\n"
-            "VPN-ключ и статус подписки доступны в web-кабинете."
-        )
+            lines.extend([
+                "",
+                "📲 Выбрать приложение для импорта:",
+                import_apps_url,
+                "Откройте ссылку на устройстве и выберите приложение.",
+            ])
+        lines.extend([
+            "",
+            f"Продлить подписку: {_user_cabinet_url(user, '?checkout=1#payment')}",
+            "",
+            "VPN-ключ и статус подписки доступны в web-кабинете.",
+        ])
+        client_text = "\n".join(lines)
         client_notified = await _send_client_telegram_message(user, client_text) or client_notified
         client_notified = await _send_client_email_message(
             user,
