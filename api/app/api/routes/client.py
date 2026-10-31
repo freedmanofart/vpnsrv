@@ -489,6 +489,20 @@ def wireguard_uri_config(uri: str) -> str | None:
     ])
     return "\n".join(lines) + "\n"
 
+
+def amnezia_import_key(profile: dict) -> str | None:
+    """Return a text key accepted by AmneziaVPN for one profile."""
+    uri = str(profile.get("config") or "")
+    scheme = urlsplit(uri).scheme.lower()
+    if scheme == "wireguard":
+        config = wireguard_uri_config(uri)
+        if not config:
+            return None
+        return f"vpn://{urlsafe_b64encode(config.encode()).decode().rstrip('=')}"
+    if scheme == "vpn":
+        return urlsplit(uri)._replace(fragment="").geturl()
+    return uri if amnezia_profile_allowed(uri) else None
+
 def _safe_profile_scalar(value: object) -> str:
     text = str(value or "").strip()
     if not text or "\n" in text or "\r" in text:
@@ -1613,10 +1627,10 @@ async def client_import_apps_page(
     options = []
     for index, profile in enumerate(profiles):
         config = str(profile.get("config") or "")
-        if not amnezia_profile_allowed(config):
+        import_key = amnezia_import_key(profile)
+        if not import_key:
             continue
         scheme = urlsplit(config).scheme.lower()
-        import_key = urlsplit(config)._replace(fragment="").geturl() if scheme == "vpn" else config
         download = (
             f"/v1/client/amnezia-config/{safe_token}/{index}"
             if scheme == "wireguard" or (scheme == "vpn" and profile.get("wireguard_config"))
@@ -1629,6 +1643,9 @@ async def client_import_apps_page(
             f'{html.escape(name)}</option>'
         )
     amnezia_content = (
+        '<p>Выберите конфигурацию. Amnezia VPN добавляет профили по одному: '
+        'скопируйте ключ и вставьте его в приложении. Для WireGuard и '
+        'AmneziaWG также можно скачать файл .conf.</p>'
         '<label for="amnezia-profile">Профиль</label>'
         f'<select id="amnezia-profile">{"".join(options)}</select>'
         '<div class="profile-actions">'
@@ -1644,8 +1661,6 @@ async def client_import_apps_page(
     function updateProfile() {
       if (!profile) return;
       const item = profile.selectedOptions[0];
-      const isFile = item.dataset.config.startsWith('wireguard://');
-      copy.hidden = isFile;
       download.hidden = !item.dataset.download;
       if (!download.hidden) download.href = item.dataset.download;
       document.getElementById('amnezia-result').textContent = '';

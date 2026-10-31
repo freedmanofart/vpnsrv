@@ -1,6 +1,8 @@
 from types import SimpleNamespace
+from base64 import urlsafe_b64decode
 
 from app.api.routes.client import (
+    amnezia_import_key,
     amnezia_profile_allowed,
     alternate_profile_name,
     deduplicate_profiles,
@@ -213,6 +215,19 @@ def test_wireguard_uri_converts_to_amnezia_import_file():
     assert "PublicKey = server-key\n" in config
     assert "Endpoint = 176.108.250.142:51820\n" in config
     assert wireguard_uri_config("vless://id@example.com:443") is None
+
+
+def test_wireguard_can_be_pasted_into_amnezia_as_text_key():
+    uri = (
+        "wireguard://private-key@176.108.250.142:51820"
+        "?address=10.8.1.2%2F32&publickey=server-key"
+    )
+    key = amnezia_import_key({"config": uri})
+    assert key.startswith("vpn://")
+    encoded = key.removeprefix("vpn://")
+    config = urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+    assert config == wireguard_uri_config(uri)
+    assert amnezia_import_key({"config": "vless://id@example.com:443?type=xhttp"}) is None
 
 
 def test_profile_deduplication_ignores_label_but_keeps_transport_parameters():
