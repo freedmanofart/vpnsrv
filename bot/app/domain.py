@@ -214,5 +214,9 @@ def subscription_import_actions(config: dict | None) -> list[tuple[str, str]]:
             "📲 Импорт в V2rayTUN",
             values.get("v2raytun_import_url"),
         ),
+        (
+            "📲 Импорт в Happ",
+            values.get("happ_telegram_import_url") or values.get("happ_import_url"),
+        ),
     ]
     return [(label, str(url)) for label, url in candidates if url]

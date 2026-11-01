@@ -36,6 +36,7 @@ from app.services.country import country_from_ip
 from app.services.vless import build_vless_url
 from app.services.incy import build_incy_import_link
 from app.services.freevpn import build_freevpn_import_link
+from app.services.happ import build_happ_import_link, is_happ_compatible_profile
 from app.core.cabinet_links import incy_subscription_token
 from app.api.routes.client import (
     alternate_client_profiles,
@@ -811,6 +812,13 @@ async def get_vpn_client_config(
         }
         for index, profile in enumerate(profiles)
     ]
+    happ_profiles = [
+        profile for profile in profiles if is_happ_compatible_profile(profile)
+    ]
+    happ_subscription_url = (
+        f"{settings.public_base_url.rstrip('/')}/v1/client/happ-subscription/"
+        f"{subscription_token}"
+    )
 
     return VPNClientConfigResponse(
         client_id=client.id,
@@ -839,6 +847,15 @@ async def get_vpn_client_config(
         v2raytun_import_url=(
             f"{settings.public_base_url.rstrip('/')}/v1/client/v2raytun-import/"
             f"{subscription_token}"
+        ),
+        happ_import_url=(
+            build_happ_import_link(happ_subscription_url) if happ_profiles else None
+        ),
+        happ_telegram_import_url=(
+            f"{settings.public_base_url.rstrip('/')}/v1/client/happ-import/"
+            f"{subscription_token}"
+            if happ_profiles
+            else None
         ),
         profiles=response_profiles,
     )

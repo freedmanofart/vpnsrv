@@ -146,6 +146,8 @@ _SECRET_PATH_PREFIXES = (
     "/v1/client/import/",
     "/v1/client/freevpn-import/",
     "/v1/client/v2raytun-import/",
+    "/v1/client/happ-import/",
+    "/v1/client/happ-subscription/",
     "/v1/client/amnezia-import/",
     "/v1/client/amnezia-config/",
     "/v1/client/router-awg/",

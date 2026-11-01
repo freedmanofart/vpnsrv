@@ -54,6 +54,7 @@ from app.schemas.payment import PaymentCreate
 from app.core.security import hash_password, require_api_access, verify_password
 from app.services.audit import write_audit
 from app.services.threexui import ThreeXUIClient, ThreeXUIError
+from app.services.happ import build_happ_import_link, is_happ_compatible_profile
 
 
 router = APIRouter(tags=["Web cabinet"])
@@ -917,6 +918,9 @@ async def cabinet(
     freevpn_import_url = ""
     amnezia_import_url = ""
     v2raytun_import_url = ""
+    happ_import_url = ""
+    happ_subscription_base = ""
+    happ_tokens: set[str] = set()
     subscription_token = ""
     node = None
     config = None
@@ -1011,6 +1015,20 @@ async def cabinet(
         freevpn_import_url = f"{base}/v1/client/freevpn-import/{subscription_token}"
         amnezia_import_url = f"{base}/v1/client/import-apps/{subscription_token}#amnezia"
         v2raytun_import_url = f"{base}/v1/client/v2raytun-import/{subscription_token}"
+        happ_subscription_base = f"{base}/v1/client/happ-subscription/"
+        happ_tokens = {
+            str(profile["token"])
+            for profile in vpn_profiles
+            if is_happ_compatible_profile(profile)
+        }
+        happ_token = next(
+            (str(profile["token"]) for profile in vpn_profiles if str(profile["token"]) in happ_tokens),
+            "",
+        )
+        if happ_token:
+            happ_import_url = build_happ_import_link(
+                f"{happ_subscription_base}{happ_token}"
+            )
     traffic_remaining_bytes = None
     traffic_limit_bytes = None
     traffic_used_bytes = None
@@ -1097,6 +1115,7 @@ async def cabinet(
         profile_options = "".join(
             f'<option value="{index}" data-config="{html.escape(profile["config"], quote=True)}" '
             f'data-token="{html.escape(profile["token"], quote=True)}" '
+            f'data-happ-supported="{str(profile["token"] in happ_tokens).lower()}" '
             f'data-profile-index="{profile["profile_index"]}" '
             f'data-server-flag="{html.escape(profile["server_flag"], quote=True)}" '
             f'data-server-name="{html.escape(profile["server_name"], quote=True)}">'
@@ -1112,16 +1131,24 @@ async def cabinet(
         qr_base = f"/v1/client/qr/{vpn_profiles[0]['token']}"
         key_block = (
             profile_selector
-            +
-            '<div class="key-row">'
-            f'<div class="key"><code id="vpn-key" data-value="{html.escape(selected_uri, quote=True)}" data-index="{vpn_profiles[0]["profile_index"]}" data-qr-base="{html.escape(qr_base, quote=True)}">{html.escape(scheme)}://••••••••••••</code></div>'
-            '<button class="button copy-button" type="button" onclick="copyKey(this)" aria-label="Скопировать VPN-ключ"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>Копировать ключ</button>'
-            '</div><button class="button qr-button" type="button" onclick="showVpnQr()">Показать QR</button><div class="import-buttons">'
-            f'<a id="incy-import" class="pay-button incy-import-button" href="{html.escape(incy_import_url, quote=True)}">Импортировать<br>в INCY</a>'
-            f'<a id="freevpn-import" class="pay-button freevpn-import-button" href="{html.escape(freevpn_import_url, quote=True)}">Импортировать<br>в Freedom VPN</a>'
-            f'<a id="amnezia-import" class="pay-button amnezia-import-button" href="{html.escape(amnezia_import_url, quote=True)}">Импортировать<br>в Amnezia VPN</a>'
-            f'<a id="v2raytun-import" class="pay-button v2raytun-import-button" href="{html.escape(v2raytun_import_url, quote=True)}">Импортировать<br>в V2rayTUN</a>'
-            '</div>'
+            + '<div class="key-row">'
+            + f'<div class="key"><code id="vpn-key" data-value="{html.escape(selected_uri, quote=True)}" data-index="{vpn_profiles[0]["profile_index"]}" data-qr-base="{html.escape(qr_base, quote=True)}">{html.escape(scheme)}://••••••••••••</code></div>'
+            + '<button class="button copy-button" type="button" onclick="copyKey(this)" aria-label="Скопировать VPN-ключ"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>Копировать ключ</button>'
+            + '</div><button class="button qr-button" type="button" onclick="showVpnQr()">Показать QR</button><div class="import-buttons">'
+            + f'<a id="incy-import" class="pay-button incy-import-button" href="{html.escape(incy_import_url, quote=True)}">Импортировать<br>в INCY</a>'
+            + f'<a id="freevpn-import" class="pay-button freevpn-import-button" href="{html.escape(freevpn_import_url, quote=True)}">Импортировать<br>в Freedom VPN</a>'
+            + f'<a id="amnezia-import" class="pay-button amnezia-import-button" href="{html.escape(amnezia_import_url, quote=True)}">Импортировать<br>в Amnezia VPN</a>'
+            + f'<a id="v2raytun-import" class="pay-button v2raytun-import-button" href="{html.escape(v2raytun_import_url, quote=True)}">Импортировать<br>в V2rayTUN</a>'
+            + (
+                f'<a id="happ-import" class="pay-button happ-import-button" '
+                f'data-subscription-base="{html.escape(happ_subscription_base, quote=True)}" '
+                f'href="{html.escape(happ_import_url, quote=True)}" '
+                f'{"hidden" if vpn_profiles[0]["token"] not in happ_tokens else ""}>'
+                'Импортировать<br>в Happ</a>'
+                if happ_tokens
+                else ""
+            )
+            + '</div>'
         )
     body = f"""
 <div class="cabinet-page">
@@ -1152,7 +1179,7 @@ async def cabinet(
 .cabinet-title p,.renew-heading p,.payment-method-copy small,.payment-method-copy span{{color:#5f6b82}}.status-badge{{color:#0f6f3d}}
 </style>
 <script>const planData={plan_json};const methodData={method_json};function durationLabel(days){{if(!days)return 'срок не указан';if(days%30===0){{const months=days/30;return months+' мес.'}}return days+' дн.'}}function selectedPlan(){{return planData[String(document.getElementById('order-plan').value)]}}function selectedMethod(){{const select=document.getElementById('order-method');const fallback=select?.selectedOptions?.[0];return methodData[select?.value]||{{name:fallback?.textContent||'Способ оплаты',url:fallback?.dataset?.url||'',manual:true}}}}function planTitle(plan){{if(!plan)return 'Тариф не выбран';return plan.name.toLocaleLowerCase().includes(plan.package.toLocaleLowerCase())?plan.name:`${{plan.package}} · ${{plan.name}}`}}function methodAppearance(method){{const value=`${{document.getElementById('order-method')?.value||''}} ${{method?.name||''}}`.toLocaleLowerCase();if(value.includes('крип')||value.includes('crypto'))return{{icon:'₿',hint:'Оплата криптовалютой'}};if(value.includes('мир')||value.includes('card')||value.includes('карт'))return{{icon:'▰',hint:'Оплата банковской картой'}};return{{icon:'▦',hint:'Оплата через приложение банка'}}}}function renderRenewCard(){{const plan=selectedPlan(),method=selectedMethod(),appearance=methodAppearance(method);document.getElementById('payment-method-name').textContent=method.name||'Способ оплаты';document.getElementById('payment-method-hint').textContent=appearance.hint;document.getElementById('payment-method-icon').textContent=appearance.icon;document.getElementById('renew-plan-name').textContent=planTitle(plan);document.getElementById('renew-amount').textContent=plan?`${{plan.price}} ${{plan.currency}}`:'—';document.getElementById('pay-button').textContent=plan?`Оплатить ${{plan.price}} ${{plan.currency}}`:'Выберите тариф'}}function renderPaymentSummary(targetId='payment-summary-modal'){{const target=document.getElementById(targetId);if(!target)return;const plan=selectedPlan(),method=selectedMethod();if(!plan){{target.innerHTML='<p class="error">Выберите подписку</p>';return}}target.innerHTML=`<h3>К оплате</h3><div class="summary-row"><span>Пакет</span><b>${{plan.package}}</b></div><div class="summary-row"><span>Тариф</span><b>${{plan.name}}</b></div><div class="summary-row"><span>Срок</span><b>${{durationLabel(plan.duration_days)}}</b></div><div class="summary-row summary-total"><span>Сумма</span><b>${{plan.price}} ${{plan.currency}}</b></div><div class="summary-row"><span>Способ оплаты</span><b>${{method.name}}</b></div>`}}document.getElementById('order-method')?.addEventListener('change',renderRenewCard);renderRenewCard();function openPayment(){{const out=document.getElementById('order-result');if(out){{out.className='';out.innerHTML=''}}renderPaymentSummary();if(!selectedPlan())return;document.getElementById('payment-modal').classList.add('open')}}function closePayment(){{document.getElementById('payment-modal').classList.remove('open')}}async function copyKey(button){{const key=document.getElementById('vpn-key')?.textContent||'';try{{await navigator.clipboard.writeText(key);button.textContent='Скопировано ✓'}}catch(error){{const range=document.createRange();range.selectNodeContents(document.getElementById('vpn-key'));const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);button.textContent='Ключ выделен'}}}}async function saveCabinetPassword(){{const out=document.getElementById('password-result'),input=document.getElementById('cabinet-password');out.className='';out.textContent='Сохраняем…';const r=await fetch('/web/password',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{password:input.value}})}});const d=await r.json();out.className=r.ok?'success':'error';out.textContent=r.ok?'Пароль сохранён. Теперь можно входить по email и паролю.':(d.detail||'Не удалось сохранить пароль');if(r.ok)input.value=''}}async function confirmPayment(){{await createOrder()}}async function createOrder(){{const out=document.getElementById('order-result');out.className='';out.textContent='Создаём платёж…';const r=await fetch('/web/payments/manual',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{plan_id:Number(document.getElementById('order-plan').value),method_code:document.getElementById('order-method').value}})}});const d=await r.json();if(!r.ok){{out.className='error';out.textContent=d.detail||'Ошибка';return}}if(d.redirect){{if(d.payment_return_token)sessionStorage.setItem('freedom_payment_return_token',d.payment_return_token);out.innerHTML='<p>Платёж создан. Открываем страницу оплаты…</p>';location.href=d.redirect;return}}out.className='';out.innerHTML=d.qr_url?`<p>Оплатите <b>${{d.amount}} ${{d.currency}}</b> выбранным способом, затем загрузите чек.</p><img src="${{d.qr_url}}" alt="QR для оплаты" style="max-width:260px;width:100%"><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`:`<p>${{d.instructions||'Оплатите по указанным реквизитам и загрузите чек.'}}</p><p><b>Сумма: ${{d.amount}} ${{d.currency}}</b></p><input id="receipt" type="file" accept="image/png,image/jpeg,image/webp,application/pdf"><button class="button primary" type="button" onclick="uploadReceipt(${{d.payment_id}})">Отправить чек</button>`}}async function uploadReceipt(id){{const file=document.getElementById('receipt').files[0];if(!file)return alert('Выберите файл чека');const data=await new Promise(ok=>{{const reader=new FileReader();reader.onload=()=>ok(reader.result.split(',')[1]);reader.readAsDataURL(file)}});const r=await fetch(`/web/payments/${{id}}/receipt`,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{filename:file.name,mime_type:file.type,data_base64:data}})}});const d=await r.json();if(r.ok){{alert('Чек отправлен. Платёж ожидает проверки администратора.');location.reload()}}else alert(d.detail||'Ошибка загрузки')}};if({str(checkout).lower()}){{openPayment()}}</script>"""
-    body += """<style>.profile-label{display:block;margin:15px 0 6px;color:#64708a;font-size:13px;font-weight:650}.profile-select{width:100%;min-height:44px;padding:10px 12px;border:1px solid #b9c8dd;border-radius:8px;background:#fff;color:#142039;font:inherit}.qr-button{width:100%;margin-top:10px;border-color:#245bff;color:#245bff}.import-buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}.import-buttons .pay-button{margin-top:0;text-align:center;white-space:normal;font-size:clamp(10px,2.7vw,15px);line-height:1.2;min-height:48px;padding:10px 8px}.incy-import-button,.freevpn-import-button,.amnezia-import-button,.v2raytun-import-button{text-decoration:none}.vpn-qr-card{text-align:center;width:min(390px,100%)}.vpn-qr-card img{display:block;width:min(300px,100%);aspect-ratio:1;margin:18px auto;background:#fff}.vpn-qr-card .actions{justify-content:center}</style>"""
+    body += """<style>.profile-label{display:block;margin:15px 0 6px;color:#64708a;font-size:13px;font-weight:650}.profile-select{width:100%;min-height:44px;padding:10px 12px;border:1px solid #b9c8dd;border-radius:8px;background:#fff;color:#142039;font:inherit}.qr-button{width:100%;margin-top:10px;border-color:#245bff;color:#245bff}.import-buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}.import-buttons .pay-button{margin-top:0;text-align:center;white-space:normal;font-size:clamp(10px,2.7vw,15px);line-height:1.2;min-height:48px;padding:10px 8px}.incy-import-button,.freevpn-import-button,.amnezia-import-button,.v2raytun-import-button,.happ-import-button{text-decoration:none}.vpn-qr-card{text-align:center;width:min(390px,100%)}.vpn-qr-card img{display:block;width:min(300px,100%);aspect-ratio:1;margin:18px auto;background:#fff}.vpn-qr-card .actions{justify-content:center}</style>"""
     body += """<script>
 const paymentIcons={
   qr:'<svg class="method-icon icon-qr" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h3v3h-3zM18 14h3v7h-3zM14 18h3v3h-3z"></path><path class="qr-cut" d="M5 5h3v3H5zM16 5h3v3h-3zM5 16h3v3H5z"></path></svg>',
@@ -1214,6 +1241,7 @@ function selectVpnProfile(){
   const select=document.getElementById('vpn-profile'),key=document.getElementById('vpn-key'),option=select?.selectedOptions?.[0];if(!key||!option)return;
   const token=option.dataset.token||'';key.dataset.value=option.dataset.config||'';key.dataset.index=option.dataset.profileIndex||'0';key.dataset.qrBase=`/v1/client/qr/${token}`;key.textContent=`${(key.dataset.value.split('://')[0]||'vpn')}://••••••••••••`;
   document.getElementById('incy-import').href=`/v1/client/import/${token}`;document.getElementById('freevpn-import').href=`/v1/client/freevpn-import/${token}`;document.getElementById('amnezia-import').href=`/v1/client/import-apps/${token}#amnezia`;document.getElementById('v2raytun-import').href=`/v1/client/v2raytun-import/${token}`;
+  const happ=document.getElementById('happ-import');if(happ){happ.hidden=option.dataset.happSupported!=='true';if(!happ.hidden)happ.href=`happ://add/${happ.dataset.subscriptionBase}${encodeURIComponent(token)}`}
   document.getElementById('vpn-server-flag').textContent=option.dataset.serverFlag||'🌐';document.getElementById('vpn-server-name').textContent=option.dataset.serverName||'VPN';
 }
 function showVpnQr(){

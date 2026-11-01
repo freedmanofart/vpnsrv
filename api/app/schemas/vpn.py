@@ -107,6 +107,8 @@ class VPNClientConfigResponse(BaseModel):
     freevpn_telegram_import_url: str | None = None
     amnezia_import_url: str | None = None
     v2raytun_import_url: str | None = None
+    happ_import_url: str | None = None
+    happ_telegram_import_url: str | None = None
     profiles: list[VPNClientProfileVariant] = Field(default_factory=list)
 
 

@@ -57,6 +57,7 @@ from app.services.threexui import ThreeXUIClient, ThreeXUIError
 from app.services.vless import build_vless_url
 from app.services.incy import build_incy_import_link
 from app.services.freevpn import build_freevpn_import_link
+from app.services.happ import build_happ_import_link, is_happ_compatible_profile
 from app.core.config import settings
 from app.core.cabinet_links import verify_incy_subscription_token
 
@@ -1577,7 +1578,9 @@ async def incy_subscription(
 
 
 def direct_import_links(token: str, user_agent: str) -> dict[str, str]:
-    subscription_url = f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/{token}"
+    base = settings.public_base_url.rstrip("/")
+    subscription_url = f"{base}/v1/client/subscription/{token}"
+    happ_subscription_url = f"{base}/v1/client/happ-subscription/{token}"
     encoded = quote(subscription_url, safe=":/?@&=,+-._~%")
     fallback = quote(subscription_url, safe="")
     if "android" in user_agent.lower():
@@ -1598,6 +1601,7 @@ def direct_import_links(token: str, user_agent: str) -> dict[str, str]:
         "incy": incy,
         "freevpn": freevpn,
         "v2raytun": f"v2raytun://import/{encoded}",
+        "happ": build_happ_import_link(happ_subscription_url),
     }
 
 
@@ -1616,6 +1620,9 @@ async def client_import_apps_page(
         ("V2rayTUN", "Импортировать подписку", links["v2raytun"]),
         ("Amnezia VPN", "Выбрать профиль ниже", "#amnezia"),
     )
+    profiles = await all_subscription_profiles(db, client, node, node_config)
+    if any(is_happ_compatible_profile(profile) for profile in profiles):
+        apps = apps[:2] + (("Happ", "Импортировать подписку", links["happ"]),) + apps[2:]
     buttons = "".join(
         f'<a class="app-option" href="{html.escape(url, quote=True)}">'
         f'<span><strong>{html.escape(name)}</strong>'
@@ -1623,7 +1630,6 @@ async def client_import_apps_page(
         "<span class=\"arrow\" aria-hidden=\"true\">&#8594;</span></a>"
         for name, description, url in apps
     )
-    profiles = await all_subscription_profiles(db, client, node, node_config)
     options = []
     for index, profile in enumerate(profiles):
         config = str(profile.get("config") or "")
@@ -1733,6 +1739,59 @@ async def client_import_apps_page(
             "cache-control": "no-store",
             "referrer-policy": "no-referrer",
         },
+    )
+
+
+@router.get("/happ-subscription/{token}", include_in_schema=False)
+async def happ_subscription(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    client, node, node_config = await _subscription_client_context(token, db)
+    profiles = await all_subscription_profiles(db, client, node, node_config)
+    compatible_profiles = [
+        profile for profile in profiles if is_happ_compatible_profile(profile)
+    ]
+    if not compatible_profiles:
+        raise HTTPException(status_code=422, detail="No Happ-compatible profiles")
+
+    title = re.sub(r"[\r\n]+", " ", settings.provider_name.strip())[:25] or "Freedom VPN"
+    configs = [str(profile.get("config") or "").strip() for profile in compatible_profiles]
+    body = "\n".join(
+        [f"#profile-title: {title}", "#profile-update-interval: 6", *configs, ""]
+    )
+    return Response(
+        content=body,
+        media_type="text/plain",
+        headers={
+            "profile-title": title,
+            "profile-update-interval": "6",
+            "cache-control": "no-store",
+            "content-disposition": 'inline; filename="freedom-vpn-happ.txt"',
+        },
+    )
+
+
+@router.get("/happ-import/{token}", include_in_schema=False)
+async def happ_import_redirect(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    client, node, node_config = await _subscription_client_context(token, db)
+    profiles = await all_subscription_profiles(db, client, node, node_config)
+    if not any(is_happ_compatible_profile(profile) for profile in profiles):
+        raise HTTPException(status_code=422, detail="No Happ-compatible profiles")
+
+    deep_link = direct_import_links(token, "")["happ"]
+    base = settings.public_base_url.rstrip("/")
+    subscription_url = f"{base}/v1/client/happ-subscription/{quote(token, safe='')}"
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Импорт в Happ</title><style>:root{{color-scheme:dark}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#101820;color:#f5f7fb;font:16px system-ui,sans-serif}}main{{width:min(420px,calc(100% - 40px));text-align:center}}p{{color:#b8c4d0;line-height:1.5}}a,button{{display:block;width:100%;box-sizing:border-box;margin-top:16px;padding:15px 20px;border:0;border-radius:8px;background:#2878ff;color:#fff;font:inherit;font-weight:700;text-decoration:none;cursor:pointer}}button{{background:#263747}}</style></head>
+<body><main><h1>Импорт конфигурации</h1><p>Добавьте подписку в Happ. После импорта список подключений будет обновляться по этой ссылке.</p><a href="{html.escape(deep_link, quote=True)}">Открыть в Happ</a><button id="copy" type="button">Скопировать ссылку подписки</button><p id="result" role="status" aria-live="polite"></p></main>
+<script>document.getElementById('copy').addEventListener('click',async()=>{{const out=document.getElementById('result'),value={json.dumps(subscription_url)};try{{await navigator.clipboard.writeText(value);out.textContent='Ссылка скопирована'}}catch(_){{const field=document.createElement('textarea');field.value=value;field.setAttribute('readonly','');field.style.position='fixed';field.style.opacity='0';document.body.appendChild(field);field.select();const copied=document.execCommand('copy');field.remove();out.textContent=copied?'Ссылка скопирована':'Не удалось скопировать ссылку'}}}});</script></body></html>""",
+        headers={"cache-control": "no-store", "referrer-policy": "no-referrer"},
     )
 
 

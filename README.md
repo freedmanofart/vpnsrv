@@ -135,7 +135,9 @@ FastAPI, если схема API не должна публиковаться. �
 | `GET` | `/v1/client/profile` | Профили, метаданные провайдера и актуальный трафик |
 | `POST` | `/v1/client/refresh` | Ротация device token и обновление срока устройства |
 | `GET` | `/v1/client/subscription/{token}` | Подписка с конфигурацией и метаданными для приложений |
-| `GET` | `/v1/client/import-apps/{token}` | Общая страница импорта с прямыми кнопками приложений и профилями Amnezia VPN |
+| `GET` | `/v1/client/import-apps/{token}` | Общая страница импорта: INCY, Freedom VPN, Happ, V2rayTUN и профили Amnezia VPN |
+| `GET` | `/v1/client/happ-subscription/{token}` | Автообновляемая подписка Happ с поддерживаемыми профилями |
+| `GET` | `/v1/client/happ-import/{token}` | HTTPS-переходник Happ для кнопки в Telegram |
 | `GET` | `/v1/client/amnezia-config/{token}/{index}` | Загрузка `.conf` для AmneziaWG или WireGuard |
 | `GET` | `/v1/client/import/{token}` | Совместимый со старыми сообщениями HTTPS-переходник INCY |
 | `GET` | `/v1/client/freevpn-import/{token}` | Совместимый со старыми сообщениями HTTPS-переходник Freedom VPN |
@@ -238,6 +240,17 @@ incy://import/https://<public-host>/v1/client/subscription/<signed-token>
 GET /v1/client/import-apps/<signed-token>
 ```
 
+Для Happ используется отдельная ссылка подписки, чтобы не передавать приложению
+неподдерживаемые протоколы:
+
+```text
+happ://add/https://<public-host>/v1/client/happ-subscription/<signed-token>
+```
+
+Подписка обновляется автоматически и включает VLESS, VMess, Trojan,
+Shadowsocks, SOCKS и Hysteria2. Кнопка в Telegram ведёт на HTTPS-переходник
+`/v1/client/happ-import/<signed-token>`.
+
 На ней кнопка INCY сразу запускает Android `intent://` или прямой `incy://`
 на других платформах. Старый `/v1/client/import/<signed-token>` остаётся
 HTTPS-переходником для ранее отправленных ссылок. Прямой `incy://` в
@@ -293,8 +306,9 @@ Content-Type: application/json
 - `GET /vpn/clients/{client_id}/config` с service Bearer возвращает
   `incy_subscription_url`, `incy_import_url`, `incy_telegram_import_url`,
   `freevpn_subscription_url`, `freevpn_import_url` и
-  `freevpn_telegram_import_url`.
-- Web-кабинет показывает импорт в INCY, Freedom VPN, Amnezia VPN и V2rayTUN.
+  `freevpn_telegram_import_url`, `happ_import_url` и
+  `happ_telegram_import_url`.
+- Web-кабинет показывает импорт в INCY, Freedom VPN, Happ, Amnezia VPN и V2rayTUN.
 - После подтверждённой покупки Telegram и email уведомления содержат одну
   общую HTTPS-ссылку для импорта и ссылку `Продлить подписку`.
 - В `ClientProfileResponse.provider` передаются `support_url` и `cabinet_url`,
