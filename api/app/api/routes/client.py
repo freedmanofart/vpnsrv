@@ -397,6 +397,11 @@ def alternate_profile_name(
     config = node_config.config if isinstance(node_config.config, dict) else {}
     labels = config.get("alternate_profile_labels", {})
     profile_key = clean_profile_name(link_name).upper()
+    exact_labels = config.get("alternate_profile_exact_labels", {})
+    if isinstance(exact_labels, dict) and profile_key:
+        exact_label = exact_labels.get(profile_key)
+        if isinstance(exact_label, str) and exact_label.strip():
+            return exact_label.strip()
     label = labels.get(profile_key) if isinstance(labels, dict) and profile_key else None
     if not label:
         label = labels.get(variant) if isinstance(labels, dict) and variant else None
