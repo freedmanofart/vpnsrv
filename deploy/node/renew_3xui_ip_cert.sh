@@ -9,7 +9,7 @@ set -euo pipefail
 ip_address="${THREEXUI_IP_CERT_ADDRESS:-$(curl -fsS --max-time 10 https://api.ipify.org || true)}"
 cert_dir="${THREEXUI_IP_CERT_DIR:-/root/cert/ip}"
 acme_home="${ACME_HOME:-/root/.acme.sh}"
-reload_cmd="${THREEXUI_IP_CERT_RELOAD_CMD:-systemctl restart x-ui && systemctl reload nginx}"
+reload_cmd="${THREEXUI_IP_CERT_RELOAD_CMD:-systemctl restart x-ui && systemctl reload nginx && if systemctl is-active --quiet kit-sub.service; then systemctl restart kit-sub.service; fi}"
 export HOME="${THREEXUI_IP_CERT_HOME:-/root}"
 
 if [[ -z "${ip_address}" ]]; then

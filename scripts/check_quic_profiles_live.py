@@ -7,6 +7,7 @@ connection results, and public egress addresses are printed.
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -92,11 +93,21 @@ def run_one(profile):
         check = subprocess.run([SING_BOX, "check", "-c", path], capture_output=True, text=True, timeout=10)
         if check.returncode:
             return "BAD_CONFIG", (check.stderr or check.stdout).splitlines()[-1][:180]
-        process = subprocess.Popen([SING_BOX, "run", "-c", path], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        log_path = os.path.join(directory, "client.log")
+        log = open(log_path, "w", encoding="utf-8")
+        os.fchmod(log.fileno(), 0o600)
+        process = subprocess.Popen([SING_BOX, "run", "-c", path], stdout=subprocess.DEVNULL, stderr=log, text=True)
+
+        def diagnostic():
+            with open(log_path, encoding="utf-8", errors="replace") as source:
+                lines = [line.strip() for line in source if line.strip()]
+            relevant = [line for line in lines if re.search(r"error|fail|certificate|auth|quic", line, re.I)]
+            value = (relevant or lines or [""])[-1]
+            return re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", value)[-240:]
         try:
             for _ in range(30):
                 if process.poll() is not None:
-                    return "CLIENT_EXIT", "local sing-box exited"
+                    return "CLIENT_EXIT", diagnostic() or "local sing-box exited"
                 try:
                     with socket.create_connection(("127.0.0.1", port), timeout=0.1):
                         break
@@ -107,8 +118,9 @@ def run_one(profile):
                 capture_output=True, text=True, timeout=17,
             )
             if request.returncode:
-                lines = (process.stderr.readline() if process.poll() is not None else "").strip()
-                return "FAIL", (request.stderr or lines or "curl failed").splitlines()[-1][:180]
+                detail = (request.stderr or "curl failed").splitlines()[-1][:180]
+                context = diagnostic()
+                return "FAIL", detail + (" | " + context if context else "")
             return "OK", request.stdout.strip()[:80]
         finally:
             process.terminate()
@@ -117,6 +129,7 @@ def run_one(profile):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.communicate()
+            log.close()
 
 
 def main():

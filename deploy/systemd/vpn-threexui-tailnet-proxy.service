@@ -1,0 +1,19 @@
+[Unit]
+Description=Expose master 3x-ui to the RU HTTPS relay over Tailscale
+After=network-online.target tailscaled.service x-ui.service
+Wants=network-online.target
+Requires=tailscaled.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP4-LISTEN:41027,bind=100.102.21.123,reuseaddr,fork,range=100.83.148.98/32 TCP4:127.0.0.1:41026
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

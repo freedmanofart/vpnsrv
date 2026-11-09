@@ -1,0 +1,9 @@
+{
+  "upstream": "https://github.com/itsnotkubrick/3X-UI_KIT",
+  "version": "1.2.1",
+  "upstream_cli_sha256": "4724fe36266727d960409a5db63dd5ce39fddfa42eb59878ad93ddf6c7e9219f",
+  "project_cli_sha256": "0d41482470911060e7f50c4904a0e1838940f06efbd8cacf53b80cda517d3497",
+  "kit_sub_sha256": "9007693ca44e5b1e881308722e9a3af5d9406b3469f043b23966a010bce28e42",
+  "signing_key": "SHA256:bNjI10eGVGjdFeDJnAHvUFi73rlrXVy6vKFf8lmNyxU",
+  "signature_verified": true
+}
