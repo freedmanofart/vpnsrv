@@ -776,7 +776,10 @@ async def attach_payment_receipt(payment_id: int, payload: dict) -> dict:
 
 
 async def get_vpn_client_config(client_id: int) -> dict:
-    async with api_client(base_url=API_URL, timeout=10.0) as client:
+    # Profile assembly may query the node panel for alternate cascade links.
+    # Keep this call tolerant of a slow control plane while the user-facing
+    # profile endpoint remains bounded by the API's own timeouts.
+    async with api_client(base_url=API_URL, timeout=30.0) as client:
         response = await client.get(f"/vpn/clients/{client_id}/config")
         response.raise_for_status()
         return response.json()

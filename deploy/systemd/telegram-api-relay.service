@@ -1,12 +1,12 @@
 [Unit]
-Description=Telegram API TLS relay for Docker services
+Description=Telegram API TLS relay for Docker services via RU node
 Wants=network-online.target
 After=network-online.target tailscaled.service docker.service
 Requires=tailscaled.service docker.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:443,bind=172.17.0.1,reuseaddr,fork TCP:100.117.14.51:18443
+ExecStart=/usr/bin/socat TCP-LISTEN:443,bind=172.17.0.1,reuseaddr,fork TCP:100.83.148.98:18443
 Restart=always
 RestartSec=2
 NoNewPrivileges=true

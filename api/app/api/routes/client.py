@@ -124,6 +124,18 @@ _AWG_OPTION_NAMES = {
 }
 
 
+def alternate_profiles_only(node_config: VPNNodeConfig) -> bool:
+    """Return whether direct links for this source node must stay private.
+
+    A node can still be used by the control plane for provisioning and traffic
+    counters while its direct listener is hidden from all client-facing
+    subscriptions.  The alternate node then becomes the only published path.
+    """
+
+    config = node_config.config if isinstance(node_config.config, dict) else {}
+    return config.get("profiles_via_alternate_only") is True
+
+
 def clean_profile_name(value: str) -> str:
     """Remove panel quota counters and internal client IDs from a link name."""
 
@@ -392,6 +404,10 @@ def alternate_profile_name(
         label = labels.get(str(port))
     name = localized_profile_name(node, uri, index)
     prefix = name.split(" (", 1)[0]
+    if not label:
+        configured_prefix = config.get("alternate_profile_prefix")
+        if isinstance(configured_prefix, str) and configured_prefix.strip():
+            label = configured_prefix.strip()
     display_variant = "Reality" if variant == "Reality 2" else variant
     if isinstance(label, str) and label.strip():
         label = label.strip()
@@ -616,6 +632,8 @@ async def kit_all_profiles_for_client(
     user_agent: str = "",
     accept: str = "",
 ) -> list[dict]:
+    if alternate_profiles_only(node_config):
+        return []
     bundle = await kit_subscription_for_client(client, node, node_config, user_agent, accept)
     profiles = []
     for uri in bundle["uris"] if bundle else []:
@@ -649,10 +667,15 @@ async def all_subscription_profiles(
     node: VPNNode,
     node_config: VPNNodeConfig,
 ) -> list[dict]:
-    profiles = await kit_all_profiles_for_client(
-        client, node, node_config, "Freedom VPN cabinet"
+    publish_alternates_only = alternate_profiles_only(node_config)
+    profiles = (
+        []
+        if publish_alternates_only
+        else await kit_all_profiles_for_client(
+            client, node, node_config, "Freedom VPN cabinet"
+        )
     )
-    if not profiles:
+    if not profiles and not publish_alternates_only:
         fallback = build_client_uri(client, node, node_config.config)
         if fallback:
             fallback = client_profile_uri_for_node(fallback, node)
@@ -728,22 +751,8 @@ async def alternate_client_profiles(
                     scheme = parsed.scheme.lower()
                     security = parse_qs(parsed.query).get("security", [""])[0].lower()
                     link_name = clean_profile_name(unquote(parsed.fragment)).upper()
-                    variant = None
-                    if scheme == "vless" and transport == "tcp" and security == "reality":
-                        variant = "Reality 2" if "REALITY-2" in link_name else "Reality"
-                    elif scheme == "vless" and transport in {"xhttp", "splithttp"}:
-                        variant = "xHTTP"
-                    elif scheme == "vless" and transport == "grpc":
-                        variant = "gRPC"
-                    elif scheme == "vless" and transport == "ws":
-                        variant = "VLESS WebSocket"
-                    elif scheme == "trojan" and transport == "grpc":
-                        variant = "Trojan gRPC"
-                    elif scheme == "vmess" and transport == "ws":
-                        variant = "VMess WebSocket"
-                    elif scheme in {"hysteria2", "hy2"}:
-                        variant = "Hysteria2"
-                    if variant is None:
+                    variant = profile_transport_variant(link, link_name)
+                    if variant == "":
                         variant = link_variants.get((scheme, link_port, transport))
                     if variant:
                         selected.append((link, variant, link_port, link_name))
@@ -1296,12 +1305,17 @@ async def client_profile(
                 pass
         upload_bytes += client_upload
         download_bytes += client_download
-        kit_subscription = await kit_subscription_for_client(
-            client,
-            node,
-            node_config,
-            request.headers.get("user-agent", ""),
-            request.headers.get("accept", ""),
+        publish_alternates_only = alternate_profiles_only(node_config)
+        kit_subscription = (
+            None
+            if publish_alternates_only
+            else await kit_subscription_for_client(
+                client,
+                node,
+                node_config,
+                request.headers.get("user-agent", ""),
+                request.headers.get("accept", ""),
+            )
         )
         profile_uris = (
             [
@@ -1311,7 +1325,9 @@ async def client_profile(
             ]
             if kit_subscription
             else []
-        ) or [uri]
+        )
+        if not profile_uris and not publish_alternates_only:
+            profile_uris = [uri]
         available = node_accepts_clients(node, management_mode="threexui")
         client_profile_count = 0
         for index, profile_uri in enumerate(profile_uris):
@@ -1372,6 +1388,15 @@ async def client_profile(
             )
             sensitive_configs.append(
                 {"node_id": profile["node_id"], "vpn_uri": profile["config"]}
+            )
+        if publish_alternates_only and not any(
+            profile.get("node_id") != client.node_id
+            and profile.get("protocol") in _FREEDOM_PROFILE_SCHEMES
+            for profile in alternate_profiles
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Cascade profiles are temporarily unavailable",
             )
     # 3x-ui is authoritative for a paid client's accumulated quota. A
     # renewal can increase the client's totalGB while the original plan and
@@ -1454,12 +1479,17 @@ async def incy_subscription(
         raise HTTPException(status_code=404, detail="VPN node configuration not found")
 
     uri = build_client_uri(client, node, node_config.config)
-    kit_subscription = await kit_subscription_for_client(
-        client,
-        node,
-        node_config,
-        request.headers.get("user-agent", ""),
-        request.headers.get("accept", ""),
+    publish_alternates_only = alternate_profiles_only(node_config)
+    kit_subscription = (
+        None
+        if publish_alternates_only
+        else await kit_subscription_for_client(
+            client,
+            node,
+            node_config,
+            request.headers.get("user-agent", ""),
+            request.headers.get("accept", ""),
+        )
     )
     alternate_profiles = await alternate_client_profiles(db, client, node_config)
     profile_title = settings.provider_name.strip() or "Freedom VPN"
@@ -1520,10 +1550,12 @@ async def incy_subscription(
         body = "\n".join(app_uris) + "\n"
     else:
         uri = client_profile_uri_for_node(uri, node)
-        app_uris = [
-            normalized_profile_uri(uri, 0, profile_name_for_node(node, node_config, uri, 0))
-        ]
-        seen_profile_ids = {profile_identity(uri)}
+        app_uris = []
+        seen_profile_ids = set()
+        if not publish_alternates_only:
+            direct_name = profile_name_for_node(node, node_config, uri, 0)
+            app_uris = [normalized_profile_uri(uri, 0, direct_name)]
+            seen_profile_ids.add(profile_identity(uri))
         for profile in alternate_profiles:
             if not incy_profile_allowed(
                 profile["config"], profile.get("region"), profile.get("name")
@@ -1537,6 +1569,11 @@ async def incy_subscription(
                 normalized_profile_uri(
                     profile["config"], len(app_uris), profile.get("name")
                 )
+            )
+        if not app_uris:
+            raise HTTPException(
+                status_code=503,
+                detail="Cascade profiles are temporarily unavailable",
             )
         body = "\n".join(
             [

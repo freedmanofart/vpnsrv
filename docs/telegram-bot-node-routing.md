@@ -1,7 +1,7 @@
-# Маршрутизация Telegram-бота через VPN-ноду
+# Маршрутизация Telegram-бота через каскад RU → SE
 
-Этот runbook описывает перенос сетевого канала Telegram API с master-сервера на
-дочернюю ноду и откат обратно на прямое подключение.
+Этот runbook описывает резервный HTTPS-маршрут Telegram API через каскад
+master → RU → SE и откат обратно на прямое подключение.
 
 Контейнеры `vpn-bot` и `vpn-api` остаются на master. Через ноду передаётся только
 TLS-трафик к `api.telegram.org`; VPN-трафик клиентов и остальные исходящие
@@ -18,7 +18,11 @@ master 172.17.0.1:443
         |
         | Tailscale
         v
-sw-node2 100.117.14.51:18443
+ru-node 100.83.148.98:18443
+        |
+        | Tailscale
+        v
+sw-node 100.117.14.51:18443
         |
         v
 api.telegram.org:443
@@ -27,15 +31,25 @@ api.telegram.org:443
 Текущие параметры:
 
 - master: `freedomvpn`;
-- child: `sw-node2`, публичный IP `89.127.212.239`;
-- Tailscale IP child: `100.117.14.51`;
-- порт реле на child: `18443`;
+- RU-нода: публичный IP `176.108.250.142`;
+- Tailscale IP RU: `100.83.148.98`;
+- SE-нода: публичный IP `89.127.212.239`;
+- Tailscale IP SE: `100.117.14.51`;
+- порт каскадного реле на RU и upstream на SE: `18443`;
 - Docker host-gateway master: `172.17.0.1`;
-- systemd-unit child: `telegram-api-upstream.service`;
+- systemd-unit SE: `telegram-api-upstream.service`;
+- systemd-unit RU: `telegram-api-ru-relay.service`;
 - systemd-unit master: `telegram-api-relay.service`.
 
-Не привязывать реле к `0.0.0.0`. Upstream должен слушать только Tailscale-IP,
-а master relay только локальный Docker gateway.
+Не привязывать реле к `0.0.0.0`. Upstream и RU-реле слушают только
+Tailscale-IP, а master relay — только локальный Docker gateway.
+
+## MTProto и Telegram Bot API
+
+MTProto — протокол пользовательского Telegram-клиента и ссылка `tg://proxy`.
+Telegram Bot API работает поверх HTTPS и не умеет подключаться через MTProto
+ссылку. Поэтому бот использует TLS-реле с сохранением HTTPS, а пользовательский
+MTProto-профиль настраивается отдельно и не подменяет маршрут Bot API.
 
 ## Когда нужен перенос
 
@@ -85,7 +99,7 @@ ss -ltn 'sport = :18443'
 Ожидаемые адреса для текущей конфигурации: `100.117.14.51` на child и
 `172.17.0.1` на master.
 
-### 2. Настроить вышестоящее соединение на дочерней ноде
+### 2. Настроить вышестоящее соединение на SE-нóде
 
 Создать `/etc/systemd/system/telegram-api-upstream.service`:
 
@@ -119,7 +133,35 @@ systemctl is-enabled telegram-api-upstream.service
 systemctl is-active telegram-api-upstream.service
 ```
 
-### 3. Настроить ретранслятор на главной ноде
+### 3. Настроить каскадное реле на RU-нóде
+
+Создать `/etc/systemd/system/telegram-api-ru-relay.service`:
+
+```ini
+[Unit]
+Description=Telegram API TLS relay from master to the Sweden upstream via RU
+Wants=network-online.target
+After=network-online.target tailscaled.service
+Requires=tailscaled.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:18443,bind=100.83.148.98,reuseaddr,fork TCP:100.117.14.51:18443
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Открыть порт только для Tailscale-IP master (`100.102.21.123`), затем включить
+unit. Публичный TCP-порт RU для этого реле не открывается.
+
+### 4. Настроить ретранслятор на главной ноде
 
 Создать `/etc/systemd/system/telegram-api-relay.service`:
 
@@ -132,7 +174,7 @@ Requires=tailscaled.service docker.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:443,bind=172.17.0.1,reuseaddr,fork TCP:100.117.14.51:18443
+ExecStart=/usr/bin/socat TCP-LISTEN:443,bind=172.17.0.1,reuseaddr,fork TCP:100.83.148.98:18443
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
@@ -160,7 +202,7 @@ curl -sS --connect-timeout 8 --max-time 12 \
 
 До изменения контейнеров последняя команда должна вернуть `302`.
 
-### 4. Направить API и бота на локальный ретранслятор
+### 5. Направить API и бота на локальный ретранслятор
 
 В `/home/freedman/vpn-service/docker-compose.yml` добавить в сервисы `api` и
 `bot`:
@@ -189,7 +231,7 @@ docker exec vpn-bot getent ahostsv4 api.telegram.org
 docker exec vpn-api getent ahostsv4 api.telegram.org
 ```
 
-### 5. Проверить работу
+### 6. Проверить работу
 
 Проверка Telegram API без вывода токена:
 
@@ -220,14 +262,15 @@ curl -fsS http://127.0.0.1:8000/health
 
 ## Перенос канала на другую ноду
 
-1. Проверить прямой доступ новой ноды к `https://api.telegram.org`.
+1. Проверить прямой доступ новой SE-ноды к `https://api.telegram.org`.
 2. Узнать её Tailscale IP командой `tailscale ip -4`.
-3. Установить на новой ноде upstream-unit, заменив адрес в `bind=`.
-4. Запустить upstream и проверить доступность порта с master.
-5. На master заменить IP после `TCP:` в `telegram-api-relay.service`.
-6. Выполнить `systemctl daemon-reload` и перезапустить relay.
-7. Проверить `getMe`, polling и обработку `/start`.
-8. Только после успешной проверки отключить upstream на старой ноде.
+3. Установить на новой SE-нóде upstream-unit, заменив адрес в `bind=`.
+4. На RU заменить адрес после `TCP:` в `telegram-api-ru-relay.service`.
+5. Запустить RU-реле и проверить его доступность с master.
+6. На master заменить адрес после `TCP:` в `telegram-api-relay.service`.
+7. Выполнить `systemctl daemon-reload` и перезапустить relay.
+8. Проверить `getMe`, polling и обработку `/start`.
+9. Только после успешной проверки отключить старый upstream.
 
 Пример проверки порта новой ноды с master:
 
@@ -298,7 +341,13 @@ docker logs vpn-bot --since 2m 2>&1 | tail -50
 systemctl disable --now telegram-api-relay.service
 ```
 
-На child:
+На RU:
+
+```bash
+systemctl disable --now telegram-api-ru-relay.service
+```
+
+На SE:
 
 ```bash
 systemctl disable --now telegram-api-upstream.service
@@ -317,7 +366,12 @@ journalctl -u telegram-api-relay.service --since -30m --no-pager
 ss -ltn 'sport = :443'
 tailscale ping 100.117.14.51
 
-# child
+# RU
+systemctl status telegram-api-ru-relay.service --no-pager
+journalctl -u telegram-api-ru-relay.service --since -30m --no-pager
+ss -ltn 'sport = :18443'
+
+# SE
 systemctl status telegram-api-upstream.service --no-pager
 journalctl -u telegram-api-upstream.service --since -30m --no-pager
 ss -ltn 'sport = :18443'

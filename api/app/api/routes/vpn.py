@@ -40,6 +40,7 @@ from app.services.happ import build_happ_import_link, is_happ_compatible_profile
 from app.core.cabinet_links import incy_subscription_token
 from app.api.routes.client import (
     alternate_client_profiles,
+    alternate_profiles_only,
     client_profile_uri_for_node,
     deduplicate_profiles,
     kit_all_profiles_for_client,
@@ -785,13 +786,18 @@ async def get_vpn_client_config(
         f"{settings.public_base_url.rstrip('/')}/v1/client/subscription/"
         f"{subscription_token}"
     )
-    profiles = await kit_all_profiles_for_client(
-        client,
-        node,
-        node_config,
-        "Freedom VPN bot",
+    publish_alternates_only = alternate_profiles_only(node_config)
+    profiles = (
+        []
+        if publish_alternates_only
+        else await kit_all_profiles_for_client(
+            client,
+            node,
+            node_config,
+            "Freedom VPN bot",
+        )
     )
-    if not profiles:
+    if not profiles and not publish_alternates_only:
         profiles = [
             {
                 "name": localized_profile_name(node, vless_url, 0),
@@ -803,6 +809,11 @@ async def get_vpn_client_config(
         ]
     profiles.extend(await alternate_client_profiles(db, client, node_config))
     profiles = deduplicate_profiles(profiles)
+    if publish_alternates_only and not profiles:
+        raise HTTPException(
+            status_code=503,
+            detail="Cascade profiles are temporarily unavailable",
+        )
     response_profiles = [
         {
             "index": index,
@@ -823,7 +834,7 @@ async def get_vpn_client_config(
     return VPNClientConfigResponse(
         client_id=client.id,
         protocol=client.protocol,
-        config=vless_url,
+        config=profiles[0]["config"],
         expires_at=client.expires_at,
         incy_subscription_url=subscription_url,
         incy_import_url=build_incy_import_link(subscription_url),
