@@ -520,6 +520,20 @@ def amnezia_import_key(profile: dict) -> str | None:
         return urlsplit(uri)._replace(fragment="").geturl()
     return uri if amnezia_profile_allowed(uri) else None
 
+
+def wireguard_config_from_vpn_uri(uri: str) -> str | None:
+    """Decode a KIT vpn:// or amneziawg:// key into a .conf payload."""
+
+    scheme = urlsplit(uri).scheme.lower()
+    if scheme not in {"vpn", "amneziawg", "awg"}:
+        return None
+    try:
+        encoded = uri.split("://", 1)[1].split("#", 1)[0]
+        return urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+    except (IndexError, UnicodeDecodeError, ValueError):
+        return None
+
+
 def _safe_profile_scalar(value: object) -> str:
     text = str(value or "").strip()
     if not text or "\n" in text or "\r" in text:
@@ -608,6 +622,8 @@ async def kit_amnezia_profiles_for_client(
     node: VPNNode,
     node_config: VPNNodeConfig,
 ) -> list[dict]:
+    if alternate_profiles_only(node_config):
+        return []
     try:
         target = await kit_subscription_target(client, node, node_config)
         if target is None:
@@ -784,6 +800,11 @@ async def alternate_client_profiles(
                     "region": node.region,
                     "available": node_accepts_clients(node, management_mode="threexui"),
                     "latency_ms": node.latency_ms,
+                    "wireguard_config": (
+                        wireguard_uri_config(uri)
+                        if urlsplit(uri).scheme.lower() == "wireguard"
+                        else wireguard_config_from_vpn_uri(uri)
+                    ),
                 }
             )
     return profiles
@@ -1966,7 +1987,11 @@ async def router_awg_config(
     db: AsyncSession = Depends(get_db),
 ):
     client, node, node_config = await _subscription_client_context(token, db)
-    profiles = await kit_amnezia_profiles_for_client(client, node, node_config)
+    profiles = [
+        profile
+        for profile in await all_subscription_profiles(db, client, node, node_config)
+        if profile.get("wireguard_config")
+    ]
     if profile_index < 0 or profile_index >= len(profiles):
         raise HTTPException(status_code=404, detail="AmneziaWG profile not found")
     profile = profiles[profile_index]
